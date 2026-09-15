@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -109,6 +110,92 @@ func TestArchiveOutputIsDeterministic(t *testing.T) {
 
 	if !bytes.Equal(first, second) {
 		t.Fatal("archives with identical content and timestamps differ")
+	}
+}
+
+func TestAddStreamWritesIncrementallyAndRemovesFailedFile(t *testing.T) {
+	t.Parallel()
+	builder, err := New(filepath.Join(t.TempDir(), "bundle.tar.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer builder.Close()
+
+	if err := builder.AddStream("streamed.jsonl", func(writer io.Writer) error {
+		if _, err := writer.Write([]byte("first\n")); err != nil {
+			return err
+		}
+		_, err := writer.Write([]byte("second\n"))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expectedError := errors.New("stream failed")
+	if err := builder.AddStream("failed.jsonl", func(writer io.Writer) error {
+		if _, err := writer.Write([]byte("partial\n")); err != nil {
+			return err
+		}
+		return expectedError
+	}); !errors.Is(err, expectedError) {
+		t.Fatalf("expected stream error, got %v", err)
+	}
+
+	archivePath, err := builder.Finalize(Manifest{
+		CollectorVersion: "test",
+		GeneratedAt:      time.Date(2026, 9, 15, 6, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := readArchive(t, archivePath)
+	if string(files["streamed.jsonl"]) != "first\nsecond\n" {
+		t.Fatalf("unexpected streamed content: %q", files["streamed.jsonl"])
+	}
+	if _, exists := files["failed.jsonl"]; exists {
+		t.Fatal("archive contains partial failed stream")
+	}
+}
+
+func TestFinalizeDoesNotOverwriteConcurrentOutput(t *testing.T) {
+	t.Parallel()
+	outputPath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	first, err := New(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := New(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if err := first.Add("source.txt", []byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Add("source.txt", []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{
+		CollectorVersion: "test",
+		GeneratedAt:      time.Date(2026, 9, 15, 6, 0, 0, 0, time.UTC),
+	}
+	if _, err := first.Finalize(manifest); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := second.Finalize(manifest); err == nil {
+		t.Fatal("expected concurrent output publication to fail")
+	}
+	current, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(current, original) {
+		t.Fatal("existing output was overwritten")
 	}
 }
 

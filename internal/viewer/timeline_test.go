@@ -1,7 +1,9 @@
 package viewer
 
 import (
+	"fmt"
 	"testing"
+	"time"
 )
 
 func TestReadTimelineOrdersRecordsAcrossSources(t *testing.T) {
@@ -107,6 +109,50 @@ func TestReadTimelineReservesCapacityAcrossContainerGroups(t *testing.T) {
 	if !groups["qodo / platform-1 / main"] ||
 		!groups["zitadel / zitadel-1 / main"] {
 		t.Fatalf("container group was crowded out: %+v", response.Records)
+	}
+}
+
+func TestTimelineCandidateStoreBoundsUniqueHostGroups(t *testing.T) {
+	t.Parallel()
+	const limit = 100
+	store := newTimelineCandidateStore(limit)
+	baseTime := time.Date(2026, 9, 15, 7, 0, 0, 0, time.UTC)
+	for index := 0; index < 50_000; index++ {
+		store.add(timelineCandidate{
+			record: TimelineRecord{
+				Lane:  "Browser",
+				Group: fmt.Sprintf("host-%d.example", index),
+			},
+			timestamp: baseTime.Add(time.Duration(index) * time.Second),
+		})
+	}
+
+	if store.trackedGroups != limit {
+		t.Fatalf("unexpected tracked group count: %d", store.trackedGroups)
+	}
+	if len(store.groups) > limit+1 {
+		t.Fatalf("timeline group storage is unbounded: %d", len(store.groups))
+	}
+	if store.retained > store.maxCandidates {
+		t.Fatalf(
+			"timeline candidate storage exceeded its bound: %d > %d",
+			store.retained,
+			store.maxCandidates,
+		)
+	}
+	totalCapacity := 0
+	for _, candidates := range store.groups {
+		totalCapacity += cap(*candidates)
+	}
+	if totalCapacity > store.maxCandidates {
+		t.Fatalf(
+			"timeline candidate capacity exceeded its bound: %d > %d",
+			totalCapacity,
+			store.maxCandidates,
+		)
+	}
+	if selected := selectFairTimelineCandidates(store.groups, limit); len(selected) != limit {
+		t.Fatalf("unexpected selected candidate count: %d", len(selected))
 	}
 }
 

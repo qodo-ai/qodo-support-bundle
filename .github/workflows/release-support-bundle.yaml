@@ -3,30 +3,32 @@ name: Release support bundle
 on:
   release:
     types: [published]
+  pull_request:
+    paths:
+      - .github/workflows/release-support-bundle.yaml
+      - tools/qodo-support-bundle/**
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing GitHub release tag to receive the binaries
+        description: Existing release tag; dispatch this workflow from the same tag ref
         required: true
         type: string
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
-  build:
+  validate:
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    permissions:
+      contents: read
     steps:
-      - name: Checkout release source
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - name: Checkout source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: tools/qodo-support-bundle/go.mod
           cache: false
@@ -35,16 +37,76 @@ jobs:
         working-directory: tools/qodo-support-bundle
         run: make test
 
-      - name: Validate release version
+      - name: Validate release build
+        working-directory: tools/qodo-support-bundle
+        run: |
+          set -euo pipefail
+          make release VERSION=0.0.0-ci
+          cd dist
+          sha256sum --check checksums.sha256
+          test -f qodo-support-bundle-linux-amd64
+          test -f qodo-support-bundle-linux-arm64
+          test -f qodo-support-bundle-darwin-amd64
+          test -f qodo-support-bundle-darwin-arm64
+          test -f qodo-support-bundle-windows-amd64.exe
+
+  release:
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: tools/qodo-support-bundle/go.mod
+          cache: false
+
+      - name: Validate release source
         id: version
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           VERSION="${RELEASE_TAG#v}"
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
             echo "Unsupported release tag: $RELEASE_TAG" >&2
             exit 1
           fi
+          RELEASE_TAG_NAME="$(gh release view "$RELEASE_TAG" --json tagName --jq .tagName)"
+          if [[ "$RELEASE_TAG_NAME" != "$RELEASE_TAG" ]]; then
+            echo "GitHub release tag mismatch: expected $RELEASE_TAG, got $RELEASE_TAG_NAME" >&2
+            exit 1
+          fi
+          TAG_SHA="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [[ "$HEAD_SHA" != "$TAG_SHA" ]]; then
+            echo "Checked-out HEAD $HEAD_SHA does not match $RELEASE_TAG at $TAG_SHA" >&2
+            exit 1
+          fi
+          if [[ "${{ github.sha }}" != "$TAG_SHA" ]]; then
+            echo "Workflow revision ${{ github.sha }} does not match $RELEASE_TAG at $TAG_SHA." >&2
+            echo "For workflow_dispatch, run this workflow with --ref $RELEASE_TAG." >&2
+            exit 1
+          fi
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        working-directory: tools/qodo-support-bundle
+        run: make test
 
       - name: Build release binaries
         working-directory: tools/qodo-support-bundle
@@ -52,8 +114,13 @@ jobs:
           VERSION: ${{ steps.version.outputs.value }}
         run: make release VERSION="$VERSION"
 
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: tools/qodo-support-bundle/dist/*
+
       - name: Store workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: qodo-support-bundle-${{ env.RELEASE_TAG }}
           path: tools/qodo-support-bundle/dist/

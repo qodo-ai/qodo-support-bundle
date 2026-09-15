@@ -103,6 +103,85 @@ func TestExtractEnforcesTotalSizeLimit(t *testing.T) {
 	}
 }
 
+func TestExtractCountsDirectoryHeadersAgainstMemberLimit(t *testing.T) {
+	t.Parallel()
+	archivePath := filepath.Join(t.TempDir(), "directories.tar.gz")
+	writeTestArchiveEntries(t, archivePath, []testArchiveEntry{
+		{name: "one", typeFlag: tar.TypeDir},
+		{name: "two", typeFlag: tar.TypeDir},
+		{name: "three", typeFlag: tar.TypeDir},
+	})
+	limits := defaultTestLimits()
+	limits.MaxFiles = 2
+
+	_, err := Extract(archivePath, limits)
+
+	if err == nil || !strings.Contains(err.Error(), "archive members") {
+		t.Fatalf("expected archive member limit error, got %v", err)
+	}
+}
+
+func TestExtractCountsImplicitDirectoriesAgainstNodeLimit(t *testing.T) {
+	t.Parallel()
+	archivePath := filepath.Join(t.TempDir(), "implicit-directories.tar.gz")
+	writeTestArchiveEntries(t, archivePath, []testArchiveEntry{
+		{name: "one/two/data.jsonl", content: "{}\n", typeFlag: tar.TypeReg},
+	})
+	limits := defaultTestLimits()
+	limits.MaxFiles = 2
+
+	_, err := Extract(archivePath, limits)
+
+	if err == nil || !strings.Contains(err.Error(), "filesystem nodes") {
+		t.Fatalf("expected filesystem node limit error, got %v", err)
+	}
+}
+
+func TestExtractRejectsDuplicateDirectoryHeaders(t *testing.T) {
+	t.Parallel()
+	archivePath := filepath.Join(t.TempDir(), "duplicate-directories.tar.gz")
+	writeTestArchiveEntries(t, archivePath, []testArchiveEntry{
+		{name: "duplicate", typeFlag: tar.TypeDir},
+		{name: "duplicate", typeFlag: tar.TypeDir},
+	})
+
+	_, err := Extract(archivePath, defaultTestLimits())
+
+	if err == nil || !strings.Contains(err.Error(), "duplicate archive member") {
+		t.Fatalf("expected duplicate member error, got %v", err)
+	}
+}
+
+func TestExtractRejectsExcessivePathDepth(t *testing.T) {
+	t.Parallel()
+	archivePath := filepath.Join(t.TempDir(), "deep-path.tar.gz")
+	path := strings.Repeat("directory/", maxArchivePathDepth) + "data.jsonl"
+	writeTestArchiveEntries(t, archivePath, []testArchiveEntry{
+		{name: path, content: "{}\n", typeFlag: tar.TypeReg},
+	})
+
+	_, err := Extract(archivePath, defaultTestLimits())
+
+	if err == nil || !strings.Contains(err.Error(), "components") {
+		t.Fatalf("expected path depth error, got %v", err)
+	}
+}
+
+func TestExtractRejectsExcessivePathLength(t *testing.T) {
+	t.Parallel()
+	archivePath := filepath.Join(t.TempDir(), "long-path.tar.gz")
+	path := strings.Repeat("a", maxArchivePathBytes+1)
+	writeTestArchiveEntries(t, archivePath, []testArchiveEntry{
+		{name: path, content: "{}\n", typeFlag: tar.TypeReg},
+	})
+
+	_, err := Extract(archivePath, defaultTestLimits())
+
+	if err == nil || !strings.Contains(err.Error(), "bytes") {
+		t.Fatalf("expected path length error, got %v", err)
+	}
+}
+
 func defaultTestLimits() ExtractionLimits {
 	return ExtractionLimits{
 		MaxFiles:          100,
@@ -113,23 +192,42 @@ func defaultTestLimits() ExtractionLimits {
 
 func writeTestArchive(t *testing.T, path string, files map[string]string) {
 	t.Helper()
+	entries := make([]testArchiveEntry, 0, len(files))
+	for name, content := range files {
+		entries = append(entries, testArchiveEntry{
+			name:     name,
+			content:  content,
+			typeFlag: tar.TypeReg,
+		})
+	}
+	writeTestArchiveEntries(t, path, entries)
+}
+
+type testArchiveEntry struct {
+	name     string
+	content  string
+	typeFlag byte
+}
+
+func writeTestArchiveEntries(t *testing.T, path string, entries []testArchiveEntry) {
+	t.Helper()
 	file, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	gzipWriter := gzip.NewWriter(file)
 	tarWriter := tar.NewWriter(gzipWriter)
-	for name, content := range files {
+	for _, entry := range entries {
 		header := &tar.Header{
-			Name:     name,
+			Name:     entry.name,
 			Mode:     0o600,
-			Size:     int64(len(content)),
-			Typeflag: tar.TypeReg,
+			Size:     int64(len(entry.content)),
+			Typeflag: entry.typeFlag,
 		}
 		if err := tarWriter.WriteHeader(header); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tarWriter.Write([]byte(content)); err != nil {
+		if _, err := tarWriter.Write([]byte(entry.content)); err != nil {
 			t.Fatal(err)
 		}
 	}

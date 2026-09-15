@@ -54,9 +54,13 @@ cluster. Explicit namespace scope remains available for shared clusters:
 
 ```bash
 qodo-support-bundle collect \
-  --namespaces qodo-platform,platform-client,zitadel \
+  --namespace <release-namespace> \
   ~/Downloads/qodo-login.har
 ```
+
+Set `<release-namespace>` to the namespace where the Qodo Helm release is
+installed, commonly `qodo-onprem`. Qodo Platform, Portal, and Zitadel are
+workloads in that release namespace, not separate namespaces.
 
 `--namespace`, `--namespaces`, and `--all-namespaces` override automatic
 application discovery. `--har` remains supported as an alternative to the
@@ -146,6 +150,18 @@ Verify integrity after extracting:
 tar -xzf qodo-support-bundle.tar.gz -C ./qodo-support-bundle
 cd ./qodo-support-bundle
 shasum -a 256 -c checksums.sha256
+```
+
+The embedded checksums detect accidental corruption within a bundle, but they
+do not authenticate who created it or where it originated. Transfer bundles
+only through an approved authenticated channel.
+
+Verify the build provenance of an official release binary after downloading it
+from GitHub:
+
+```bash
+gh attestation verify ./qodo-support-bundle-linux-amd64 \
+  --repo Codium-ai/qodo-platform
 ```
 
 ## Security boundaries

@@ -20,6 +20,9 @@ const (
 	DefaultMaxFiles          = 10_000
 	DefaultMaxExtractedBytes = int64(2 << 30)
 	DefaultMaxFileBytes      = int64(512 << 20)
+	maxArchivePathBytes      = 4 << 10
+	maxArchivePathDepth      = 64
+	tarOverheadPerMember     = int64(8 << 10)
 )
 
 // ExtractionLimits bound archive processing before any local viewer starts.
@@ -29,19 +32,20 @@ type ExtractionLimits struct {
 	MaxFileBytes      int64
 }
 
-// File describes a verified regular file from a support bundle.
+// File describes a checksum-consistent regular file from a support bundle.
 type File struct {
 	Path string `json:"path"`
 	Size int64  `json:"size"`
 }
 
-// ExtractedBundle is a verified bundle in an owner-only temporary directory.
+// ExtractedBundle contains a structurally valid, checksum-consistent bundle.
 type ExtractedBundle struct {
 	Root  string
 	Files []File
 }
 
-// Extract validates, bounds, extracts, and verifies a support bundle.
+// Extract validates, bounds, extracts, and checks a bundle for internal consistency.
+// Checksums detect corruption but do not authenticate who created the bundle.
 func Extract(bundlePath string, limits ExtractionLimits) (*ExtractedBundle, error) {
 	if err := validateLimits(limits); err != nil {
 		return nil, err
@@ -60,7 +64,7 @@ func Extract(bundlePath string, limits ExtractionLimits) (*ExtractedBundle, erro
 		_ = os.RemoveAll(root)
 		return nil, err
 	}
-	if err := verifyChecksums(root, extracted); err != nil {
+	if err := checkChecksumConsistency(root, extracted); err != nil {
 		_ = os.RemoveAll(root)
 		return nil, err
 	}
@@ -84,7 +88,7 @@ func (bundle *ExtractedBundle) Close() error {
 	return os.RemoveAll(root)
 }
 
-// Resolve returns the verified local path for a bundle member.
+// Resolve returns the checksum-consistent local path for a bundle member.
 func (bundle *ExtractedBundle) Resolve(path string) (string, bool) {
 	cleaned, err := safeArchivePath(path)
 	if err != nil {
@@ -118,38 +122,62 @@ func extractArchive(
 		return nil, fmt.Errorf("open bundle gzip stream: %w", err)
 	}
 	defer gzipReader.Close()
-	tarReader := tar.NewReader(gzipReader)
+	maximumTarBytes, err := maximumTarStreamBytes(limits)
+	if err != nil {
+		return nil, err
+	}
+	limitedArchive := &io.LimitedReader{R: gzipReader, N: maximumTarBytes + 1}
+	tarReader := tar.NewReader(limitedArchive)
 
 	extracted := make(map[string]extractedFile)
+	seenMembers := make(map[string]struct{})
+	createdNodes := make(map[string]struct{})
 	var totalBytes int64
+	memberCount := 0
 	for {
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
+			if limitedArchive.N <= 0 {
+				return nil, fmt.Errorf(
+					"bundle archive exceeds %d decompressed bytes",
+					maximumTarBytes,
+				)
+			}
 			return nil, fmt.Errorf("read bundle archive: %w", err)
+		}
+		memberCount++
+		if memberCount > limits.MaxFiles {
+			return nil, fmt.Errorf(
+				"bundle exceeds %d archive members",
+				limits.MaxFiles,
+			)
 		}
 		path, err := safeArchivePath(header.Name)
 		if err != nil {
 			return nil, err
 		}
+		if _, duplicate := seenMembers[path]; duplicate {
+			return nil, fmt.Errorf("duplicate archive member: %q", path)
+		}
+		seenMembers[path] = struct{}{}
 		target := filepath.Join(root, filepath.FromSlash(path))
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o700); err != nil {
-				return nil, fmt.Errorf("create viewer directory %q: %w", path, err)
+			if err := createArchiveDirectories(
+				root,
+				path,
+				createdNodes,
+				limits.MaxFiles,
+			); err != nil {
+				return nil, err
 			}
 			continue
 		case tar.TypeReg, tar.TypeRegA:
 		default:
 			return nil, fmt.Errorf("unsupported archive member type for %q", path)
-		}
-		if _, exists := extracted[path]; exists {
-			return nil, fmt.Errorf("duplicate archive member: %q", path)
-		}
-		if len(extracted) >= limits.MaxFiles {
-			return nil, fmt.Errorf("bundle exceeds %d files", limits.MaxFiles)
 		}
 		if header.Size < 0 || header.Size > limits.MaxFileBytes {
 			return nil, fmt.Errorf(
@@ -164,8 +192,19 @@ func extractArchive(
 				limits.MaxExtractedBytes,
 			)
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-			return nil, fmt.Errorf("create viewer directory for %q: %w", path, err)
+		parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(path)))
+		if parent != "." {
+			if err := createArchiveDirectories(
+				root,
+				parent,
+				createdNodes,
+				limits.MaxFiles,
+			); err != nil {
+				return nil, err
+			}
+		}
+		if err := reserveArchiveNode(path, createdNodes, limits.MaxFiles); err != nil {
+			return nil, err
 		}
 		targetFile, err := os.OpenFile(
 			target,
@@ -204,7 +243,58 @@ func extractArchive(
 	return extracted, nil
 }
 
-func verifyChecksums(root string, extracted map[string]extractedFile) error {
+func createArchiveDirectories(
+	root string,
+	path string,
+	createdNodes map[string]struct{},
+	maximumNodes int,
+) error {
+	parts := strings.Split(path, "/")
+	current := ""
+	for _, part := range parts {
+		if current == "" {
+			current = part
+		} else {
+			current += "/" + part
+		}
+		if _, exists := createdNodes[current]; exists {
+			continue
+		}
+		if err := reserveArchiveNode(current, createdNodes, maximumNodes); err != nil {
+			return err
+		}
+		target := filepath.Join(root, filepath.FromSlash(current))
+		if err := os.Mkdir(target, 0o700); err != nil {
+			return fmt.Errorf("create viewer directory %q: %w", current, err)
+		}
+	}
+	return nil
+}
+
+func reserveArchiveNode(
+	path string,
+	createdNodes map[string]struct{},
+	maximumNodes int,
+) error {
+	if _, exists := createdNodes[path]; exists {
+		return fmt.Errorf("archive member conflicts with existing path: %q", path)
+	}
+	if len(createdNodes) >= maximumNodes {
+		return fmt.Errorf("bundle exceeds %d filesystem nodes", maximumNodes)
+	}
+	createdNodes[path] = struct{}{}
+	return nil
+}
+
+func maximumTarStreamBytes(limits ExtractionLimits) (int64, error) {
+	if int64(limits.MaxFiles) > (int64(^uint64(0)>>1)-limits.MaxExtractedBytes)/
+		tarOverheadPerMember {
+		return 0, errors.New("archive limits are too large")
+	}
+	return limits.MaxExtractedBytes + int64(limits.MaxFiles)*tarOverheadPerMember, nil
+}
+
+func checkChecksumConsistency(root string, extracted map[string]extractedFile) error {
 	checksumFile, exists := extracted["checksums.sha256"]
 	if !exists {
 		return errors.New("bundle does not contain checksums.sha256")
@@ -291,6 +381,13 @@ func safeArchivePath(path string) (string, error) {
 	if path == "" || strings.Contains(path, "\\") || strings.ContainsRune(path, '\x00') {
 		return "", fmt.Errorf("unsafe archive path: %q", path)
 	}
+	if len(path) > maxArchivePathBytes {
+		return "", fmt.Errorf(
+			"archive path exceeds %d bytes: %q",
+			maxArchivePathBytes,
+			path,
+		)
+	}
 	if strings.HasPrefix(path, "/") {
 		return "", fmt.Errorf("unsafe archive path: %q", path)
 	}
@@ -300,6 +397,13 @@ func safeArchivePath(path string) (string, error) {
 	}
 	if volume := filepath.VolumeName(filepath.FromSlash(path)); volume != "" {
 		return "", fmt.Errorf("unsafe archive path: %q", path)
+	}
+	if depth := len(strings.Split(cleaned, "/")); depth > maxArchivePathDepth {
+		return "", fmt.Errorf(
+			"archive path exceeds %d components: %q",
+			maxArchivePathDepth,
+			path,
+		)
 	}
 	return cleaned, nil
 }

@@ -9,6 +9,8 @@ import (
 
 const Replacement = "[REDACTED]"
 
+const sensitiveAssignmentKeyPattern = `access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|password|passwd|secret|client[_-]?secret|client[_-]?assertion|authorization|proxy[_-]?authorization|cookie|set-cookie|credentials?|private[_-]?key|email|first[_-]?name|last[_-]?name|full[_-]?name|phone|address|ssn|mrn`
+
 var sensitiveKeys = map[string]struct{}{
 	"accesstoken":        {},
 	"address":            {},
@@ -63,19 +65,19 @@ func New() *Redactor {
 			},
 			{
 				expression: regexp.MustCompile(
-					`(?i)((?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|password|passwd|secret|client[_-]?secret|authorization|cookie|set-cookie|email|first[_-]?name|last[_-]?name|full[_-]?name|phone|address|ssn|mrn)[ \t]*["']?[ \t]*[:=][ \t]*)"(?:\\.|[^"])*"`,
+					`(?i)((?:` + sensitiveAssignmentKeyPattern + `)[ \t]*["']?[ \t]*[:=][ \t]*)"(?:\\.|[^"])*"`,
 				),
 				replacement: `${1}"` + Replacement + `"`,
 			},
 			{
 				expression: regexp.MustCompile(
-					`(?i)((?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|password|passwd|secret|client[_-]?secret|authorization|cookie|set-cookie|email|first[_-]?name|last[_-]?name|full[_-]?name|phone|address|ssn|mrn)[ \t]*["']?[ \t]*[:=][ \t]*)'(?:\\.|[^'])*'`,
+					`(?i)((?:` + sensitiveAssignmentKeyPattern + `)[ \t]*["']?[ \t]*[:=][ \t]*)'(?:\\.|[^'])*'`,
 				),
 				replacement: `${1}'` + Replacement + `'`,
 			},
 			{
 				expression: regexp.MustCompile(
-					`(?i)((?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|password|passwd|secret|client[_-]?secret|authorization|cookie|set-cookie|email|first[_-]?name|last[_-]?name|full[_-]?name|phone|address|ssn|mrn)[ \t]*["']?[ \t]*[:=][ \t]*["']?)[^"',;&\s]+`,
+					`(?i)((?:` + sensitiveAssignmentKeyPattern + `)[ \t]*["']?[ \t]*[:=][ \t]*["']?)[^"',;&\s]+`,
 				),
 				replacement: `${1}` + Replacement,
 			},
@@ -125,6 +127,7 @@ func IsSensitiveKey(key string) bool {
 	}
 	for _, marker := range []string{
 		"authorization",
+		"clientassertion",
 		"cookie",
 		"credential",
 		"email",
@@ -134,6 +137,8 @@ func IsSensitiveKey(key string) bool {
 		"mrn",
 		"password",
 		"phone",
+		"privatekey",
+		"proxyauthorization",
 		"secret",
 		"session",
 		"ssn",

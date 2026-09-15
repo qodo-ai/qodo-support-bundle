@@ -228,20 +228,23 @@ func runCollect(
 	}
 	defer builder.Close()
 
-	var browserRecords bytes.Buffer
 	_, _ = fmt.Fprintf(
 		stderr,
 		"Importing HAR: %s\n",
 		filepath.Base(redactor.Text(*harPath)),
 	)
-	harStats, err := har.Import(
-		*harPath,
-		&browserRecords,
-		*maxHARBytes,
-		*maxHAREntries,
-		redactor,
-	)
-	if err != nil {
+	var harStats har.Stats
+	if err := builder.AddStream("browser/network.jsonl", func(writer io.Writer) error {
+		var importErr error
+		harStats, importErr = har.Import(
+			*harPath,
+			writer,
+			*maxHARBytes,
+			*maxHAREntries,
+			redactor,
+		)
+		return importErr
+	}); err != nil {
 		_, _ = fmt.Fprintln(stderr, redactor.Text(err.Error()))
 		return 1
 	}
@@ -250,10 +253,6 @@ func runCollect(
 		"Imported %d browser requests.\n",
 		harStats.EntriesWritten,
 	)
-	if err := builder.Add("browser/network.jsonl", browserRecords.Bytes()); err != nil {
-		_, _ = fmt.Fprintln(stderr, redactor.Text(err.Error()))
-		return 1
-	}
 
 	kubernetesReport, kubernetesErr := kubernetes.Collect(
 		ctx,

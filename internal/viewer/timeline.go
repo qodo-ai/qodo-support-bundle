@@ -11,9 +11,14 @@ import (
 )
 
 const (
-	defaultTimelineLimit    = 1_500
-	maxTimelineLimit        = 3_000
-	maxTimelineScannedBytes = int64(512 << 20)
+	defaultTimelineLimit       = 1_500
+	maxTimelineLimit           = 3_000
+	maxTimelineScannedBytes    = int64(512 << 20)
+	maxTimelineGroups          = 1_024
+	maxTimelineCandidatesScale = 4
+	timelineRebalanceScale     = 2
+	maxTimelineGroupCandidates = 500
+	timelineOverflowGroup      = "[other groups]"
 )
 
 // TimelineRecord is a lightweight record positioned in the swimlane view.
@@ -60,7 +65,7 @@ func readTimeline(
 	}
 	normalizedQuery := strings.ToLower(strings.TrimSpace(query))
 	normalizedFilter := strings.ToLower(strings.TrimSpace(filter))
-	candidatesByGroup := make(map[string]*timelineRecordHeap)
+	candidates := newTimelineCandidateStore(limit)
 	laneCounts := make(map[string]int)
 	var earliest time.Time
 	var latest time.Time
@@ -130,7 +135,7 @@ func readTimeline(
 				},
 				timestamp: timestamp,
 			}
-			addTimelineCandidate(candidatesByGroup, candidate, limit)
+			candidates.add(candidate)
 		}
 		scanErr := scanner.Err()
 		if closeErr := file.Close(); closeErr != nil {
@@ -145,7 +150,7 @@ func readTimeline(
 		}
 	}
 
-	sortedCandidates := selectFairTimelineCandidates(candidatesByGroup, limit)
+	sortedCandidates := selectFairTimelineCandidates(candidates.groups, limit)
 	sort.Slice(sortedCandidates, func(left int, right int) bool {
 		if sortedCandidates[left].timestamp.Equal(sortedCandidates[right].timestamp) {
 			if sortedCandidates[left].record.Path == sortedCandidates[right].record.Path {
@@ -169,22 +174,49 @@ func readTimeline(
 	return response, nil
 }
 
-func addTimelineCandidate(
-	candidatesByGroup map[string]*timelineRecordHeap,
-	candidate timelineCandidate,
-	limit int,
-) {
+type timelineCandidateStore struct {
+	groups        map[string]*timelineRecordHeap
+	groupLimit    int
+	maxGroups     int
+	maxCandidates int
+	rebalanceTo   int
+	retained      int
+	trackedGroups int
+}
+
+func newTimelineCandidateStore(limit int) *timelineCandidateStore {
+	return &timelineCandidateStore{
+		groups:        make(map[string]*timelineRecordHeap),
+		groupLimit:    min(limit, maxTimelineGroupCandidates),
+		maxGroups:     min(limit, maxTimelineGroups),
+		maxCandidates: limit * maxTimelineCandidatesScale,
+		rebalanceTo:   limit * timelineRebalanceScale,
+	}
+}
+
+func (store *timelineCandidateStore) add(candidate timelineCandidate) {
 	groupKey := candidate.record.Lane + "\x00" + candidate.record.Group
-	candidates := candidatesByGroup[groupKey]
+	candidates := store.groups[groupKey]
 	if candidates == nil {
-		groupLimit := min(limit, 500)
-		groupHeap := make(timelineRecordHeap, 0, groupLimit)
+		if store.trackedGroups >= store.maxGroups {
+			groupKey = candidate.record.Lane + "\x00" + timelineOverflowGroup
+			candidates = store.groups[groupKey]
+		} else {
+			store.trackedGroups++
+		}
+	}
+	if candidates == nil {
+		groupHeap := make(timelineRecordHeap, 0)
 		heap.Init(&groupHeap)
 		candidates = &groupHeap
-		candidatesByGroup[groupKey] = candidates
+		store.groups[groupKey] = candidates
 	}
-	if candidates.Len() < cap(*candidates) {
+	if candidates.Len() < store.groupLimit {
+		if store.retained >= store.maxCandidates {
+			store.rebalance(store.rebalanceTo)
+		}
 		heap.Push(candidates, candidate)
+		store.retained++
 		return
 	}
 	if (*candidates)[0].timestamp.Before(candidate.timestamp) {
@@ -193,11 +225,55 @@ func addTimelineCandidate(
 	}
 }
 
+func (store *timelineCandidateStore) rebalance(limit int) {
+	targets := fairTimelineTargets(store.groups, limit)
+	store.retained = 0
+	for groupKey, candidates := range store.groups {
+		for candidates.Len() > targets[groupKey] {
+			heap.Pop(candidates)
+		}
+		compacted := make(timelineRecordHeap, candidates.Len())
+		copy(compacted, *candidates)
+		*candidates = compacted
+		heap.Init(candidates)
+		store.retained += candidates.Len()
+	}
+}
+
 func selectFairTimelineCandidates(
 	candidatesByGroup map[string]*timelineRecordHeap,
 	limit int,
 ) []timelineCandidate {
 	groupKeys := orderedTimelineCandidateGroups(candidatesByGroup)
+	targets := fairTimelineTargetsForGroups(candidatesByGroup, groupKeys, limit)
+	selected := make([]timelineCandidate, 0, limit)
+	for _, groupKey := range groupKeys {
+		candidates := *candidatesByGroup[groupKey]
+		sort.Slice(candidates, func(left int, right int) bool {
+			return candidates[left].timestamp.Before(candidates[right].timestamp)
+		})
+		start := len(candidates) - targets[groupKey]
+		selected = append(selected, candidates[start:]...)
+	}
+	return selected
+}
+
+func fairTimelineTargets(
+	candidatesByGroup map[string]*timelineRecordHeap,
+	limit int,
+) map[string]int {
+	return fairTimelineTargetsForGroups(
+		candidatesByGroup,
+		orderedTimelineCandidateGroups(candidatesByGroup),
+		limit,
+	)
+}
+
+func fairTimelineTargetsForGroups(
+	candidatesByGroup map[string]*timelineRecordHeap,
+	groupKeys []string,
+	limit int,
+) map[string]int {
 	targets := make(map[string]int, len(groupKeys))
 	remaining := limit
 	for remaining > 0 {
@@ -217,17 +293,7 @@ func selectFairTimelineCandidates(
 			break
 		}
 	}
-
-	selected := make([]timelineCandidate, 0, limit-remaining)
-	for _, groupKey := range groupKeys {
-		candidates := *candidatesByGroup[groupKey]
-		sort.Slice(candidates, func(left int, right int) bool {
-			return candidates[left].timestamp.Before(candidates[right].timestamp)
-		})
-		start := len(candidates) - targets[groupKey]
-		selected = append(selected, candidates[start:]...)
-	}
-	return selected
+	return targets
 }
 
 func orderedTimelineCandidateGroups(

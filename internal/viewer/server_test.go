@@ -15,15 +15,17 @@ import (
 	archivebundle "github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/bundle"
 )
 
+const testViewerToken = "test-viewer-token"
+
 func TestHandlerServesManifestWithSecurityHeaders(t *testing.T) {
 	t.Parallel()
 	bundle := testExtractedBundle(t, map[string]string{
 		"manifest.json": `{"collection":{"status":"complete"}}`,
 	})
-	handler := newHandler(bundle, "/session-token", "127.0.0.1:4321")
+	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken)
 	request := viewerRequest(
 		http.MethodGet,
-		"http://127.0.0.1:4321/session-token/api/manifest",
+		"http://127.0.0.1:4321/api/manifest",
 	)
 	response := httptest.NewRecorder()
 
@@ -42,16 +44,50 @@ func TestHandlerServesManifestWithSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestHandlerRequiresTokenOnlyForAPIs(t *testing.T) {
+	t.Parallel()
+	bundle := testExtractedBundle(t, map[string]string{
+		"manifest.json": `{}`,
+	})
+	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken)
+
+	indexRequest := viewerRequest(http.MethodGet, "http://127.0.0.1:4321/")
+	indexRequest.Header.Del("Authorization")
+	indexResponse := httptest.NewRecorder()
+	handler.ServeHTTP(indexResponse, indexRequest)
+	if indexResponse.Code != http.StatusOK {
+		t.Fatalf("public index returned %d", indexResponse.Code)
+	}
+
+	apiRequest := viewerRequest(
+		http.MethodGet,
+		"http://127.0.0.1:4321/api/manifest",
+	)
+	apiRequest.Header.Del("Authorization")
+	apiResponse := httptest.NewRecorder()
+	handler.ServeHTTP(apiResponse, apiRequest)
+	if apiResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated API returned %d", apiResponse.Code)
+	}
+
+	apiRequest.Header.Set("Authorization", "Bearer wrong-token")
+	wrongTokenResponse := httptest.NewRecorder()
+	handler.ServeHTTP(wrongTokenResponse, apiRequest)
+	if wrongTokenResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong-token API returned %d", wrongTokenResponse.Code)
+	}
+}
+
 func TestHandlerRejectsWrongHostAndNonLoopbackClient(t *testing.T) {
 	t.Parallel()
 	bundle := testExtractedBundle(t, map[string]string{
 		"manifest.json": `{}`,
 	})
-	handler := newHandler(bundle, "/session-token", "127.0.0.1:4321")
+	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken)
 
 	wrongHost := viewerRequest(
 		http.MethodGet,
-		"http://attacker.invalid/session-token/api/manifest",
+		"http://attacker.invalid/api/manifest",
 	)
 	wrongHost.Host = "attacker.invalid"
 	wrongHostResponse := httptest.NewRecorder()
@@ -62,7 +98,7 @@ func TestHandlerRejectsWrongHostAndNonLoopbackClient(t *testing.T) {
 
 	remoteRequest := viewerRequest(
 		http.MethodGet,
-		"http://127.0.0.1:4321/session-token/api/manifest",
+		"http://127.0.0.1:4321/api/manifest",
 	)
 	remoteRequest.RemoteAddr = "192.0.2.10:1234"
 	remoteResponse := httptest.NewRecorder()
@@ -80,10 +116,10 @@ func TestHandlerFiltersRecords(t *testing.T) {
 {"request":{"method":"GET","url":"https://example.com/auth/v1/oidc/userinfo"},"response":{"status":403}}
 `,
 	})
-	handler := newHandler(bundle, "/session-token", "127.0.0.1:4321")
+	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken)
 	request := viewerRequest(
 		http.MethodGet,
-		"http://127.0.0.1:4321/session-token/api/records?"+
+		"http://127.0.0.1:4321/api/records?"+
 			"path=browser%2Fnetwork.jsonl&filter=errors",
 	)
 	response := httptest.NewRecorder()
@@ -104,11 +140,11 @@ func TestHandlerServesTimelineAndRecordDetails(t *testing.T) {
 	bundle := testExtractedBundle(t, map[string]string{
 		"browser/network.jsonl": `{"@timestamp":"2026-09-15T07:02:00Z","request":{"method":"GET","url":"https://example.com/auth/v1/oidc/userinfo"},"response":{"status":403}}` + "\n",
 	})
-	handler := newHandler(bundle, "/session-token", "127.0.0.1:4321")
+	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken)
 
 	timelineRequest := viewerRequest(
 		http.MethodGet,
-		"http://127.0.0.1:4321/session-token/api/timeline?filter=auth",
+		"http://127.0.0.1:4321/api/timeline?filter=auth",
 	)
 	timelineResponse := httptest.NewRecorder()
 	handler.ServeHTTP(timelineResponse, timelineRequest)
@@ -126,7 +162,7 @@ func TestHandlerServesTimelineAndRecordDetails(t *testing.T) {
 
 	recordRequest := viewerRequest(
 		http.MethodGet,
-		"http://127.0.0.1:4321/session-token/api/record?"+
+		"http://127.0.0.1:4321/api/record?"+
 			"path=browser%2Fnetwork.jsonl&line=1",
 	)
 	recordResponse := httptest.NewRecorder()
@@ -148,10 +184,10 @@ func TestHandlerRejectsMutationMethods(t *testing.T) {
 	bundle := testExtractedBundle(t, map[string]string{
 		"manifest.json": `{}`,
 	})
-	handler := newHandler(bundle, "/session-token", "127.0.0.1:4321")
+	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken)
 	request := viewerRequest(
 		http.MethodPost,
-		"http://127.0.0.1:4321/session-token/api/manifest",
+		"http://127.0.0.1:4321/api/manifest",
 	)
 	response := httptest.NewRecorder()
 
@@ -215,12 +251,21 @@ func TestServeStartsAndStopsLocalViewer(t *testing.T) {
 	}
 
 	fields := strings.Fields(output.String())
-	if len(fields) < 4 {
-		t.Fatalf("viewer URL is missing: %s", output.String())
+	if len(fields) < 8 {
+		t.Fatalf("viewer URL or token is missing: %s", output.String())
 	}
 	viewerURL := fields[3]
+	accessToken := fields[7]
+	if strings.Contains(viewerURL, accessToken) {
+		t.Fatalf("viewer URL contains its access token: %s", viewerURL)
+	}
 	client := &http.Client{Timeout: 2 * time.Second}
-	response, err := client.Get(viewerURL + "api/manifest")
+	request, err := http.NewRequest(http.MethodGet, viewerURL+"api/manifest", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +291,7 @@ func viewerRequest(method string, target string) *http.Request {
 	request := httptest.NewRequest(method, target, nil)
 	request.Host = "127.0.0.1:4321"
 	request.RemoteAddr = "127.0.0.1:1234"
+	request.Header.Set("Authorization", "Bearer "+testViewerToken)
 	return request
 }
 

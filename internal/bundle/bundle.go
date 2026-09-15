@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -73,8 +74,19 @@ func New(outputPath string) (*Builder, error) {
 
 // Add writes one sanitized file into the staged bundle.
 func (builder *Builder) Add(path string, data []byte) error {
+	return builder.AddStream(path, func(writer io.Writer) error {
+		_, err := writer.Write(data)
+		return err
+	})
+}
+
+// AddStream writes one sanitized stream into the staged bundle.
+func (builder *Builder) AddStream(path string, write func(io.Writer) error) error {
 	if builder.closed {
 		return errors.New("bundle is closed")
+	}
+	if write == nil {
+		return errors.New("bundle stream writer is required")
 	}
 	cleanPath, err := safeRelativePath(path)
 	if err != nil {
@@ -84,8 +96,18 @@ func (builder *Builder) Add(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(target), directoryMode); err != nil {
 		return fmt.Errorf("create bundle directory: %w", err)
 	}
-	if err := os.WriteFile(target, data, fileMode); err != nil {
+	file, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, fileMode)
+	if err != nil {
+		return fmt.Errorf("create bundle file %q: %w", cleanPath, err)
+	}
+	if err := write(file); err != nil {
+		_ = file.Close()
+		_ = os.Remove(target)
 		return fmt.Errorf("write bundle file %q: %w", cleanPath, err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(target)
+		return fmt.Errorf("close bundle file %q: %w", cleanPath, err)
 	}
 	builder.fileCount++
 	return nil
@@ -107,11 +129,7 @@ func (builder *Builder) Finalize(manifest Manifest) (string, error) {
 		return "", err
 	}
 
-	checksums, err := builder.createChecksums()
-	if err != nil {
-		return "", err
-	}
-	if err := builder.Add("checksums.sha256", checksums); err != nil {
+	if err := builder.AddStream("checksums.sha256", builder.writeChecksums); err != nil {
 		return "", err
 	}
 
@@ -134,27 +152,38 @@ func (builder *Builder) Close() error {
 	return os.RemoveAll(builder.stagingDir)
 }
 
-func (builder *Builder) createChecksums() ([]byte, error) {
+func (builder *Builder) writeChecksums(writer io.Writer) error {
 	paths, err := stagedFiles(builder.stagingDir)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var output strings.Builder
 	for _, path := range paths {
 		if path == "checksums.sha256" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(builder.stagingDir, filepath.FromSlash(path)))
+		file, err := os.Open(filepath.Join(builder.stagingDir, filepath.FromSlash(path)))
 		if err != nil {
-			return nil, fmt.Errorf("read %q for checksum: %w", path, err)
+			return fmt.Errorf("open %q for checksum: %w", path, err)
 		}
-		sum := sha256.Sum256(data)
-		output.WriteString(hex.EncodeToString(sum[:]))
-		output.WriteString("  ")
-		output.WriteString(path)
-		output.WriteByte('\n')
+		hasher := sha256.New()
+		_, copyErr := io.Copy(hasher, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return fmt.Errorf("read %q for checksum: %w", path, copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close %q after checksum: %w", path, closeErr)
+		}
+		if _, err := fmt.Fprintf(
+			writer,
+			"%s  %s\n",
+			hex.EncodeToString(hasher.Sum(nil)),
+			path,
+		); err != nil {
+			return fmt.Errorf("write checksum for %q: %w", path, err)
+		}
 	}
-	return []byte(output.String()), nil
+	return nil
 }
 
 func (builder *Builder) createArchive(generatedAt time.Time) error {
@@ -184,25 +213,44 @@ func (builder *Builder) createArchive(generatedAt time.Time) error {
 		return err
 	}
 	for _, path := range paths {
-		data, err := os.ReadFile(filepath.Join(builder.stagingDir, filepath.FromSlash(path)))
+		stagedPath := filepath.Join(builder.stagingDir, filepath.FromSlash(path))
+		file, err := os.Open(stagedPath)
 		if err != nil {
 			cleanup()
-			return fmt.Errorf("read staged file %q: %w", path, err)
+			return fmt.Errorf("open staged file %q: %w", path, err)
+		}
+		fileInfo, err := file.Stat()
+		if err != nil {
+			_ = file.Close()
+			cleanup()
+			return fmt.Errorf("inspect staged file %q: %w", path, err)
+		}
+		if !fileInfo.Mode().IsRegular() {
+			_ = file.Close()
+			cleanup()
+			return fmt.Errorf("staged file %q is not regular", path)
 		}
 		header := &tar.Header{
 			Name:     path,
 			Mode:     fileMode,
-			Size:     int64(len(data)),
+			Size:     fileInfo.Size(),
 			ModTime:  generatedAt.UTC(),
 			Typeflag: tar.TypeReg,
 		}
 		if err := tarWriter.WriteHeader(header); err != nil {
+			_ = file.Close()
 			cleanup()
 			return fmt.Errorf("write archive header %q: %w", path, err)
 		}
-		if _, err := tarWriter.Write(data); err != nil {
+		_, copyErr := io.Copy(tarWriter, file)
+		closeErr := file.Close()
+		if copyErr != nil {
 			cleanup()
-			return fmt.Errorf("write archive file %q: %w", path, err)
+			return fmt.Errorf("write archive file %q: %w", path, copyErr)
+		}
+		if closeErr != nil {
+			cleanup()
+			return fmt.Errorf("close staged file %q: %w", path, closeErr)
 		}
 	}
 	if err := tarWriter.Close(); err != nil {
@@ -221,10 +269,11 @@ func (builder *Builder) createArchive(generatedAt time.Time) error {
 		_ = os.Remove(temporaryPath)
 		return fmt.Errorf("close archive: %w", err)
 	}
-	if err := os.Rename(temporaryPath, builder.outputPath); err != nil {
+	if err := os.Link(temporaryPath, builder.outputPath); err != nil {
 		_ = os.Remove(temporaryPath)
 		return fmt.Errorf("publish archive: %w", err)
 	}
+	_ = os.Remove(temporaryPath)
 	return nil
 }
 
@@ -237,8 +286,12 @@ func stagedFiles(root string) ([]string, error) {
 		if entry.IsDir() {
 			return nil
 		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("bundle contains unsupported symlink: %s", path)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("bundle contains unsupported non-regular file: %s", path)
 		}
 		relative, err := filepath.Rel(root, path)
 		if err != nil {

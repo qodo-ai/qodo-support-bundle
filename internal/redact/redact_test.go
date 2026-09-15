@@ -27,6 +27,28 @@ func TestTextRemovesCredentialsAndEmail(t *testing.T) {
 	}
 }
 
+func TestTextRedactsAdditionalSensitiveAssignments(t *testing.T) {
+	t.Parallel()
+	redactor := New()
+	tests := []string{
+		`private_key=raw-private-key`,
+		`client-assertion: "raw-client-assertion"`,
+		`credential='raw-credential'`,
+		`credentials=raw-credentials`,
+		`Proxy_Authorization=raw-proxy-authorization`,
+	}
+
+	for _, input := range tests {
+		output := redactor.Text(input)
+		if strings.Contains(output, "raw-") {
+			t.Errorf("output contains sensitive value: %s", output)
+		}
+		if !strings.Contains(output, Replacement) {
+			t.Errorf("output does not contain redaction marker: %s", output)
+		}
+	}
+}
+
 func TestJSONLineRedactsSensitiveFieldsRecursively(t *testing.T) {
 	t.Parallel()
 	redactor := New()

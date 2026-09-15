@@ -1,7 +1,8 @@
+import { RequestSequence } from "./request_sequence.mjs";
+
 (() => {
   "use strict";
 
-  const basePath = window.location.pathname.replace(/\/$/, "");
   const pageSize = 100;
   const timelineLimit = 2000;
   const laneOrder = [
@@ -27,10 +28,17 @@
     viewportEnd: null,
     expandedLanes: new Set(),
     requestSequence: 0,
+    detailRequests: new RequestSequence(),
     selectedMarker: null,
+    accessToken: "",
   };
 
   const elements = {
+    authDialog: document.querySelector("#auth-dialog"),
+    authError: document.querySelector("#auth-error"),
+    authForm: document.querySelector("#auth-form"),
+    authSubmit: document.querySelector("#auth-submit"),
+    authToken: document.querySelector("#auth-token"),
     browserCount: document.querySelector("#browser-count"),
     bundleStatus: document.querySelector("#bundle-status"),
     closeDialog: document.querySelector("#close-dialog"),
@@ -68,7 +76,7 @@
   };
 
   async function fetchJSON(path, parameters = null) {
-    const url = new URL(`${basePath}${path}`, window.location.origin);
+    const url = new URL(path, window.location.origin);
     if (parameters) {
       Object.entries(parameters).forEach(([key, value]) => {
         if (value !== "" && value !== null && value !== undefined) {
@@ -78,7 +86,10 @@
     }
     const response = await fetch(url, {
       credentials: "same-origin",
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${state.accessToken}`,
+      },
     });
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);
@@ -87,24 +98,20 @@
   }
 
   async function initialize() {
-    try {
-      const [manifest, filesResponse] = await Promise.all([
-        fetchJSON("/api/manifest"),
-        fetchJSON("/api/files"),
-      ]);
-      updateSummary(manifest);
-      state.files = filesResponse.files || [];
-      renderFiles();
-      const defaultFile =
-        state.files.find((file) => file.path === "browser/network.jsonl") ||
-        state.files[0];
-      if (defaultFile) {
-        selectFile(defaultFile, false);
-      }
-      await loadTimeline();
-    } catch (error) {
-      showNotice(`Could not load the bundle: ${error.message}`);
+    const [manifest, filesResponse] = await Promise.all([
+      fetchJSON("/api/manifest"),
+      fetchJSON("/api/files"),
+    ]);
+    updateSummary(manifest);
+    state.files = filesResponse.files || [];
+    renderFiles();
+    const defaultFile =
+      state.files.find((file) => file.path === "browser/network.jsonl") ||
+      state.files[0];
+    if (defaultFile) {
+      selectFile(defaultFile, false);
     }
+    await loadTimeline();
   }
 
   function updateSummary(manifest) {
@@ -456,6 +463,7 @@
   }
 
   async function openRecordDetails(record, marker) {
+    const request = state.detailRequests.next();
     selectMarker(marker);
     elements.dialogLane.textContent = record.lane || "Event";
     elements.dialogSummary.textContent = record.summary || "Record details";
@@ -474,16 +482,31 @@
         path: record.path,
         line: record.line,
       });
+      if (
+        !state.detailRequests.isCurrent(request) ||
+        state.selectedMarker !== marker ||
+        !elements.recordDialog.open
+      ) {
+        return;
+      }
       elements.dialogDetails.textContent =
         typeof details.details === "string"
           ? details.details
           : JSON.stringify(details.details, null, 2);
     } catch (error) {
+      if (
+        !state.detailRequests.isCurrent(request) ||
+        state.selectedMarker !== marker ||
+        !elements.recordDialog.open
+      ) {
+        return;
+      }
       elements.dialogDetails.textContent = `Could not load record: ${error.message}`;
     }
   }
 
   function openClusterDetails(lane, records, marker) {
+    state.detailRequests.invalidate();
     selectMarker(marker);
     elements.dialogLane.textContent = lane;
     elements.dialogSummary.textContent = `${records.length.toLocaleString()} events in this time slice`;
@@ -835,9 +858,40 @@
     elements.recordDialog.close();
   });
   elements.recordDialog.addEventListener("close", () => {
+    state.detailRequests.invalidate();
     state.selectedMarker?.classList.remove("selected");
     state.selectedMarker = null;
   });
 
-  initialize();
+  elements.authForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const token = elements.authToken.value.trim();
+    if (!token) {
+      elements.authError.textContent = "Enter the access token printed in the terminal.";
+      return;
+    }
+    state.accessToken = token;
+    elements.authToken.value = "";
+    elements.authError.textContent = "";
+    elements.authSubmit.disabled = true;
+    try {
+      await initialize();
+      elements.authDialog.close();
+    } catch (error) {
+      state.accessToken = "";
+      elements.authError.textContent =
+        error.message.startsWith("401")
+          ? "The access token is not valid."
+          : `Could not load the bundle: ${error.message}`;
+      elements.authToken.focus();
+    } finally {
+      elements.authSubmit.disabled = false;
+    }
+  });
+  elements.authDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+  });
+
+  elements.authDialog.showModal();
+  elements.authToken.focus();
 })();
