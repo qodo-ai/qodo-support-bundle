@@ -28,12 +28,12 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
     viewportStart: null,
     viewportEnd: null,
     expandedLanes: new Set(),
-    requestSequence: 0,
+    timelineRequests: new RequestSequence(),
+    recordRequests: new RequestSequence(),
     detailRequests: new RequestSequence(),
     selectedMarker: null,
     accessToken: takeLauncherToken(),
     sessionClaimed: false,
-    timelineController: null,
   };
 
   const elements = {
@@ -165,10 +165,7 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
   }
 
   async function loadTimeline(initializing = false) {
-    const sequence = ++state.requestSequence;
-    state.timelineController?.abort();
-    const controller = new AbortController();
-    state.timelineController = controller;
+    const request = state.timelineRequests.next();
     elements.timeline.replaceChildren(createTimelineEmpty("Building correlated timeline…"));
     hideNotice();
     try {
@@ -177,9 +174,9 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
         filter: state.filter,
         limit: timelineLimit,
       }, {
-        signal: controller.signal,
+        signal: request.signal,
       });
-      if (sequence !== state.requestSequence) {
+      if (!state.timelineRequests.isCurrent(request)) {
         return;
       }
       state.timeline = response;
@@ -192,15 +189,13 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
       if (initializing) {
         throw error;
       }
-      if (sequence !== state.requestSequence) {
+      if (!state.timelineRequests.isCurrent(request)) {
         return;
       }
       elements.timeline.replaceChildren();
       showNotice(`Could not build timeline: ${error.message}`);
     } finally {
-      if (state.timelineController === controller) {
-        state.timelineController = null;
-      }
+      state.timelineRequests.finish(request);
     }
   }
 
@@ -208,7 +203,12 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
     if (!state.timeline) {
       return;
     }
-    const allRecords = state.timeline.records || [];
+    const timelineRecords = Array.isArray(state.timeline.records)
+      ? state.timeline.records
+      : [];
+    const allRecords = timelineRecords.filter((record) =>
+      Number.isFinite(new Date(record.timestamp).getTime()),
+    );
     const windowRecords = recordsInWindow(allRecords, state.windowMinutes);
     if (windowRecords.length === 0) {
       elements.timelineCount.textContent = "0 visible events";
@@ -497,6 +497,8 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
       const details = await fetchJSON("/api/record", {
         path: record.path,
         line: record.line,
+      }, {
+        signal: request.signal,
       });
       if (
         !state.detailRequests.isCurrent(request) ||
@@ -510,6 +512,9 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
           ? details.details
           : JSON.stringify(details.details, null, 2);
     } catch (error) {
+      if (error.name === "AbortError") {
+        return;
+      }
       if (
         !state.detailRequests.isCurrent(request) ||
         state.selectedMarker !== marker ||
@@ -518,6 +523,8 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
         return;
       }
       elements.dialogDetails.textContent = `Could not load record: ${error.message}`;
+    } finally {
+      state.detailRequests.finish(request);
     }
   }
 
@@ -534,7 +541,7 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
     const visibleRecords = records.slice(-200);
     const lines = visibleRecords.map(
       (record) =>
-        `${formatTimestamp(record.timestamp)}  ${record.severity.toUpperCase().padEnd(7)}  ${record.summary}`,
+        `${formatTimestamp(record.timestamp)}  ${String(record.severity || "info").toUpperCase().padEnd(7)}  ${record.summary || "Record"}`,
     );
     if (records.length > visibleRecords.length) {
       lines.unshift(
@@ -563,7 +570,7 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
     if (!state.selectedFile) {
       return;
     }
-    const sequence = ++state.requestSequence;
+    const request = state.recordRequests.next();
     elements.records.replaceChildren(createEmpty("Loading records…"));
     hideNotice();
     try {
@@ -573,19 +580,26 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
         filter: state.filter,
         offset: state.offset,
         limit: pageSize,
+      }, {
+        signal: request.signal,
       });
-      if (sequence !== state.requestSequence) {
+      if (!state.recordRequests.isCurrent(request)) {
         return;
       }
       state.hasMore = response.has_more;
       renderRecords(response.records || []);
       updatePagination();
     } catch (error) {
-      if (sequence !== state.requestSequence) {
+      if (error.name === "AbortError") {
+        return;
+      }
+      if (!state.recordRequests.isCurrent(request)) {
         return;
       }
       elements.records.replaceChildren();
       showNotice(`Could not read records: ${error.message}`);
+    } finally {
+      state.recordRequests.finish(request);
     }
   }
 
@@ -800,6 +814,11 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
   function switchView(view) {
     state.view = view;
     const timelineActive = view === "timeline";
+    if (timelineActive) {
+      state.recordRequests.invalidate();
+    } else {
+      state.timelineRequests.invalidate();
+    }
     elements.timelineView.classList.toggle("hidden", !timelineActive);
     elements.filesView.classList.toggle("hidden", timelineActive);
     elements.timelineTab.classList.toggle("active", timelineActive);
