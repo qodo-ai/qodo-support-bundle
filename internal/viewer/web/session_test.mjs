@@ -85,3 +85,34 @@ test("initializeClaimedViewer retains its token and retries without reclaiming",
   assert.equal(claims, 1);
   assert.equal(initializations, 2);
 });
+
+test("initializeClaimedViewer retries a transient claim failure with the retained token", async () => {
+  const session = {
+    accessToken: "a".repeat(64),
+    sessionClaimed: false,
+  };
+  let claims = 0;
+  let initializations = 0;
+  const claim = async (token) => {
+    assert.equal(token, session.accessToken);
+    claims += 1;
+    if (claims === 1) {
+      throw new Error("temporary claim failure");
+    }
+  };
+  const initialize = async () => {
+    initializations += 1;
+  };
+
+  await assert.rejects(
+    initializeClaimedViewer(session, initialize, claim),
+    /temporary claim failure/,
+  );
+  assert.equal(session.accessToken, "a".repeat(64));
+  assert.equal(session.sessionClaimed, false);
+
+  await initializeClaimedViewer(session, initialize, claim);
+  assert.equal(claims, 2);
+  assert.equal(initializations, 1);
+  assert.equal(session.sessionClaimed, true);
+});
