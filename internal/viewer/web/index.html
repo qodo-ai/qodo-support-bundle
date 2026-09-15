@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Qodo Support Bundle Viewer</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">LOCAL DIAGNOSTICS</p>
+        <h1>Qodo Support Bundle</h1>
+      </div>
+      <div class="privacy-badge">
+        <span class="privacy-dot"></span>
+        Local only
+      </div>
+    </header>
+
+    <section class="summary" aria-label="Bundle summary">
+      <div class="summary-card">
+        <span>Status</span>
+        <strong id="bundle-status">Loading…</strong>
+      </div>
+      <div class="summary-card">
+        <span>Browser requests</span>
+        <strong id="browser-count">—</strong>
+      </div>
+      <div class="summary-card">
+        <span>Backend logs</span>
+        <strong id="log-count">—</strong>
+      </div>
+      <div class="summary-card">
+        <span>Generated</span>
+        <strong id="generated-at">—</strong>
+      </div>
+    </section>
+
+    <main>
+      <div class="view-controls">
+        <div class="view-tabs" role="tablist" aria-label="Viewer mode">
+          <button id="timeline-tab" class="view-tab active" role="tab" aria-selected="true" type="button">
+            Timeline
+          </button>
+          <button id="files-tab" class="view-tab" role="tab" aria-selected="false" type="button">
+            File explorer
+          </button>
+        </div>
+        <div class="toolbar">
+          <label class="search">
+            <span class="visually-hidden">Search records</span>
+            <input id="search-input" type="search" placeholder="Search URL, request ID, error…">
+          </label>
+          <div class="filters" role="group" aria-label="Record filter">
+            <button class="filter active" data-filter="all" type="button">All</button>
+            <button class="filter" data-filter="errors" type="button">Errors</button>
+            <button class="filter" data-filter="auth" type="button">Authentication</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="notice" class="notice hidden" role="status"></div>
+
+      <section id="timeline-view" class="view-panel" role="tabpanel" aria-labelledby="timeline-tab">
+        <div class="timeline-heading">
+          <div>
+            <p class="eyebrow">CORRELATED VIEW</p>
+            <h2>System timeline</h2>
+            <p class="heading-copy">Follow one incident across the browser, backend, and cluster.</p>
+          </div>
+          <div class="timeline-meta">
+            <strong id="timeline-count">—</strong>
+            <span id="timeline-range">Loading timeline…</span>
+          </div>
+        </div>
+
+        <div class="timeline-options">
+          <div class="timeline-tools">
+            <div class="window-filters" role="group" aria-label="Timeline window">
+              <span>Window</span>
+              <button class="window" data-window="all" type="button">Available</button>
+              <button class="window active" data-window="30" type="button">30 min</button>
+              <button class="window" data-window="15" type="button">15 min</button>
+              <button class="window" data-window="5" type="button">5 min</button>
+            </div>
+            <div class="zoom-controls" role="group" aria-label="Timeline zoom and navigation">
+              <button id="timeline-earlier" type="button">← Earlier</button>
+              <button id="timeline-zoom-out" type="button">− Zoom out</button>
+              <button id="timeline-zoom-in" type="button">+ Zoom in</button>
+              <button id="timeline-later" type="button">Later →</button>
+              <button id="timeline-reset" type="button">Reset</button>
+            </div>
+          </div>
+          <div class="timeline-legend" aria-label="Severity legend">
+            <span><i class="legend-dot info"></i>Info</span>
+            <span><i class="legend-dot warning"></i>Warning</span>
+            <span><i class="legend-dot error"></i>Error</span>
+          </div>
+        </div>
+
+        <div id="timeline" class="timeline" aria-live="polite">
+          <div class="timeline-empty">Loading correlated events…</div>
+        </div>
+      </section>
+
+      <section id="files-view" class="view-panel hidden" role="tabpanel" aria-labelledby="files-tab">
+        <div class="workspace">
+          <aside class="sidebar">
+            <div class="sidebar-heading">
+              <h2>Sources</h2>
+              <span id="file-count"></span>
+            </div>
+            <nav id="file-list" aria-label="Bundle files"></nav>
+          </aside>
+
+          <section class="content">
+            <div class="content-heading">
+              <div>
+                <p class="eyebrow" id="selected-category">SOURCE</p>
+                <h2 id="selected-file">Select a source</h2>
+              </div>
+              <span id="result-count"></span>
+            </div>
+
+            <div id="records" class="records" aria-live="polite"></div>
+
+            <div class="pagination">
+              <button id="previous-page" type="button" disabled>Previous</button>
+              <span id="page-label">Page 1</span>
+              <button id="next-page" type="button" disabled>Next</button>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="record-dialog" class="record-dialog">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow" id="dialog-lane">EVENT</p>
+          <h2 id="dialog-summary">Record details</h2>
+        </div>
+        <button id="close-dialog" class="dialog-close" type="button" aria-label="Close details">×</button>
+      </div>
+      <div id="dialog-meta" class="dialog-meta"></div>
+      <pre id="dialog-details">Loading…</pre>
+    </dialog>
+
+    <template id="record-template">
+      <article class="record">
+        <div class="record-marker"></div>
+        <div class="record-content">
+          <div class="record-meta">
+            <time></time>
+            <span class="source"></span>
+            <span class="severity"></span>
+            <span class="line"></span>
+          </div>
+          <p class="record-summary"></p>
+          <details>
+            <summary>Details</summary>
+            <pre></pre>
+          </details>
+        </div>
+      </article>
+    </template>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>
