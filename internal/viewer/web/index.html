@@ -18,27 +18,6 @@
       </div>
     </header>
 
-    <dialog id="auth-dialog" class="auth-dialog">
-      <form id="auth-form">
-        <p class="eyebrow">LOCAL ACCESS</p>
-        <h2>Enter viewer access token</h2>
-        <p class="auth-copy">Copy the token printed by qodo-support-bundle in the terminal.</p>
-        <label>
-          <span>Access token</span>
-          <input
-            id="auth-token"
-            type="password"
-            autocomplete="off"
-            autocapitalize="none"
-            spellcheck="false"
-            required
-          >
-        </label>
-        <p id="auth-error" class="auth-error" role="alert"></p>
-        <button id="auth-submit" type="submit">Open bundle</button>
-      </form>
-    </dialog>
-
     <section class="summary" aria-label="Bundle summary">
       <div class="summary-card">
         <span>Status</span>
@@ -81,7 +60,9 @@
         </div>
       </div>
 
-      <div id="notice" class="notice hidden" role="status"></div>
+      <div id="notice" class="notice hidden" role="status">
+        <button id="retry" class="notice-retry hidden" type="button">Retry</button>
+      </div>
 
       <section id="timeline-view" class="view-panel" role="tabpanel" aria-labelledby="timeline-tab">
         <div class="timeline-heading">

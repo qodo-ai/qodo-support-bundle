@@ -3,12 +3,14 @@ package viewer
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"time"
@@ -38,13 +40,7 @@ func Serve(ctx context.Context, config Config) error {
 	if config.ErrorOutput == nil {
 		config.ErrorOutput = io.Discard
 	}
-	if config.Limits == (ExtractionLimits{}) {
-		config.Limits = ExtractionLimits{
-			MaxFiles:          DefaultMaxFiles,
-			MaxExtractedBytes: DefaultMaxExtractedBytes,
-			MaxFileBytes:      DefaultMaxFileBytes,
-		}
-	}
+	config.Limits = defaultExtractionLimits(config.Limits)
 
 	bundle, err := Extract(config.BundlePath, config.Limits)
 	if err != nil {
@@ -65,12 +61,14 @@ func Serve(ctx context.Context, config Config) error {
 		)
 	}
 
-	token, err := randomToken()
+	expectedHost := listener.Addr().String()
+	viewerURL := "http://" + expectedHost + "/"
+	launcher, err := createLauncher(viewerURL)
 	if err != nil {
 		return err
 	}
-	expectedHost := listener.Addr().String()
-	handler := newHandler(bundle, expectedHost, token)
+	defer launcher.Remove()
+	handler := newHandler(bundle, expectedHost, launcher.token, launcher.Remove)
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -78,22 +76,27 @@ func Serve(ctx context.Context, config Config) error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	instructions := fmt.Sprintf(
+		"Support bundle viewer: %s\nPress Ctrl+C to stop.\n",
+		viewerURL,
+	)
+	if !config.OpenBrowser {
+		instructions = fmt.Sprintf(
+			"Support bundle viewer: %s\nOpen launcher file: %s\nPress Ctrl+C to stop.\n",
+			viewerURL,
+			launcher.path,
+		)
+	}
+	if _, err := fmt.Fprint(config.Output, instructions); err != nil {
+		return fmt.Errorf("write viewer instructions: %w", err)
+	}
 	serveErrors := make(chan error, 1)
 	go func() {
 		serveErrors <- server.Serve(listener)
 	}()
-
-	viewerURL := "http://" + expectedHost + "/"
-	_, _ = fmt.Fprintf(config.Output, "Support bundle viewer: %s\n", viewerURL)
-	_, _ = fmt.Fprintf(config.Output, "Viewer access token: %s\n", token)
-	_, _ = fmt.Fprintln(config.Output, "Press Ctrl+C to stop.")
 	if config.OpenBrowser {
-		if err := launchBrowser(viewerURL); err != nil {
-			_, _ = fmt.Fprintf(
-				config.ErrorOutput,
-				"Could not open a browser automatically: %v\n",
-				err,
-			)
+		if err := launchBrowser(launcher.path, config.ErrorOutput); err != nil {
+			reportBrowserFailure(config.ErrorOutput, launcher.path, err)
 		}
 	}
 
@@ -113,29 +116,126 @@ func Serve(ctx context.Context, config Config) error {
 	}
 }
 
-func randomToken() (string, error) {
-	data := make([]byte, 24)
-	if _, err := rand.Read(data); err != nil {
-		return "", fmt.Errorf("create viewer session token: %w", err)
+func defaultExtractionLimits(limits ExtractionLimits) ExtractionLimits {
+	if limits.MaxFiles == 0 {
+		limits.MaxFiles = DefaultMaxFiles
 	}
-	return base64.RawURLEncoding.EncodeToString(data), nil
+	if limits.MaxArchiveBytes == 0 {
+		limits.MaxArchiveBytes = DefaultMaxArchiveBytes
+	}
+	if limits.MaxExtractedBytes == 0 {
+		limits.MaxExtractedBytes = DefaultMaxExtractedBytes
+	}
+	if limits.MaxFileBytes == 0 {
+		limits.MaxFileBytes = DefaultMaxFileBytes
+	}
+	return limits
 }
 
-func launchBrowser(url string) error {
+type launcherFile struct {
+	path  string
+	token string
+}
+
+func createLauncher(viewerURL string) (*launcherFile, error) {
+	token, err := randomHex(32)
+	if err != nil {
+		return nil, fmt.Errorf("generate viewer session secret: %w", err)
+	}
+	nonce, err := randomHex(16)
+	if err != nil {
+		return nil, fmt.Errorf("generate launcher CSP nonce: %w", err)
+	}
+	encodedToken, err := json.Marshal(token)
+	if err != nil {
+		return nil, fmt.Errorf("encode viewer session secret: %w", err)
+	}
+	encodedURL, err := json.Marshal(viewerURL)
+	if err != nil {
+		return nil, fmt.Errorf("encode viewer URL: %w", err)
+	}
+	content := fmt.Sprintf(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-%s'; base-uri 'none'; form-action 'none'">
+<title>Opening Qodo Support Bundle Viewer</title>
+</head>
+<body>
+<script nonce="%s">window.name=%s;window.location.replace(%s);</script>
+</body>
+</html>
+`, nonce, nonce, encodedToken, encodedURL)
+	file, err := os.CreateTemp("", "qodo-support-viewer-*.html")
+	if err != nil {
+		return nil, fmt.Errorf("create viewer launcher: %w", err)
+	}
+	path := file.Name()
+	removeOnError := func() {
+		_ = file.Close()
+		_ = os.Remove(path)
+	}
+	// The launcher is the only on-disk credential carrier; OS permissions isolate it
+	// from other local users. Same-user process isolation is outside this threat model.
+	if err := file.Chmod(0o600); err != nil {
+		removeOnError()
+		return nil, fmt.Errorf("protect viewer launcher: %w", err)
+	}
+	if _, err := io.WriteString(file, content); err != nil {
+		removeOnError()
+		return nil, fmt.Errorf("write viewer launcher: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("close viewer launcher: %w", err)
+	}
+	return &launcherFile{path: path, token: token}, nil
+}
+
+func (launcher *launcherFile) Remove() error {
+	err := os.Remove(launcher.path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func randomHex(byteCount int) (string, error) {
+	data := make([]byte, byteCount)
+	if _, err := rand.Read(data); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(data), nil
+}
+
+func launchBrowser(path string, errorOutput io.Writer) error {
 	var command *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		command = exec.Command("open", url)
+		command = exec.Command("open", path)
 	case "windows":
-		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
 	default:
-		command = exec.Command("xdg-open", url)
+		command = exec.Command("xdg-open", path)
 	}
 	if err := command.Start(); err != nil {
 		return err
 	}
 	go func() {
-		_ = command.Wait()
+		if err := command.Wait(); err != nil {
+			reportBrowserFailure(errorOutput, path, err)
+		}
 	}()
 	return nil
+}
+
+func reportBrowserFailure(output io.Writer, launcherPath string, err error) {
+	if _, writeErr := fmt.Fprintf(
+		output,
+		"Could not open a browser automatically: %v\nOpen launcher file: %s\n",
+		err,
+		launcherPath,
+	); writeErr != nil {
+		return
+	}
 }

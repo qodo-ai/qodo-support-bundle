@@ -13,19 +13,23 @@ import (
 )
 
 type fakeRunner struct {
-	mutex sync.Mutex
-	calls []string
-	run   func(arguments string) (CommandResult, error)
+	mutex     sync.Mutex
+	calls     []string
+	logLimits []int64
+	run       func(arguments string) (CommandResult, error)
 }
 
 func (runner *fakeRunner) Run(
 	_ context.Context,
-	_ int64,
+	maxBytes int64,
 	arguments ...string,
 ) (CommandResult, error) {
 	joined := strings.Join(arguments, " ")
 	runner.mutex.Lock()
 	runner.calls = append(runner.calls, joined)
+	if strings.HasPrefix(joined, "logs ") {
+		runner.logLimits = append(runner.logLimits, maxBytes)
+	}
 	runner.mutex.Unlock()
 	return runner.run(joined)
 }
@@ -86,11 +90,12 @@ func TestCollectWritesSanitizedMetadataEventsAndLogs(t *testing.T) {
 	report, err := Collect(
 		context.Background(),
 		Config{
-			Namespace:   "qodo",
-			Selector:    "app=platform",
-			Since:       30 * time.Minute,
-			Timeout:     time.Second,
-			MaxLogBytes: 1 << 20,
+			Namespace:        "qodo",
+			Selector:         "app=platform",
+			Since:            30 * time.Minute,
+			Timeout:          time.Second,
+			MaxLogBytes:      1 << 20,
+			MaxTotalLogBytes: 10 << 20,
 		},
 		runner,
 		sink,
@@ -140,10 +145,11 @@ func TestCollectFailsWhenPodsCannotBeListed(t *testing.T) {
 	_, err := Collect(
 		context.Background(),
 		Config{
-			Namespace:   "qodo",
-			Since:       time.Minute,
-			Timeout:     time.Second,
-			MaxLogBytes: 1024,
+			Namespace:        "qodo",
+			Since:            time.Minute,
+			Timeout:          time.Second,
+			MaxLogBytes:      1024,
+			MaxTotalLogBytes: 1024,
 		},
 		runner,
 		&memorySink{},
@@ -200,10 +206,11 @@ func TestCollectCoversMultipleNamespacesAndInitContainers(t *testing.T) {
 	report, err := Collect(
 		context.Background(),
 		Config{
-			Namespaces:  []string{"qodo", "zitadel"},
-			Since:       30 * time.Minute,
-			Timeout:     time.Second,
-			MaxLogBytes: 1 << 20,
+			Namespaces:       []string{"qodo", "zitadel"},
+			Since:            30 * time.Minute,
+			Timeout:          time.Second,
+			MaxLogBytes:      1 << 20,
+			MaxTotalLogBytes: 10 << 20,
 			Progress: func(progress Progress) {
 				progressStages = append(progressStages, progress.Stage)
 			},
@@ -291,6 +298,7 @@ func TestCollectDiscoversApplicationNamespacesWhenSystemScopeIsExcluded(
 			Since:                   time.Minute,
 			Timeout:                 time.Second,
 			MaxLogBytes:             1024,
+			MaxTotalLogBytes:        1024,
 		},
 		runner,
 		sink,
@@ -352,10 +360,11 @@ func TestCollectContinuesWhenOneOfMultipleNamespacesIsForbidden(t *testing.T) {
 	report, err := Collect(
 		context.Background(),
 		Config{
-			Namespaces:  []string{"qodo", "zitadel"},
-			Since:       time.Minute,
-			Timeout:     time.Second,
-			MaxLogBytes: 1024,
+			Namespaces:       []string{"qodo", "zitadel"},
+			Since:            time.Minute,
+			Timeout:          time.Second,
+			MaxLogBytes:      1024,
+			MaxTotalLogBytes: 1024,
 		},
 		runner,
 		&memorySink{},
@@ -373,6 +382,175 @@ func TestCollectContinuesWhenOneOfMultipleNamespacesIsForbidden(t *testing.T) {
 	if strings.Contains(report.Issues[0].Message, "secret-value") {
 		t.Fatalf("issue leaked token: %+v", report.Issues[0])
 	}
+}
+
+func TestCollectEnforcesAggregateLogBudgetAcrossStreams(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{
+		run: func(arguments string) (CommandResult, error) {
+			switch {
+			case strings.Contains(arguments, "get pods"):
+				return CommandResult{Stdout: []byte(`{"items":[{
+				  "metadata":{"name":"platform-1","namespace":"qodo"},
+				  "spec":{"containers":[
+				    {"name":"first"},
+				    {"name":"second"},
+				    {"name":"third"},
+				    {"name":"fourth"}
+				  ]},
+				  "status":{"phase":"Running"}
+				}]}`)}, nil
+			case strings.Contains(arguments, "get events"):
+				return CommandResult{Stdout: []byte(`{"items":[]}`)}, nil
+			case strings.HasPrefix(arguments, "logs "):
+				return CommandResult{Stdout: []byte("abcdefghij")}, nil
+			default:
+				return CommandResult{}, errors.New("unexpected command")
+			}
+		},
+	}
+	sink := &memorySink{}
+
+	report, err := Collect(
+		context.Background(),
+		Config{
+			Namespace:        "qodo",
+			Since:            time.Minute,
+			Timeout:          time.Second,
+			MaxLogBytes:      4,
+			MaxTotalLogBytes: 10,
+			LogWorkers:       3,
+		},
+		runner,
+		sink,
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	totalLogBytes := 0
+	for path, data := range sink.files {
+		if strings.HasPrefix(path, "kubernetes/logs/") {
+			totalLogBytes += len(data)
+		}
+	}
+	if totalLogBytes != 10 ||
+		report.LogFiles != 3 ||
+		report.TruncatedLogFiles != 3 {
+		t.Fatalf("aggregate log budget was not enforced: report=%+v bytes=%d", report, totalLogBytes)
+	}
+	if !reflect.DeepEqual(runner.logLimits, []int64{4, 4, 2}) {
+		t.Fatalf("unexpected per-command log limits: %+v", runner.logLimits)
+	}
+	if len(report.Issues) != 2 {
+		t.Fatalf("unexpected aggregate budget issues: %+v", report.Issues)
+	}
+	issueMessages := report.Issues[0].Message + " " + report.Issues[1].Message
+	if !strings.Contains(issueMessages, "truncated this stream") ||
+		!strings.Contains(issueMessages, "skipped 1 log streams") {
+		t.Fatalf("missing aggregate budget issue: %+v", report.Issues)
+	}
+	if containsCall(runner.calls, "--container fourth") {
+		t.Fatalf("excess stream was collected: %+v", runner.calls)
+	}
+}
+
+func TestSanitizeLogRedactsMultilinePrivateKeys(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		header string
+		footer string
+	}{
+		{
+			name:   "RSA",
+			header: "-----BEGIN RSA PRIVATE KEY-----",
+			footer: "-----END RSA PRIVATE KEY-----",
+		},
+		{
+			name:   "EC",
+			header: "-----BEGIN EC PRIVATE KEY-----",
+			footer: "-----END EC PRIVATE KEY-----",
+		},
+		{
+			name:   "OPENSSH",
+			header: "-----BEGIN OPENSSH PRIVATE KEY-----",
+			footer: "-----END OPENSSH PRIVATE KEY-----",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			input := "before\nprefix " + test.header + "\n" +
+				"raw-private-key-body\nsecond-secret-line\n" +
+				test.footer + " suffix\n" +
+				"after request_id=req-123\n"
+
+			output := string(sanitizeLog([]byte(input), redact.New()))
+
+			for _, forbidden := range []string{
+				test.header,
+				test.footer,
+				"raw-private-key-body",
+				"second-secret-line",
+			} {
+				if strings.Contains(output, forbidden) {
+					t.Fatalf("output contains private-key material %q: %s", forbidden, output)
+				}
+			}
+			for _, expected := range []string{
+				"before",
+				"prefix " + redact.Replacement,
+				"suffix",
+				"request_id=req-123",
+			} {
+				if !strings.Contains(output, expected) {
+					t.Fatalf("output omitted safe text %q: %s", expected, output)
+				}
+			}
+		})
+	}
+}
+
+func TestSanitizeLogRedactsUnterminatedPrivateKey(t *testing.T) {
+	t.Parallel()
+	input := []byte(
+		"safe before\n-----BEGIN RSA PRIVATE KEY-----\n" +
+			"raw-private-key-body\nmust-also-be-suppressed\n",
+	)
+
+	output := string(sanitizeLog(input, redact.New()))
+
+	if strings.Contains(output, "raw-private-key-body") ||
+		strings.Contains(output, "must-also-be-suppressed") {
+		t.Fatalf("output contains unterminated private-key material: %s", output)
+	}
+	if output != "safe before\n"+redact.Replacement+"\n" {
+		t.Fatalf("unexpected sanitized output: %q", output)
+	}
+}
+
+func TestSanitizeLogPrivateKeyStateIsPerCall(t *testing.T) {
+	t.Parallel()
+	redactor := redact.New()
+	var waitGroup sync.WaitGroup
+	for index := 0; index < 20; index++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			output := string(sanitizeLog(
+				[]byte("-----BEGIN EC PRIVATE KEY-----\nsecret\n"),
+				redactor,
+			))
+			if output != redact.Replacement+"\n" {
+				t.Errorf("unexpected concurrent output: %q", output)
+			}
+		}()
+	}
+	waitGroup.Wait()
 }
 
 func TestBoundedBufferCapsOutputWithoutBreakingWriterContract(t *testing.T) {

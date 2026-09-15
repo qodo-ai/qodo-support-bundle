@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"math"
 	"strings"
 
 	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/redact"
@@ -58,12 +58,12 @@ type outputEntry struct {
 }
 
 type outputRequest struct {
-	Method      string            `json:"method"`
-	URL         string            `json:"url"`
-	HTTPVersion string            `json:"http_version,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Query       map[string]string `json:"query,omitempty"`
-	BodySize    int64             `json:"body_size"`
+	Method      string              `json:"method"`
+	URL         string              `json:"url"`
+	HTTPVersion string              `json:"http_version,omitempty"`
+	Headers     map[string]string   `json:"headers,omitempty"`
+	Query       map[string][]string `json:"query,omitempty"`
+	BodySize    int64               `json:"body_size"`
 }
 
 type outputResponse struct {
@@ -90,18 +90,14 @@ func Import(
 	maxEntries int,
 	redactor *redact.Redactor,
 ) (Stats, error) {
-	fileInfo, err := os.Stat(path)
-	if err != nil {
-		return Stats{}, fmt.Errorf("inspect HAR: %w", err)
-	}
-	if !fileInfo.Mode().IsRegular() {
-		return Stats{}, errors.New("HAR input must be a regular file")
-	}
-	if fileInfo.Size() > maxInputBytes {
-		return Stats{}, inputLimitError(fileInfo.Size(), maxInputBytes)
+	if maxInputBytes < 0 || maxInputBytes == math.MaxInt64 {
+		return Stats{}, fmt.Errorf(
+			"maximum HAR input bytes must be between 0 and %d",
+			int64(math.MaxInt64-1),
+		)
 	}
 
-	file, err := os.Open(path)
+	file, err := openHARFile(path)
 	if err != nil {
 		return Stats{}, fmt.Errorf("open HAR: %w", err)
 	}
@@ -150,12 +146,17 @@ func importArchive(
 	}
 
 	stats := Stats{}
+	foundLog := false
 	for decoder.More() {
 		field, err := objectField(decoder)
 		if err != nil {
 			return stats, err
 		}
 		if field == "log" {
+			if foundLog {
+				return stats, errors.New("HAR root contains duplicate log fields")
+			}
+			foundLog = true
 			if err := importLog(decoder, encoder, maxEntries, redactor, &stats); err != nil {
 				return stats, err
 			}
@@ -165,6 +166,9 @@ func importArchive(
 	}
 	if _, err := decoder.Token(); err != nil {
 		return stats, err
+	}
+	if !foundLog {
+		return stats, errors.New("HAR root must contain a log object")
 	}
 	return stats, nil
 }
@@ -181,17 +185,22 @@ func importLog(
 		return err
 	}
 	if token == nil {
-		return nil
+		return errors.New("HAR log must not be null")
 	}
 	if err := requireDelimiter(token, '{', "HAR log"); err != nil {
 		return err
 	}
+	foundEntries := false
 	for decoder.More() {
 		field, err := objectField(decoder)
 		if err != nil {
 			return err
 		}
 		if field == "entries" {
+			if foundEntries {
+				return errors.New("HAR log contains duplicate entries fields")
+			}
+			foundEntries = true
 			if err := importEntries(decoder, encoder, maxEntries, redactor, stats); err != nil {
 				return err
 			}
@@ -199,8 +208,13 @@ func importLog(
 			return err
 		}
 	}
-	_, err = decoder.Token()
-	return err
+	if _, err = decoder.Token(); err != nil {
+		return err
+	}
+	if !foundEntries {
+		return errors.New("HAR log must contain an entries array")
+	}
+	return nil
 }
 
 func importEntries(
@@ -215,7 +229,7 @@ func importEntries(
 		return err
 	}
 	if token == nil {
-		return nil
+		return errors.New("HAR entries must not be null")
 	}
 	if err := requireDelimiter(token, '[', "HAR entries"); err != nil {
 		return err
@@ -223,22 +237,36 @@ func importEntries(
 	for decoder.More() {
 		if stats.EntriesWritten >= maxEntries {
 			stats.Truncated = true
-			if err := skipValue(decoder); err != nil {
+			if err := skipEntry(decoder); err != nil {
 				return err
 			}
 			continue
 		}
-		var inputEntry entry
+		var inputEntry *entry
 		if err := decoder.Decode(&inputEntry); err != nil {
 			return err
 		}
-		if err := encoder.Encode(sanitizeEntry(inputEntry, redactor)); err != nil {
+		if inputEntry == nil {
+			return errors.New("HAR entries must not contain null elements")
+		}
+		if err := encoder.Encode(sanitizeEntry(*inputEntry, redactor)); err != nil {
 			return fmt.Errorf("write HAR record: %w", err)
 		}
 		stats.EntriesWritten++
 	}
 	_, err = decoder.Token()
 	return err
+}
+
+func skipEntry(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token == nil {
+		return errors.New("HAR entries must not contain null elements")
+	}
+	return skipValueFromToken(decoder, token)
 }
 
 func sanitizeEntry(inputEntry entry, redactor *redact.Redactor) outputEntry {
@@ -275,6 +303,10 @@ func skipValue(decoder *json.Decoder) error {
 	if err != nil {
 		return err
 	}
+	return skipValueFromToken(decoder, token)
+}
+
+func skipValueFromToken(decoder *json.Decoder, token json.Token) error {
 	delimiter, isDelimiter := token.(json.Delim)
 	if !isDelimiter {
 		return nil
@@ -298,7 +330,7 @@ func skipValue(decoder *json.Decoder) error {
 	default:
 		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
 	}
-	_, err = decoder.Token()
+	_, err := decoder.Token()
 	return err
 }
 
@@ -352,8 +384,8 @@ func sanitizeHeaders(headers []nameValue, redactor *redact.Redactor) map[string]
 	return sanitized
 }
 
-func sanitizeQuery(query []nameValue, redactor *redact.Redactor) map[string]string {
-	sanitized := make(map[string]string, len(query))
+func sanitizeQuery(query []nameValue, redactor *redact.Redactor) map[string][]string {
+	sanitized := make(map[string][]string, len(query))
 	for _, parameter := range query {
 		name := truncate(redactor.Text(parameter.Name))
 		if name == "" {
@@ -367,7 +399,7 @@ func sanitizeQuery(query []nameValue, redactor *redact.Redactor) map[string]stri
 		} else {
 			value = redactor.Text(value)
 		}
-		sanitized[name] = truncate(value)
+		sanitized[name] = append(sanitized[name], truncate(value))
 	}
 	return sanitized
 }
@@ -375,6 +407,11 @@ func sanitizeQuery(query []nameValue, redactor *redact.Redactor) map[string]stri
 func sanitizeTimings(timings map[string]any) map[string]any {
 	sanitized := make(map[string]any, len(timings))
 	for key, value := range timings {
+		switch key {
+		case "blocked", "dns", "connect", "send", "wait", "receive", "ssl":
+		default:
+			continue
+		}
 		switch value.(type) {
 		case float64, int64, int:
 			sanitized[key] = value

@@ -34,6 +34,7 @@ type Config struct {
 	Since                   time.Duration
 	Timeout                 time.Duration
 	MaxLogBytes             int64
+	MaxTotalLogBytes        int64
 	LogWorkers              int
 	Progress                func(Progress)
 }
@@ -80,6 +81,7 @@ type logRequest struct {
 	podName        string
 	containerName  string
 	previous       bool
+	maxBytes       int64
 }
 
 type collectedLog struct {
@@ -87,6 +89,7 @@ type collectedLog struct {
 	data      []byte
 	truncated bool
 	issue     *Issue
+	reserved  int64
 }
 
 type podList struct {

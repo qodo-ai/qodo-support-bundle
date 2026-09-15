@@ -3,10 +3,24 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+type failingCloser struct {
+	calls int
+	err   error
+}
+
+func (closer *failingCloser) Close() error {
+	closer.calls++
+	return closer.err
+}
 
 func TestRunVersion(t *testing.T) {
 	t.Parallel()
@@ -61,7 +75,7 @@ func TestCollectAcceptsPositionalHARAndDefaultsToApplicationScope(t *testing.T) 
 
 	if exitCode != 1 ||
 		!strings.Contains(stderr.String(), "Scope: all application namespaces") ||
-		!strings.Contains(stderr.String(), missingHAR) {
+		!strings.Contains(stderr.String(), filepath.Base(missingHAR)) {
 		t.Fatalf("unexpected result: exit=%d stderr=%q", exitCode, stderr.String())
 	}
 }
@@ -100,6 +114,23 @@ func TestServeRequiresBundlePath(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "requires exactly one bundle path") {
 		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
+func TestServeRejectsNonPositiveArchiveLimit(t *testing.T) {
+	t.Parallel()
+	var stderr bytes.Buffer
+
+	exitCode := Run(
+		context.Background(),
+		[]string{"serve", "--max-archive-bytes", "0", "bundle.tar.gz"},
+		&bytes.Buffer{},
+		&stderr,
+	)
+
+	if exitCode != 2 ||
+		!strings.Contains(stderr.String(), "max-archive-bytes must be positive") {
+		t.Fatalf("unexpected result: exit=%d stderr=%q", exitCode, stderr.String())
 	}
 }
 
@@ -160,5 +191,138 @@ func TestCollectRequiresAllNamespacesForSystemExclusion(t *testing.T) {
 	if exitCode != 2 ||
 		!strings.Contains(stderr.String(), "requires --all-namespaces") {
 		t.Fatalf("unexpected result: exit=%d stderr=%q", exitCode, stderr.String())
+	}
+}
+
+func TestCollectAcceptsFalseSystemExclusionWithExplicitNamespace(t *testing.T) {
+	t.Parallel()
+	var stderr bytes.Buffer
+	missingHAR := filepath.Join(t.TempDir(), "missing.har")
+
+	exitCode := Run(
+		context.Background(),
+		[]string{
+			"collect",
+			"--namespace", "qodo",
+			"--exclude-system-namespaces=false",
+			"--output", filepath.Join(t.TempDir(), "bundle.tar.gz"),
+			missingHAR,
+		},
+		&bytes.Buffer{},
+		&stderr,
+	)
+
+	if exitCode != 1 ||
+		strings.Contains(stderr.String(), "requires --all-namespaces") {
+		t.Fatalf("unexpected result: exit=%d stderr=%q", exitCode, stderr.String())
+	}
+}
+
+func TestCollectRejectsUnsafeResourceLimits(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		arguments []string
+		message   string
+	}{
+		{
+			name:      "per log bytes",
+			arguments: []string{"--max-log-bytes", fmt.Sprint(maxLogLimit + 1)},
+			message:   "--max-log-bytes must not exceed",
+		},
+		{
+			name:      "total log bytes",
+			arguments: []string{"--max-total-log-bytes", fmt.Sprint(maxTotalLogLimit + 1)},
+			message:   "--max-total-log-bytes must not exceed",
+		},
+		{
+			name:      "workers",
+			arguments: []string{"--log-workers", fmt.Sprint(maxLogWorkers + 1)},
+			message:   "--log-workers must not exceed",
+		},
+		{
+			name:      "HAR bytes",
+			arguments: []string{"--max-har-bytes", fmt.Sprint(int64(^uint64(0) >> 1))},
+			message:   "--max-har-bytes must not exceed",
+		},
+		{
+			name:      "HAR entries",
+			arguments: []string{"--max-har-entries", fmt.Sprint(maxHAREntryLimit + 1)},
+			message:   "--max-har-entries must not exceed",
+		},
+		{
+			name: "per log exceeds total",
+			arguments: []string{
+				"--max-log-bytes", "1024",
+				"--max-total-log-bytes", "512",
+			},
+			message: "--max-log-bytes must not exceed --max-total-log-bytes",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			arguments := append(
+				[]string{"collect", "--namespace", "qodo", "--har", "capture.har"},
+				test.arguments...,
+			)
+			var stderr bytes.Buffer
+
+			exitCode := Run(
+				context.Background(),
+				arguments,
+				&bytes.Buffer{},
+				&stderr,
+			)
+
+			if exitCode != 2 || !strings.Contains(stderr.String(), test.message) {
+				t.Fatalf(
+					"unexpected result: exit=%d stderr=%q",
+					exitCode,
+					stderr.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestCloseBundleReportsSanitizedFailureAndSetsFailureExit(t *testing.T) {
+	t.Parallel()
+	closer := &failingCloser{err: errors.New("remove /sensitive/staging/path")}
+	var stderr bytes.Buffer
+	exitCode := 3
+
+	closeBundle(closer, &stderr, &exitCode)
+
+	if closer.calls != 1 {
+		t.Fatalf("unexpected close calls: %d", closer.calls)
+	}
+	if exitCode != 1 {
+		t.Fatalf("unexpected exit code: %d", exitCode)
+	}
+	if stderr.String() != "Failed to clean up temporary bundle data.\n" {
+		t.Fatalf("unexpected stderr: %q", stderr.String())
+	}
+}
+
+func TestResolveKubectlReturnsCanonicalAbsolutePath(t *testing.T) {
+	t.Parallel()
+	binaryPath := filepath.Join(t.TempDir(), "kubectl")
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := resolveKubectl(binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := filepath.EvalSymlinks(binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != expected || !filepath.IsAbs(resolved) {
+		t.Fatalf("unexpected resolved path: got %q want %q", resolved, expected)
 	}
 }

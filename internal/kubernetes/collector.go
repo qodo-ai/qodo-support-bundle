@@ -10,18 +10,24 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/redact"
 )
 
 const (
-	metadataOutputLimit = 64 << 20
-	defaultLogWorkers   = 8
+	metadataOutputLimit  int64 = 64 << 20
+	defaultLogWorkers          = 8
+	MaximumLogBytes      int64 = 100 << 20
+	MaximumTotalLogBytes int64 = 8 << 30
+	MaximumLogWorkers          = 64
 )
 
-var safePathCharacter = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+var (
+	safePathCharacter   = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+	privateKeyBeginLine = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)
+	privateKeyEndLine   = regexp.MustCompile(`-----END [A-Z ]*PRIVATE KEY-----`)
+)
 
 // Collect gathers safe pod metadata, events, and current and previous container logs.
 func Collect(
@@ -33,6 +39,24 @@ func Collect(
 ) (Report, error) {
 	if config.MaxLogBytes <= 0 {
 		return Report{}, errors.New("max log bytes must be positive")
+	}
+	if config.MaxLogBytes > MaximumLogBytes {
+		return Report{}, fmt.Errorf("max log bytes must not exceed %d", MaximumLogBytes)
+	}
+	if config.MaxTotalLogBytes <= 0 {
+		return Report{}, errors.New("max total log bytes must be positive")
+	}
+	if config.MaxTotalLogBytes > MaximumTotalLogBytes {
+		return Report{}, fmt.Errorf(
+			"max total log bytes must not exceed %d",
+			MaximumTotalLogBytes,
+		)
+	}
+	if config.MaxLogBytes > config.MaxTotalLogBytes {
+		return Report{}, errors.New("max log bytes must not exceed max total log bytes")
+	}
+	if config.LogWorkers > MaximumLogWorkers {
+		return Report{}, fmt.Errorf("log workers must not exceed %d", MaximumLogWorkers)
 	}
 	if config.ExcludeSystemNamespaces && !config.AllNamespaces {
 		return Report{}, errors.New(
@@ -296,36 +320,72 @@ func collectLogs(
 	if workers == 0 {
 		return
 	}
-	jobs := make(chan logRequest)
-	results := make(chan collectedLog)
-	var waitGroup sync.WaitGroup
-	waitGroup.Add(workers)
-	for range workers {
-		go func() {
-			defer waitGroup.Done()
-			for request := range jobs {
-				results <- readLog(ctx, config, runner, redactor, request)
-			}
-		}()
-	}
-	go func() {
-		defer close(jobs)
-		for _, request := range requests {
-			select {
-			case jobs <- request:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	go func() {
-		waitGroup.Wait()
-		close(results)
-	}()
+	results := make(chan collectedLog, workers)
+	remaining := config.MaxTotalLogBytes
+	next := 0
+	active := 0
 	completed := 0
 	progressInterval := max(len(requests)/20, 1)
-	for result := range results {
+	for active > 0 || next < len(requests) {
+		for active < workers && next < len(requests) && remaining > 0 {
+			if remaining < config.MaxLogBytes && active > 0 {
+				break
+			}
+			request := requests[next]
+			request.maxBytes = min(config.MaxLogBytes, remaining)
+			remaining -= request.maxBytes
+			next++
+			active++
+			go func() {
+				results <- readLog(ctx, config, runner, redactor, request)
+			}()
+		}
+		if active == 0 {
+			skipped := len(requests) - next
+			report.Issues = append(report.Issues, Issue{
+				Operation: "collect container logs",
+				Message: fmt.Sprintf(
+					"total log collection limit reached; skipped %d log streams",
+					skipped,
+				),
+			})
+			completed += skipped
+			reportProgress(config, Progress{
+				Stage:   "logs_progress",
+				Current: completed,
+				Total:   len(requests),
+				Workers: workers,
+			})
+			break
+		}
+
+		result := <-results
+		active--
 		completed++
+		retained := int64(0)
+		if result.issue != nil {
+			report.Issues = append(report.Issues, *result.issue)
+		} else if err := sink.Add(result.path, result.data); err != nil {
+			report.Issues = append(report.Issues, Issue{
+				Operation: "add container log",
+				Resource:  result.path,
+				Message:   redactor.Text(err.Error()),
+			})
+		} else {
+			retained = int64(len(result.data))
+			report.LogFiles++
+			if result.truncated {
+				report.TruncatedLogFiles++
+				if result.reserved < config.MaxLogBytes {
+					report.Issues = append(report.Issues, Issue{
+						Operation: "collect container log",
+						Resource:  redactor.Text(result.path),
+						Message:   "total log collection limit truncated this stream",
+					})
+				}
+			}
+		}
+		remaining += result.reserved - retained
 		if completed == len(requests) || completed%progressInterval == 0 {
 			reportProgress(config, Progress{
 				Stage:   "logs_progress",
@@ -333,22 +393,6 @@ func collectLogs(
 				Total:   len(requests),
 				Workers: workers,
 			})
-		}
-		if result.issue != nil {
-			report.Issues = append(report.Issues, *result.issue)
-			continue
-		}
-		if err := sink.Add(result.path, result.data); err != nil {
-			report.Issues = append(report.Issues, Issue{
-				Operation: "add container log",
-				Resource:  result.path,
-				Message:   redactor.Text(err.Error()),
-			})
-			continue
-		}
-		report.LogFiles++
-		if result.truncated {
-			report.TruncatedLogFiles++
 		}
 	}
 }
@@ -380,13 +424,13 @@ func readLog(
 		ctx,
 		config.Timeout,
 		runner,
-		config.MaxLogBytes,
+		request.maxBytes,
 		arguments...,
 	)
 	resource := request.namespace + "/" + request.podName + "/" + request.containerName
 	if err != nil {
 		issue := issueFromCommand(operation, resource, result, err, redactor)
-		return collectedLog{issue: &issue}
+		return collectedLog{issue: &issue, reserved: request.maxBytes}
 	}
 
 	pathParts := []string{"kubernetes", "logs"}
@@ -399,10 +443,17 @@ func readLog(
 		safePathSegment(request.containerName)+suffix+".log",
 	)
 	path := filepath.ToSlash(filepath.Join(pathParts...))
+	data := sanitizeLog(result.Stdout, redactor)
+	truncated := result.Truncated
+	if int64(len(data)) > request.maxBytes {
+		data = data[:int(request.maxBytes)]
+		truncated = true
+	}
 	return collectedLog{
 		path:      path,
-		data:      sanitizeLog(result.Stdout, redactor),
-		truncated: result.Truncated,
+		data:      data,
+		truncated: truncated,
+		reserved:  request.maxBytes,
 	}
 }
 
@@ -502,12 +553,48 @@ func marshalEventRecords(events []event, redactor *redact.Redactor) ([]byte, err
 func sanitizeLog(input []byte, redactor *redact.Redactor) []byte {
 	lines := bytes.Split(input, []byte("\n"))
 	var output bytes.Buffer
+	inPrivateKey := false
 	for index, line := range lines {
 		if index == len(lines)-1 && len(line) == 0 {
 			break
 		}
-		output.WriteString(redactor.JSONLine(string(line)))
-		output.WriteByte('\n')
+		if len(line) == 0 {
+			if !inPrivateKey {
+				output.WriteByte('\n')
+			}
+			continue
+		}
+		remaining := string(line)
+		var sanitizedLine strings.Builder
+		writeLine := false
+		for remaining != "" {
+			if inPrivateKey {
+				end := privateKeyEndLine.FindStringIndex(remaining)
+				if end == nil {
+					remaining = ""
+					break
+				}
+				inPrivateKey = false
+				remaining = remaining[end[1]:]
+				continue
+			}
+
+			begin := privateKeyBeginLine.FindStringIndex(remaining)
+			if begin == nil {
+				sanitizedLine.WriteString(redactor.JSONLine(remaining))
+				writeLine = true
+				break
+			}
+			sanitizedLine.WriteString(redactor.JSONLine(remaining[:begin[0]]))
+			sanitizedLine.WriteString(redact.Replacement)
+			writeLine = true
+			remaining = remaining[begin[1]:]
+			inPrivateKey = true
+		}
+		if writeLine {
+			output.WriteString(sanitizedLine.String())
+			output.WriteByte('\n')
+		}
 	}
 	return output.Bytes()
 }

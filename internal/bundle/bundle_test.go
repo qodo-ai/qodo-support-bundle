@@ -199,6 +199,54 @@ func TestFinalizeDoesNotOverwriteConcurrentOutput(t *testing.T) {
 	}
 }
 
+func TestFinalizeCleanupFailureCanBeRetriedByClose(t *testing.T) {
+	t.Parallel()
+	outputPath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	builder, err := New(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRemoveAll := builder.removeAll
+	removeAttempts := 0
+	builder.removeAll = func(path string) error {
+		removeAttempts++
+		if removeAttempts == 1 {
+			return errors.New("injected cleanup failure")
+		}
+		return originalRemoveAll(path)
+	}
+
+	archivePath, err := builder.Finalize(Manifest{
+		CollectorVersion: "test",
+		GeneratedAt:      time.Date(2026, 9, 15, 6, 0, 0, 0, time.UTC),
+	})
+	if !errors.Is(err, ErrCleanup) {
+		t.Fatalf("expected cleanup error, got %v", err)
+	}
+	if archivePath != outputPath {
+		t.Fatalf("unexpected published archive path: %q", archivePath)
+	}
+	if builder.closed {
+		t.Fatal("builder was closed before staging cleanup succeeded")
+	}
+	if _, err := os.Stat(outputPath); err != nil {
+		t.Fatalf("published archive is unavailable: %v", err)
+	}
+
+	if err := builder.Close(); err != nil {
+		t.Fatalf("retry cleanup: %v", err)
+	}
+	if !builder.closed {
+		t.Fatal("builder is not closed after successful cleanup retry")
+	}
+	if removeAttempts != 2 {
+		t.Fatalf("unexpected cleanup attempts: %d", removeAttempts)
+	}
+	if _, err := os.Stat(builder.stagingDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staging directory still exists: %v", err)
+	}
+}
+
 func readArchive(t *testing.T, path string) map[string][]byte {
 	t.Helper()
 	file, err := os.Open(path)

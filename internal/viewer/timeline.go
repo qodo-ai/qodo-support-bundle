@@ -3,6 +3,7 @@ package viewer
 import (
 	"bufio"
 	"container/heap"
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -55,6 +56,7 @@ type TimelineResponse struct {
 }
 
 func readTimeline(
+	ctx context.Context,
 	bundle *ExtractedBundle,
 	query string,
 	filter string,
@@ -72,6 +74,9 @@ func readTimeline(
 	var scannedBytes int64
 
 	for _, bundleFile := range bundle.Files {
+		if err := ctx.Err(); err != nil {
+			return TimelineResponse{}, err
+		}
 		if !timelineFile(bundleFile.Path) {
 			continue
 		}
@@ -91,6 +96,10 @@ func readTimeline(
 		scanner.Buffer(make([]byte, 64<<10), maxScannedLineBytes)
 		lineNumber := 0
 		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				_ = file.Close()
+				return TimelineResponse{}, err
+			}
 			lineNumber++
 			line := scanner.Text()
 			scannedBytes += int64(len(line)) + 1

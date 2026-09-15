@@ -47,7 +47,9 @@ qodo-support-bundle collect ~/Downloads/qodo-login.har
 That command uses the current `kubectl` context, discovers application
 namespaces, excludes Kubernetes and managed GKE control-plane namespaces,
 imports the required HAR, reads container logs concurrently, shows progress,
-and writes a timestamped bundle in the current directory.
+and writes a timestamped bundle in the current directory. Before accessing the
+cluster, it resolves symlinks to an absolute `kubectl` path and prints that path
+so the operator can verify which client will run.
 
 Use `--context` only when the current `kubectl` context is not the target
 cluster. Explicit namespace scope remains available for shared clusters:
@@ -85,7 +87,13 @@ Prometheus system namespaces, and Config Connector system namespaces.
 Application dependencies such as `rabbitmq-system` remain included. Other
 non-Qodo application namespaces may still be collected on a shared cluster.
 Container logs use eight concurrent readers by default; tune this with
-`--log-workers` for unusually small or large API servers.
+`--log-workers` (maximum 64) for unusually small or large API servers. Each
+stream is capped at 10 MiB by default (`--max-log-bytes`, maximum 100 MiB), and
+current plus previous logs share a 1 GiB retained-data budget
+(`--max-total-log-bytes`, maximum 8 GiB). Once that aggregate budget is
+exhausted, remaining streams are skipped and reported as non-fatal collection
+issues. HAR input defaults to 256 MiB and can be raised with `--max-har-bytes`
+up to 4 GiB.
 
 Exit code `0` means collection completed. Exit code `3` means a usable partial
 bundle was created; inspect `collection-issues.jsonl` for unavailable resources
@@ -99,8 +107,8 @@ Open a bundle in the offline viewer:
 qodo-support-bundle serve ./qodo-support-bundle.tar.gz
 ```
 
-The command verifies every checksum, safely extracts bounded files into an
-owner-only temporary directory, starts a read-only server on a random
+The command checks every embedded checksum, safely extracts bounded files into
+an owner-only temporary directory, starts a read-only server on a random
 `127.0.0.1` port, and opens the system browser. The default timeline correlates
 browser requests, backend logs, Kubernetes events, and pod lifecycle records in
 horizontal swimlanes. Dense logs are clustered into clickable time slices, and
@@ -110,11 +118,16 @@ groups. Time-window selection, zoom, horizontal navigation, text search, error
 and authentication-flow filters, record details, and the original paginated
 file explorer are also available.
 
-Use `--no-open` when copying the printed URL manually:
+Use `--no-open` when the tool cannot launch a browser. Open the printed
+owner-only launcher file, which hands the one-time credential to the viewer
+without placing it in terminal output, browser history, or process arguments:
 
 ```bash
 qodo-support-bundle serve --no-open ./qodo-support-bundle.tar.gz
 ```
+
+Compressed bundle input is capped at 4 GiB by default. Lower that bound for
+smaller expected bundles with `--max-archive-bytes`.
 
 Press `Ctrl+C` to stop the server and delete the extracted temporary data. The
 viewer rejects non-loopback clients, unexpected host headers, modified
@@ -147,6 +160,7 @@ after redaction.
 Verify integrity after extracting:
 
 ```bash
+mkdir -p ./qodo-support-bundle
 tar -xzf qodo-support-bundle.tar.gz -C ./qodo-support-bundle
 cd ./qodo-support-bundle
 shasum -a 256 -c checksums.sha256

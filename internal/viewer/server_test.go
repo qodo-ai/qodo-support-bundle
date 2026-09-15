@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -15,14 +16,14 @@ import (
 	archivebundle "github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/bundle"
 )
 
-const testViewerToken = "test-viewer-token"
+const testViewerToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func TestHandlerServesManifestWithSecurityHeaders(t *testing.T) {
 	t.Parallel()
 	bundle := testExtractedBundle(t, map[string]string{
 		"manifest.json": `{"collection":{"status":"complete"}}`,
 	})
-	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken)
+	handler := newClaimedHandler(t, bundle, "127.0.0.1:4321")
 	request := viewerRequest(
 		http.MethodGet,
 		"http://127.0.0.1:4321/api/manifest",
@@ -49,7 +50,7 @@ func TestHandlerRequiresTokenOnlyForAPIs(t *testing.T) {
 	bundle := testExtractedBundle(t, map[string]string{
 		"manifest.json": `{}`,
 	})
-	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken)
+	handler := newClaimedHandler(t, bundle, "127.0.0.1:4321")
 
 	indexRequest := viewerRequest(http.MethodGet, "http://127.0.0.1:4321/")
 	indexRequest.Header.Del("Authorization")
@@ -83,7 +84,7 @@ func TestHandlerRejectsWrongHostAndNonLoopbackClient(t *testing.T) {
 	bundle := testExtractedBundle(t, map[string]string{
 		"manifest.json": `{}`,
 	})
-	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken)
+	handler := newClaimedHandler(t, bundle, "127.0.0.1:4321")
 
 	wrongHost := viewerRequest(
 		http.MethodGet,
@@ -116,7 +117,7 @@ func TestHandlerFiltersRecords(t *testing.T) {
 {"request":{"method":"GET","url":"https://example.com/auth/v1/oidc/userinfo"},"response":{"status":403}}
 `,
 	})
-	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken)
+	handler := newClaimedHandler(t, bundle, "127.0.0.1:4321")
 	request := viewerRequest(
 		http.MethodGet,
 		"http://127.0.0.1:4321/api/records?"+
@@ -140,7 +141,7 @@ func TestHandlerServesTimelineAndRecordDetails(t *testing.T) {
 	bundle := testExtractedBundle(t, map[string]string{
 		"browser/network.jsonl": `{"@timestamp":"2026-09-15T07:02:00Z","request":{"method":"GET","url":"https://example.com/auth/v1/oidc/userinfo"},"response":{"status":403}}` + "\n",
 	})
-	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken)
+	handler := newClaimedHandler(t, bundle, "127.0.0.1:4321")
 
 	timelineRequest := viewerRequest(
 		http.MethodGet,
@@ -184,7 +185,7 @@ func TestHandlerRejectsMutationMethods(t *testing.T) {
 	bundle := testExtractedBundle(t, map[string]string{
 		"manifest.json": `{}`,
 	})
-	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken)
+	handler := newClaimedHandler(t, bundle, "127.0.0.1:4321")
 	request := viewerRequest(
 		http.MethodPost,
 		"http://127.0.0.1:4321/api/manifest",
@@ -198,39 +199,151 @@ func TestHandlerRejectsMutationMethods(t *testing.T) {
 	}
 }
 
-func TestRandomTokenIsUnpredictableLength(t *testing.T) {
+func TestHandlerOnlyAcceptsServerIssuedSession(t *testing.T) {
 	t.Parallel()
-	first, err := randomToken()
+	bundle := testExtractedBundle(t, map[string]string{"manifest.json": `{}`})
+	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken, nil)
+	const claimCount = 16
+	statuses := make(chan int, claimCount)
+	var waitGroup sync.WaitGroup
+	for index := 0; index < claimCount; index++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			request := viewerRequest(
+				http.MethodPost,
+				"http://127.0.0.1:4321/api/session",
+			)
+			request.Header.Del("Authorization")
+			request.Header.Set(sessionClaimHeader, strings.Repeat("a", 64))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			statuses <- response.Code
+		}()
+	}
+	waitGroup.Wait()
+	close(statuses)
+	for status := range statuses {
+		if status != http.StatusForbidden {
+			t.Fatalf("unexpected claim status: %d", status)
+		}
+	}
+	request := viewerRequest(http.MethodPost, "http://127.0.0.1:4321/api/session")
+	request.Header.Del("Authorization")
+	request.Header.Set(sessionClaimHeader, testViewerToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("server-issued claim returned %d", response.Code)
+	}
+}
+
+func TestHandlerRequiresCustomHeaderToClaimSession(t *testing.T) {
+	t.Parallel()
+	bundle := testExtractedBundle(t, map[string]string{"manifest.json": `{}`})
+	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken, nil)
+	request := viewerRequest(http.MethodPost, "http://127.0.0.1:4321/api/session")
+	request.Header.Del("Authorization")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("claim without custom header returned %d", response.Code)
+	}
+}
+
+func TestHandlerDoesNotAllowCrossOriginSessionPreflight(t *testing.T) {
+	t.Parallel()
+	bundle := testExtractedBundle(t, map[string]string{"manifest.json": `{}`})
+	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken, nil)
+	request := viewerRequest(http.MethodOptions, "http://127.0.0.1:4321/api/session")
+	request.Header.Del("Authorization")
+	request.Header.Set("Origin", "https://attacker.example")
+	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	request.Header.Set("Access-Control-Request-Headers", sessionClaimHeader)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("unexpected preflight response: %d", response.Code)
+	}
+	if response.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("cross-origin request was allowed: %+v", response.Header())
+	}
+}
+
+func TestHandlerRetriesClaimAfterLauncherCleanupFailure(t *testing.T) {
+	t.Parallel()
+	bundle := testExtractedBundle(t, map[string]string{"manifest.json": `{}`})
+	cleanupCalls := 0
+	handler := newHandler(
+		bundle,
+		"127.0.0.1:4321",
+		testViewerToken,
+		func() error {
+			cleanupCalls++
+			if cleanupCalls == 1 {
+				return errors.New("temporary cleanup failure")
+			}
+			return nil
+		},
+	)
+	request := viewerRequest(http.MethodPost, "http://127.0.0.1:4321/api/session")
+	request.Header.Del("Authorization")
+	request.Header.Set(sessionClaimHeader, testViewerToken)
+
+	firstResponse := httptest.NewRecorder()
+	handler.ServeHTTP(firstResponse, request)
+	secondResponse := httptest.NewRecorder()
+	handler.ServeHTTP(secondResponse, request)
+
+	if firstResponse.Code != http.StatusInternalServerError ||
+		secondResponse.Code != http.StatusNoContent ||
+		cleanupCalls != 2 {
+		t.Fatalf(
+			"unexpected retry result: first=%d second=%d cleanup=%d",
+			firstResponse.Code,
+			secondResponse.Code,
+			cleanupCalls,
+		)
+	}
+}
+
+func TestCreateLauncherProtectsSecretAndUsesBrowserCompatibleCSP(t *testing.T) {
+	t.Parallel()
+	launcher, err := createLauncher("http://127.0.0.1:4321/")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := randomToken()
+	t.Cleanup(func() {
+		if err := launcher.Remove(); err != nil {
+			t.Error(err)
+		}
+	})
+	info, err := os.Stat(launcher.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first) < 32 || first == second {
-		t.Fatalf("unexpected session tokens: %q %q", first, second)
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("unexpected launcher permissions: %o", info.Mode().Perm())
+	}
+	data, err := os.ReadFile(launcher.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, `window.name="`+launcher.token+`"`) ||
+		!strings.Contains(content, "window.location.replace(") ||
+		!strings.Contains(content, `script-src 'nonce-`) {
+		t.Fatalf("launcher is missing protected handoff: %s", content)
 	}
 }
 
 func TestServeStartsAndStopsLocalViewer(t *testing.T) {
 	t.Parallel()
-	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	builder, err := archivebundle.New(archivePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer builder.Close()
-	if err := builder.Add("browser/network.jsonl", []byte("{}\n")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := builder.Finalize(archivebundle.Manifest{
-		CollectorVersion: "test",
-		GeneratedAt:      time.Date(2026, 9, 15, 7, 0, 0, 0, time.UTC),
-		Collection:       map[string]any{"status": "complete"},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	archivePath := createTestViewerArchive(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -251,20 +364,48 @@ func TestServeStartsAndStopsLocalViewer(t *testing.T) {
 	}
 
 	fields := strings.Fields(output.String())
-	if len(fields) < 8 {
-		t.Fatalf("viewer URL or token is missing: %s", output.String())
+	if len(fields) < 4 {
+		t.Fatalf("viewer URL is missing: %s", output.String())
 	}
 	viewerURL := fields[3]
-	accessToken := fields[7]
-	if strings.Contains(viewerURL, accessToken) {
-		t.Fatalf("viewer URL contains its access token: %s", viewerURL)
+	if strings.Contains(output.String(), "token") ||
+		strings.Contains(output.String(), testViewerToken) {
+		t.Fatalf("viewer output contains an access token: %s", output.String())
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
+	launcherPath := outputValue(t, output.String(), "Open launcher file: ")
+	launcherData, err := os.ReadFile(launcherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := launcherToken(t, string(launcherData))
+	claimRequest, err := http.NewRequest(
+		http.MethodPost,
+		viewerURL+"api/session",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimRequest.Header.Set(sessionClaimHeader, token)
+	claimResponse, err := client.Do(claimRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := claimResponse.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if claimResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected claim status: %d", claimResponse.StatusCode)
+	}
+	if _, err := os.Stat(launcherPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("launcher still exists after claim: %v", err)
+	}
 	request, err := http.NewRequest(http.MethodGet, viewerURL+"api/manifest", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Authorization", "Bearer "+accessToken)
+	request.Header.Set("Authorization", "Bearer "+token)
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -287,12 +428,135 @@ func TestServeStartsAndStopsLocalViewer(t *testing.T) {
 	}
 }
 
+func TestServeRemovesUnclaimedLauncherAtShutdown(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	archivePath := createTestViewerArchive(t)
+	output := newReadyWriter()
+	serveErrors := make(chan error, 1)
+	go func() {
+		serveErrors <- Serve(ctx, Config{
+			BundlePath:    archivePath,
+			ListenAddress: "127.0.0.1:0",
+			Output:        output,
+		})
+	}()
+	select {
+	case <-output.ready:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("viewer did not start: %s", output.String())
+	}
+	launcherPath := outputValue(t, output.String(), "Open launcher file: ")
+
+	cancel()
+	select {
+	case err := <-serveErrors:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("viewer did not stop")
+	}
+	if _, err := os.Stat(launcherPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("launcher still exists after shutdown: %v", err)
+	}
+}
+
+func TestServeFailsWhenInstructionsCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	archivePath := createTestViewerArchive(t)
+
+	err := Serve(context.Background(), Config{
+		BundlePath:    archivePath,
+		ListenAddress: "127.0.0.1:0",
+		Output:        failingWriter{},
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "write viewer instructions") {
+		t.Fatalf("expected output error, got %v", err)
+	}
+}
+
+func createTestViewerArchive(t *testing.T) string {
+	t.Helper()
+	archivePath := t.TempDir() + "/bundle.tar.gz"
+	builder, err := archivebundle.New(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.Add("browser/network.jsonl", []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := builder.Finalize(archivebundle.Manifest{
+		CollectorVersion: "test",
+		GeneratedAt:      time.Date(2026, 9, 15, 7, 0, 0, 0, time.UTC),
+		Collection:       map[string]any{"status": "complete"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return archivePath
+}
+
+func outputValue(t *testing.T, output string, prefix string) string {
+	t.Helper()
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimPrefix(line, prefix)
+		}
+	}
+	t.Fatalf("output does not contain %q: %s", prefix, output)
+	return ""
+}
+
+func launcherToken(t *testing.T, content string) string {
+	t.Helper()
+	const prefix = `window.name="`
+	start := strings.Index(content, prefix)
+	if start < 0 {
+		t.Fatalf("launcher token is missing: %s", content)
+	}
+	start += len(prefix)
+	end := strings.Index(content[start:], `"`)
+	if end < 0 {
+		t.Fatalf("launcher token is unterminated: %s", content)
+	}
+	return content[start : start+end]
+}
+
+func newClaimedHandler(
+	t *testing.T,
+	bundle *ExtractedBundle,
+	expectedHost string,
+) http.Handler {
+	t.Helper()
+	handler := newHandler(bundle, expectedHost, testViewerToken, nil)
+	request := viewerRequest(http.MethodPost, "http://"+expectedHost+"/api/session")
+	request.Header.Del("Authorization")
+	request.Header.Set(sessionClaimHeader, testViewerToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("could not claim test viewer session: %d %s", response.Code, response.Body)
+	}
+	return handler
+}
+
 func viewerRequest(method string, target string) *http.Request {
 	request := httptest.NewRequest(method, target, nil)
 	request.Host = "127.0.0.1:4321"
 	request.RemoteAddr = "127.0.0.1:1234"
 	request.Header.Set("Authorization", "Bearer "+testViewerToken)
 	return request
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
 }
 
 type readyWriter struct {

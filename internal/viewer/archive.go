@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,8 +19,11 @@ import (
 
 const (
 	DefaultMaxFiles          = 10_000
+	DefaultMaxArchiveBytes   = int64(4 << 30)
 	DefaultMaxExtractedBytes = int64(2 << 30)
 	DefaultMaxFileBytes      = int64(512 << 20)
+	maxChecksumsBytes        = int64(4 << 20)
+	maxManifestBytes         = int64(4 << 20)
 	maxArchivePathBytes      = 4 << 10
 	maxArchivePathDepth      = 64
 	tarOverheadPerMember     = int64(8 << 10)
@@ -28,6 +32,7 @@ const (
 // ExtractionLimits bound archive processing before any local viewer starts.
 type ExtractionLimits struct {
 	MaxFiles          int
+	MaxArchiveBytes   int64
 	MaxExtractedBytes int64
 	MaxFileBytes      int64
 }
@@ -68,6 +73,10 @@ func Extract(bundlePath string, limits ExtractionLimits) (*ExtractedBundle, erro
 		_ = os.RemoveAll(root)
 		return nil, err
 	}
+	if err := validateManifest(root, extracted); err != nil {
+		_ = os.RemoveAll(root)
+		return nil, err
+	}
 	files := make([]File, 0, len(extracted))
 	for path, extractedFile := range extracted {
 		files = append(files, File{Path: path, Size: extractedFile.size})
@@ -90,6 +99,9 @@ func (bundle *ExtractedBundle) Close() error {
 
 // Resolve returns the checksum-consistent local path for a bundle member.
 func (bundle *ExtractedBundle) Resolve(path string) (string, bool) {
+	if bundle == nil || bundle.Root == "" {
+		return "", false
+	}
 	cleaned, err := safeArchivePath(path)
 	if err != nil {
 		return "", false
@@ -112,16 +124,28 @@ func extractArchive(
 	root string,
 	limits ExtractionLimits,
 ) (map[string]extractedFile, error) {
-	archiveFile, err := os.Open(bundlePath)
+	archiveFile, archiveSize, err := openRegularArchive(bundlePath)
 	if err != nil {
-		return nil, fmt.Errorf("open bundle: %w", err)
+		return nil, err
 	}
 	defer archiveFile.Close()
-	gzipReader, err := gzip.NewReader(archiveFile)
+	if archiveSize > limits.MaxArchiveBytes {
+		return nil, fmt.Errorf(
+			"bundle archive exceeds %d compressed bytes",
+			limits.MaxArchiveBytes,
+		)
+	}
+	compressedArchive := &io.LimitedReader{
+		R: archiveFile,
+		N: limits.MaxArchiveBytes + 1,
+	}
+	bufferedArchive := bufio.NewReader(compressedArchive)
+	gzipReader, err := gzip.NewReader(bufferedArchive)
 	if err != nil {
 		return nil, fmt.Errorf("open bundle gzip stream: %w", err)
 	}
 	defer gzipReader.Close()
+	gzipReader.Multistream(false)
 	maximumTarBytes, err := maximumTarStreamBytes(limits)
 	if err != nil {
 		return nil, err
@@ -178,6 +202,9 @@ func extractArchive(
 		case tar.TypeReg, tar.TypeRegA:
 		default:
 			return nil, fmt.Errorf("unsupported archive member type for %q", path)
+		}
+		if path == "checksums.sha256" && header.Size > maxChecksumsBytes {
+			return nil, errors.New("checksums.sha256 exceeds 4 MiB")
 		}
 		if header.Size < 0 || header.Size > limits.MaxFileBytes {
 			return nil, fmt.Errorf(
@@ -240,6 +267,27 @@ func extractArchive(
 			digest: hex.EncodeToString(hasher.Sum(nil)),
 		}
 	}
+	if _, err := io.Copy(io.Discard, limitedArchive); err != nil {
+		return nil, fmt.Errorf("finish bundle gzip stream: %w", err)
+	}
+	if limitedArchive.N <= 0 {
+		return nil, fmt.Errorf(
+			"bundle archive exceeds %d decompressed bytes",
+			maximumTarBytes,
+		)
+	}
+	if _, err := bufferedArchive.ReadByte(); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return nil, fmt.Errorf("check bundle gzip trailer: %w", err)
+		}
+		return nil, errors.New("bundle contains data after the gzip stream")
+	}
+	if compressedArchive.N <= 0 {
+		return nil, fmt.Errorf(
+			"bundle archive exceeds %d compressed bytes",
+			limits.MaxArchiveBytes,
+		)
+	}
 	return extracted, nil
 }
 
@@ -299,7 +347,7 @@ func checkChecksumConsistency(root string, extracted map[string]extractedFile) e
 	if !exists {
 		return errors.New("bundle does not contain checksums.sha256")
 	}
-	if checksumFile.size > 4<<20 {
+	if checksumFile.size > maxChecksumsBytes {
 		return errors.New("checksums.sha256 exceeds 4 MiB")
 	}
 	path := filepath.Join(root, "checksums.sha256")
@@ -364,10 +412,36 @@ func checkChecksumConsistency(root string, extracted map[string]extractedFile) e
 	return nil
 }
 
+func validateManifest(root string, extracted map[string]extractedFile) error {
+	manifestFile, exists := extracted["manifest.json"]
+	if !exists {
+		return errors.New("bundle does not contain manifest.json")
+	}
+	if manifestFile.size > maxManifestBytes {
+		return fmt.Errorf("manifest.json exceeds %d bytes", maxManifestBytes)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "manifest.json"))
+	if err != nil {
+		return fmt.Errorf("read manifest.json: %w", err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("parse manifest.json: %w", err)
+	}
+	if manifest == nil {
+		return errors.New("manifest.json must contain a JSON object")
+	}
+	return nil
+}
+
 func validateLimits(limits ExtractionLimits) error {
 	switch {
 	case limits.MaxFiles <= 0:
 		return errors.New("maximum file count must be positive")
+	case limits.MaxArchiveBytes <= 0:
+		return errors.New("maximum archive bytes must be positive")
+	case limits.MaxArchiveBytes == int64(^uint64(0)>>1):
+		return errors.New("maximum archive bytes is too large")
 	case limits.MaxExtractedBytes <= 0:
 		return errors.New("maximum extracted bytes must be positive")
 	case limits.MaxFileBytes <= 0:

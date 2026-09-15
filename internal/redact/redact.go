@@ -9,15 +9,18 @@ import (
 
 const Replacement = "[REDACTED]"
 
-const sensitiveAssignmentKeyPattern = `access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|password|passwd|secret|client[_-]?secret|client[_-]?assertion|authorization|proxy[_-]?authorization|cookie|set-cookie|credentials?|private[_-]?key|email|first[_-]?name|last[_-]?name|full[_-]?name|phone|address|ssn|mrn`
+const sensitiveAssignmentKeyPattern = `aws[_-]?secret[_-]?access[_-]?key|aws[_-]?access[_-]?key[_-]?id|access[_-]?token|refresh[_-]?token|id[_-]?token|code[_-]?verifier|saml[_-]?response|token|api[_-]?key|password|passwd|secret|client[_-]?secret|client[_-]?assertion|authorization|proxy[_-]?authorization|cookie|set-cookie|credentials?|private[_-]?key|email|first[_-]?name|last[_-]?name|full[_-]?name|phone|address|ssn|mrn`
 
 var sensitiveKeys = map[string]struct{}{
 	"accesstoken":        {},
 	"address":            {},
 	"apikey":             {},
 	"authorization":      {},
+	"awsaccesskeyid":     {},
+	"awssecretaccesskey": {},
 	"clientassertion":    {},
 	"clientsecret":       {},
+	"codeverifier":       {},
 	"cookie":             {},
 	"credential":         {},
 	"email":              {},
@@ -45,6 +48,10 @@ type replacementPattern struct {
 	expression  *regexp.Regexp
 	replacement string
 }
+
+var malformedURLUserinfoPattern = regexp.MustCompile(
+	`(?i)((?:[a-z][a-z0-9+.-]*:)?//)[^/?#\s]*@`,
+)
 
 // Redactor removes common credential and personal-data forms from diagnostic data.
 type Redactor struct {
@@ -83,7 +90,7 @@ func New() *Redactor {
 			},
 			{
 				expression: regexp.MustCompile(
-					`(?i)([?&](?:access_token|refresh_token|id_token|api_key|password|client_secret|code|state)=)[^&#\s]+`,
+					`(?i)([?&](?:access_token|refresh_token|id_token|api_key|password|client_secret|code_verifier|code|state)=)[^&#\s]+`,
 				),
 				replacement: `${1}` + Replacement,
 			},
@@ -127,7 +134,9 @@ func IsSensitiveKey(key string) bool {
 	}
 	for _, marker := range []string{
 		"authorization",
+		"awsaccesskeyid",
 		"clientassertion",
+		"codeverifier",
 		"cookie",
 		"credential",
 		"email",
@@ -139,6 +148,7 @@ func IsSensitiveKey(key string) bool {
 		"phone",
 		"privatekey",
 		"proxyauthorization",
+		"samlresponse",
 		"secret",
 		"session",
 		"ssn",
@@ -176,7 +186,14 @@ func (redactor *Redactor) Header(name string, value string) string {
 func (redactor *Redactor) URL(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return redactor.Text(rawURL)
+		withoutUserinfo := malformedURLUserinfoPattern.ReplaceAllString(
+			rawURL,
+			`${1}`+Replacement+"@",
+		)
+		if fragmentStart := strings.IndexByte(withoutUserinfo, '#'); fragmentStart >= 0 {
+			withoutUserinfo = withoutUserinfo[:fragmentStart]
+		}
+		return redactor.Text(withoutUserinfo)
 	}
 	if parsed.User != nil {
 		parsed.User = url.User(Replacement)
@@ -218,10 +235,28 @@ func (redactor *Redactor) Value(key string, value any) any {
 		}
 		return sanitized
 	case string:
+		if isURLKey(key) {
+			return redactor.URL(typed)
+		}
 		return redactor.Text(typed)
 	default:
 		return value
 	}
+}
+
+func isURLKey(key string) bool {
+	normalized := strings.ToLower(key)
+	for _, semanticKey := range []string{"url", "uri", "location", "referer"} {
+		if normalized == semanticKey {
+			return true
+		}
+		for _, separator := range []string{"_", "-", "."} {
+			if strings.HasSuffix(normalized, separator+semanticKey) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // JSONLine sanitizes a structured log line, falling back to text redaction.

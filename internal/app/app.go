@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -20,10 +22,18 @@ import (
 )
 
 const (
-	defaultHARLimit      = 256 << 20
-	defaultLogLimit      = 10 << 20
-	defaultLogWorkers    = 8
-	defaultMaxHAREntries = 100_000
+	defaultHARLimit          int64 = 256 << 20
+	maxHARLimit              int64 = 4 << 30
+	defaultLogLimit          int64 = 10 << 20
+	maxLogLimit                    = kubernetes.MaximumLogBytes
+	defaultTotalLogLimit     int64 = 1 << 30
+	maxTotalLogLimit               = kubernetes.MaximumTotalLogBytes
+	defaultLogWorkers              = 8
+	maxLogWorkers                  = kubernetes.MaximumLogWorkers
+	defaultMaxHAREntries           = 100_000
+	maxHAREntryLimit               = 1_000_000
+	collectionStatusComplete       = "complete"
+	collectionStatusPartial        = "partial"
 )
 
 // Version is replaced during release builds.
@@ -67,11 +77,20 @@ func runServe(
 		"Loopback address for the local viewer",
 	)
 	noOpen := flags.Bool("no-open", false, "Do not open the system browser")
+	maxArchiveBytes := flags.Int64(
+		"max-archive-bytes",
+		viewer.DefaultMaxArchiveBytes,
+		"Maximum accepted compressed bundle size",
+	)
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if flags.NArg() != 1 {
 		_, _ = fmt.Fprintln(stderr, "serve requires exactly one bundle path")
+		return 2
+	}
+	if *maxArchiveBytes <= 0 {
+		_, _ = fmt.Fprintln(stderr, "max-archive-bytes must be positive")
 		return 2
 	}
 
@@ -81,6 +100,9 @@ func runServe(
 		OpenBrowser:   !*noOpen,
 		Output:        stdout,
 		ErrorOutput:   stderr,
+		Limits: viewer.ExtractionLimits{
+			MaxArchiveBytes: *maxArchiveBytes,
+		},
 	})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, redact.New().Text(err.Error()))
@@ -94,7 +116,7 @@ func runCollect(
 	arguments []string,
 	stdout io.Writer,
 	stderr io.Writer,
-) int {
+) (exitCode int) {
 	flags := flag.NewFlagSet("collect", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	namespace := flags.String("namespace", "", "Specific Kubernetes namespace to collect")
@@ -124,17 +146,22 @@ func runCollect(
 	maxLogBytes := flags.Int64(
 		"max-log-bytes",
 		defaultLogLimit,
-		"Maximum bytes collected from each container log",
+		"Maximum bytes collected from each container log (up to 100 MiB)",
+	)
+	maxTotalLogBytes := flags.Int64(
+		"max-total-log-bytes",
+		defaultTotalLogLimit,
+		"Maximum bytes retained across all container logs (up to 8 GiB)",
 	)
 	logWorkers := flags.Int(
 		"log-workers",
 		defaultLogWorkers,
-		"Concurrent container log reads",
+		"Concurrent container log reads (up to 64)",
 	)
 	maxHARBytes := flags.Int64(
 		"max-har-bytes",
 		defaultHARLimit,
-		"Maximum accepted HAR file size",
+		"Maximum accepted HAR file size (up to 4 GiB)",
 	)
 	maxHAREntries := flags.Int(
 		"max-har-entries",
@@ -163,7 +190,7 @@ func runCollect(
 		*harPath = flags.Arg(0)
 	}
 	explicitNamespaces := visited["namespace"] || visited["namespaces"]
-	if visited["exclude-system-namespaces"] && !visited["all-namespaces"] {
+	if *excludeSystemNamespaces && !visited["all-namespaces"] {
 		_, _ = fmt.Fprintln(
 			stderr,
 			"--exclude-system-namespaces requires --all-namespaces",
@@ -205,6 +232,7 @@ func runCollect(
 		*since,
 		*timeout,
 		*maxLogBytes,
+		*maxTotalLogBytes,
 		*logWorkers,
 		*maxHARBytes,
 		*maxHAREntries,
@@ -226,7 +254,13 @@ func runCollect(
 		_, _ = fmt.Fprintln(stderr, redactor.Text(err.Error()))
 		return 1
 	}
-	defer builder.Close()
+	cleanupPending := true
+	defer func() {
+		if !cleanupPending {
+			return
+		}
+		closeBundle(builder, stderr, &exitCode)
+	}()
 
 	_, _ = fmt.Fprintf(
 		stderr,
@@ -254,6 +288,12 @@ func runCollect(
 		harStats.EntriesWritten,
 	)
 
+	resolvedKubectl, err := resolveKubectl(*kubectl)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, redactor.Text(err.Error()))
+		return 1
+	}
+	_, _ = fmt.Fprintf(stderr, "Using kubectl: %q\n", resolvedKubectl)
 	kubernetesReport, kubernetesErr := kubernetes.Collect(
 		ctx,
 		kubernetes.Config{
@@ -266,19 +306,20 @@ func runCollect(
 			Since:                   *since,
 			Timeout:                 *timeout,
 			MaxLogBytes:             *maxLogBytes,
+			MaxTotalLogBytes:        *maxTotalLogBytes,
 			LogWorkers:              *logWorkers,
 			Progress: func(progress kubernetes.Progress) {
 				writeCollectionProgress(stderr, redactor, progress)
 			},
 		},
-		kubernetes.ExecRunner{Binary: *kubectl},
+		kubernetes.ExecRunner{Binary: resolvedKubectl},
 		builder,
 		redactor,
 	)
 
-	collectionStatus := "complete"
+	collectionStatus := collectionStatusComplete
 	if kubernetesErr != nil || len(kubernetesReport.Issues) > 0 || harStats.Truncated {
-		collectionStatus = "partial"
+		collectionStatus = collectionStatusPartial
 	}
 	if kubernetesErr != nil {
 		kubernetesReport.Issues = append(kubernetesReport.Issues, kubernetes.Issue{
@@ -326,9 +367,18 @@ func runCollect(
 		},
 	})
 	if err != nil {
+		if errors.Is(err, bundle.ErrCleanup) {
+			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", archivePath)
+			_, _ = fmt.Fprintln(
+				stderr,
+				"Support bundle was created, but temporary data cleanup failed.",
+			)
+			return 1
+		}
 		_, _ = fmt.Fprintln(stderr, redactor.Text(err.Error()))
 		return 1
 	}
+	cleanupPending = false
 
 	_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", archivePath)
 	_, _ = fmt.Fprintf(
@@ -340,7 +390,7 @@ func runCollect(
 		kubernetesReport.Containers,
 		kubernetesReport.InitContainers,
 	)
-	if collectionStatus == "partial" {
+	if collectionStatus == collectionStatusPartial {
 		_, _ = fmt.Fprintln(
 			stderr,
 			"Warning: collection was partial; inspect collection-issues.jsonl in the bundle.",
@@ -350,6 +400,36 @@ func runCollect(
 	return 0
 }
 
+func resolveKubectl(binary string) (string, error) {
+	resolved, err := exec.LookPath(binary)
+	if err != nil {
+		return "", fmt.Errorf("locate kubectl binary: %w", err)
+	}
+	absolute, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve kubectl binary path: %w", err)
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", fmt.Errorf("resolve kubectl binary symlinks: %w", err)
+	}
+	fileInfo, err := os.Stat(canonical)
+	if err != nil {
+		return "", fmt.Errorf("inspect kubectl binary: %w", err)
+	}
+	if !fileInfo.Mode().IsRegular() {
+		return "", errors.New("kubectl binary must be a regular file")
+	}
+	return canonical, nil
+}
+
+func closeBundle(closer io.Closer, stderr io.Writer, exitCode *int) {
+	if err := closer.Close(); err != nil {
+		_, _ = fmt.Fprintln(stderr, "Failed to clean up temporary bundle data.")
+		*exitCode = 1
+	}
+}
+
 func validateCollectFlags(
 	namespaces []string,
 	allNamespaces bool,
@@ -357,6 +437,7 @@ func validateCollectFlags(
 	since time.Duration,
 	timeout time.Duration,
 	maxLogBytes int64,
+	maxTotalLogBytes int64,
 	logWorkers int,
 	maxHARBytes int64,
 	maxHAREntries int,
@@ -372,12 +453,29 @@ func validateCollectFlags(
 		return errors.New("--command-timeout must be positive")
 	case maxLogBytes <= 0:
 		return errors.New("--max-log-bytes must be positive")
+	case maxLogBytes > maxLogLimit:
+		return fmt.Errorf("--max-log-bytes must not exceed %d bytes", maxLogLimit)
+	case maxTotalLogBytes <= 0:
+		return errors.New("--max-total-log-bytes must be positive")
+	case maxTotalLogBytes > maxTotalLogLimit:
+		return fmt.Errorf(
+			"--max-total-log-bytes must not exceed %d bytes",
+			maxTotalLogLimit,
+		)
+	case maxLogBytes > maxTotalLogBytes:
+		return errors.New("--max-log-bytes must not exceed --max-total-log-bytes")
 	case logWorkers <= 0:
 		return errors.New("--log-workers must be positive")
+	case logWorkers > maxLogWorkers:
+		return fmt.Errorf("--log-workers must not exceed %d", maxLogWorkers)
 	case maxHARBytes <= 0:
 		return errors.New("--max-har-bytes must be positive")
+	case maxHARBytes > maxHARLimit:
+		return fmt.Errorf("--max-har-bytes must not exceed %d bytes", maxHARLimit)
 	case maxHAREntries <= 0:
 		return errors.New("--max-har-entries must be positive")
+	case maxHAREntries > maxHAREntryLimit:
+		return fmt.Errorf("--max-har-entries must not exceed %d", maxHAREntryLimit)
 	default:
 		return nil
 	}

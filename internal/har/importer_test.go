@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,7 +42,7 @@ func TestImportSanitizesHARAndOmitsBodies(t *testing.T) {
 	      "time": 42,
 	      "request": {
 	        "method": "GET",
-	        "url": "https://example.com/callback?code=oauth-code&request_id=req-1",
+	        "url": "https://example.com/callback?code=oauth-code&code_verifier=url-verifier&request_id=req-1",
 	        "httpVersion": "HTTP/2",
 	        "headers": [
 	          {"name": "Authorization", "value": "Bearer raw-token"},
@@ -49,6 +50,7 @@ func TestImportSanitizesHARAndOmitsBodies(t *testing.T) {
 	        ],
 	        "queryString": [
 	          {"name": "code", "value": "oauth-code"},
+	          {"name": "code_verifier", "value": "query-verifier"},
 	          {"name": "request_id", "value": "req-1"}
 	        ],
 	        "postData": {"text": "password=body-password"},
@@ -88,6 +90,8 @@ func TestImportSanitizesHARAndOmitsBodies(t *testing.T) {
 		"raw-token",
 		"raw-cookie",
 		"oauth-code",
+		"url-verifier",
+		"query-verifier",
 		"body-password",
 		"user@example.com",
 	} {
@@ -98,7 +102,7 @@ func TestImportSanitizesHARAndOmitsBodies(t *testing.T) {
 	for _, expected := range []string{
 		`"authorization":"[REDACTED]"`,
 		`"set-cookie":"[REDACTED]"`,
-		`"request_id":"req-1"`,
+		`"request_id":["req-1"]`,
 		`"status":200`,
 	} {
 		if !strings.Contains(result, expected) {
@@ -121,6 +125,20 @@ func TestImportEnforcesInputLimit(t *testing.T) {
 	}
 }
 
+func TestImportRejectsUnrepresentableInputLimit(t *testing.T) {
+	t.Parallel()
+	harPath := filepath.Join(t.TempDir(), "capture.har")
+	if err := os.WriteFile(harPath, []byte(`{"log":{"entries":[]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Import(harPath, &bytes.Buffer{}, math.MaxInt64, 100, redact.New())
+
+	if err == nil || !strings.Contains(err.Error(), "maximum HAR input bytes") {
+		t.Fatalf("expected invalid input-limit error, got %v", err)
+	}
+}
+
 func TestImportCapsEntries(t *testing.T) {
 	t.Parallel()
 	harPath := filepath.Join(t.TempDir(), "capture.har")
@@ -140,6 +158,78 @@ func TestImportCapsEntries(t *testing.T) {
 
 	if stats.EntriesWritten != 1 || !stats.Truncated {
 		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
+func TestImportRejectsNullEntries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		maxEntries int
+	}{
+		{name: "within output limit", maxEntries: 100},
+		{name: "beyond output limit", maxEntries: 0},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			harPath := filepath.Join(t.TempDir(), "capture.har")
+			if err := os.WriteFile(
+				harPath,
+				[]byte(`{"log":{"entries":[null]}}`),
+				0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			var output bytes.Buffer
+			_, err := Import(harPath, &output, 1<<20, test.maxEntries, redact.New())
+
+			if err == nil || !strings.Contains(err.Error(), "null elements") {
+				t.Fatalf("expected null-entry error, got %v", err)
+			}
+			if output.Len() != 0 {
+				t.Fatalf("null entry produced output: %s", output.String())
+			}
+		})
+	}
+}
+
+func TestImportWhitelistsStandardNumericTimings(t *testing.T) {
+	t.Parallel()
+	harPath := filepath.Join(t.TempDir(), "capture.har")
+	input := `{"log":{"entries":[{
+		"timings":{"blocked":1,"dns":2,"connect":3,"send":4,"wait":5,"receive":6,"ssl":7,"email@example.com":8,"comment":"user@example.com"}
+	}]}}`
+	if err := os.WriteFile(harPath, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if _, err := Import(harPath, &output, 1<<20, 100, redact.New()); err != nil {
+		t.Fatal(err)
+	}
+
+	result := output.String()
+	for _, expected := range []string{
+		`"blocked":1`,
+		`"dns":2`,
+		`"connect":3`,
+		`"send":4`,
+		`"wait":5`,
+		`"receive":6`,
+		`"ssl":7`,
+	} {
+		if !strings.Contains(result, expected) {
+			t.Fatalf("standard timing %q missing: %s", expected, result)
+		}
+	}
+	for _, forbidden := range []string{"email@example.com", `"comment"`} {
+		if strings.Contains(result, forbidden) {
+			t.Fatalf("unsafe timing key or value %q present: %s", forbidden, result)
+		}
 	}
 }
 
@@ -171,6 +261,25 @@ func TestImportClassifiesSensitiveNamesBeforeTruncation(t *testing.T) {
 	}
 }
 
+func TestImportPreservesRepeatedQueryParameters(t *testing.T) {
+	t.Parallel()
+	harPath := filepath.Join(t.TempDir(), "capture.har")
+	input := `{"log":{"entries":[{"request":{"queryString":[` +
+		`{"name":"scope","value":"read"},{"name":"scope","value":"write"}` +
+		`]},"response":{}}]}}`
+	if err := os.WriteFile(harPath, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if _, err := Import(harPath, &output, 1<<20, 100, redact.New()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"scope":["read","write"]`) {
+		t.Fatalf("repeated query values were not preserved: %s", output.String())
+	}
+}
+
 func TestImportRejectsNonRegularInput(t *testing.T) {
 	t.Parallel()
 
@@ -197,6 +306,41 @@ func TestImportRejectsTrailingData(t *testing.T) {
 
 			if err == nil || !strings.Contains(err.Error(), "trailing") {
 				t.Fatalf("expected trailing-data error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestImportRequiresUnambiguousLogAndEntries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "missing log", input: `{}`},
+		{name: "null log", input: `{"log":null}`},
+		{name: "duplicate log", input: `{"log":{"entries":[]},"log":{"entries":[]}}`},
+		{name: "missing entries", input: `{"log":{"version":"1.2"}}`},
+		{name: "null entries", input: `{"log":{"entries":null}}`},
+		{
+			name:  "duplicate entries",
+			input: `{"log":{"entries":[],"entries":[]}}`,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			harPath := filepath.Join(t.TempDir(), "capture.har")
+			if err := os.WriteFile(harPath, []byte(test.input), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Import(harPath, &bytes.Buffer{}, 1<<20, 100, redact.New())
+
+			if err == nil {
+				t.Fatalf("expected invalid HAR structure %q to be rejected", test.name)
 			}
 		})
 	}

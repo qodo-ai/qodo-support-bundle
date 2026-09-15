@@ -1,8 +1,10 @@
 package viewer
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,29 +12,38 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 )
 
-//go:embed web/index.html web/app.js web/request_sequence.mjs web/styles.css
+//go:embed web/index.html web/app.js web/request_sequence.mjs web/session.mjs web/styles.css
 var webAssets embed.FS
 
+const sessionClaimHeader = "X-Qodo-Viewer-Session"
+
 type handler struct {
-	bundle       *ExtractedBundle
-	expectedHost string
-	token        string
-	mux          *http.ServeMux
+	bundle              *ExtractedBundle
+	expectedHost        string
+	expectedClaimDigest [sha256.Size]byte
+	claimCleanup        func() error
+	sessionMutex        sync.RWMutex
+	sessionToken        string
+	mux                 *http.ServeMux
 }
 
 func newHandler(
 	bundle *ExtractedBundle,
 	expectedHost string,
-	token string,
+	expectedClaim string,
+	claimCleanup func() error,
 ) http.Handler {
 	application := &handler{
-		bundle:       bundle,
-		expectedHost: expectedHost,
-		token:        token,
-		mux:          http.NewServeMux(),
+		bundle:              bundle,
+		expectedHost:        expectedHost,
+		expectedClaimDigest: sha256.Sum256([]byte(expectedClaim)),
+		claimCleanup:        claimCleanup,
+		mux:                 http.NewServeMux(),
 	}
+	application.mux.HandleFunc("/api/session", application.handleSession)
 	application.mux.HandleFunc("/api/manifest", application.handleManifest)
 	application.mux.HandleFunc("/api/files", application.handleFiles)
 	application.mux.HandleFunc("/api/timeline", application.handleTimeline)
@@ -43,6 +54,7 @@ func newHandler(
 		"/request_sequence.mjs",
 		application.handleRequestSequence,
 	)
+	application.mux.HandleFunc("/session.mjs", application.handleSessionJavaScript)
 	application.mux.HandleFunc("/styles.css", application.handleStyles)
 	application.mux.HandleFunc("/", application.handleIndex)
 	return application
@@ -58,6 +70,7 @@ func (application *handler) ServeHTTP(
 		return
 	}
 	if strings.HasPrefix(request.URL.Path, "/api/") &&
+		request.URL.Path != "/api/session" &&
 		!application.authorized(request) {
 		writer.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(writer, "Unauthorized", http.StatusUnauthorized)
@@ -73,10 +86,58 @@ func (application *handler) authorized(request *http.Request) bool {
 		return false
 	}
 	providedToken := strings.TrimPrefix(authorization, bearerPrefix)
+	providedDigest := sha256.Sum256([]byte(providedToken))
+	application.sessionMutex.RLock()
+	expectedToken := application.sessionToken
+	application.sessionMutex.RUnlock()
+	if expectedToken == "" {
+		return false
+	}
+	expectedDigest := sha256.Sum256([]byte(expectedToken))
 	return subtle.ConstantTimeCompare(
-		[]byte(providedToken),
-		[]byte(application.token),
+		providedDigest[:],
+		expectedDigest[:],
 	) == 1
+}
+
+func (application *handler) handleSession(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		http.Error(writer, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	token := request.Header.Get(sessionClaimHeader)
+	decodedToken, err := hex.DecodeString(token)
+	if err != nil || len(decodedToken) != 32 {
+		http.Error(writer, "A valid session claim header is required", http.StatusBadRequest)
+		return
+	}
+	providedDigest := sha256.Sum256([]byte(token))
+	if subtle.ConstantTimeCompare(
+		providedDigest[:],
+		application.expectedClaimDigest[:],
+	) != 1 {
+		http.Error(writer, "Invalid viewer session claim", http.StatusForbidden)
+		return
+	}
+	application.sessionMutex.Lock()
+	defer application.sessionMutex.Unlock()
+	if application.sessionToken != "" {
+		// Retrying the server-issued claim is safe and handles a lost success response.
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if application.claimCleanup != nil {
+		if err := application.claimCleanup(); err != nil {
+			http.Error(writer, "Could not retire viewer launcher", http.StatusInternalServerError)
+			return
+		}
+	}
+	application.sessionToken = token
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 func (application *handler) handleIndex(
@@ -127,6 +188,21 @@ func (application *handler) handleRequestSequence(
 	serveEmbeddedFile(
 		writer,
 		"web/request_sequence.mjs",
+		"text/javascript; charset=utf-8",
+	)
+}
+
+func (application *handler) handleSessionJavaScript(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer)
+		return
+	}
+	serveEmbeddedFile(
+		writer,
+		"web/session.mjs",
 		"text/javascript; charset=utf-8",
 	)
 }
@@ -237,6 +313,7 @@ func (application *handler) handleTimeline(
 		maxTimelineLimit,
 	)
 	response, err := readTimeline(
+		request.Context(),
 		application.bundle,
 		query.Get("query"),
 		query.Get("filter"),

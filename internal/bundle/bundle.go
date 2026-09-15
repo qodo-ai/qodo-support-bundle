@@ -22,6 +22,9 @@ const (
 	fileMode      = 0o600
 )
 
+// ErrCleanup reports that temporary staged data could not be removed.
+var ErrCleanup = errors.New("clean up temporary bundle data")
+
 // Manifest describes the collector and sanitized sources in a bundle.
 type Manifest struct {
 	SchemaVersion    string         `json:"schema_version"`
@@ -37,6 +40,7 @@ type Builder struct {
 	stagingDir string
 	closed     bool
 	fileCount  int
+	removeAll  func(string) error
 }
 
 // New creates a bundle staging directory beside the output archive.
@@ -69,6 +73,7 @@ func New(outputPath string) (*Builder, error) {
 	return &Builder{
 		outputPath: absoluteOutput,
 		stagingDir: stagingDirectory,
+		removeAll:  os.RemoveAll,
 	}, nil
 }
 
@@ -136,10 +141,10 @@ func (builder *Builder) Finalize(manifest Manifest) (string, error) {
 	if err := builder.createArchive(manifest.GeneratedAt); err != nil {
 		return "", err
 	}
-	builder.closed = true
-	if err := os.RemoveAll(builder.stagingDir); err != nil {
-		return "", fmt.Errorf("remove staging directory: %w", err)
+	if err := builder.removeAll(builder.stagingDir); err != nil {
+		return builder.outputPath, ErrCleanup
 	}
+	builder.closed = true
 	return builder.outputPath, nil
 }
 
@@ -148,8 +153,11 @@ func (builder *Builder) Close() error {
 	if builder.closed {
 		return nil
 	}
+	if err := builder.removeAll(builder.stagingDir); err != nil {
+		return ErrCleanup
+	}
 	builder.closed = true
-	return os.RemoveAll(builder.stagingDir)
+	return nil
 }
 
 func (builder *Builder) writeChecksums(writer io.Writer) error {

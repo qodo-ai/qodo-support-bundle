@@ -3,6 +3,8 @@ package viewer
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +57,37 @@ func TestExtractVerifiesAndCleansBundle(t *testing.T) {
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatalf("temporary directory still exists: %v", err)
+	}
+	if path, exists := extracted.Resolve("browser/network.jsonl"); exists || path != "" {
+		t.Fatalf("closed bundle resolved a path: %q", path)
+	}
+}
+
+func TestExtractRejectsMissingManifest(t *testing.T) {
+	t.Parallel()
+	archivePath := filepath.Join(t.TempDir(), "missing-manifest.tar.gz")
+	writeConsistentTestArchive(t, archivePath, map[string]string{
+		"browser/network.jsonl": "{}\n",
+	})
+
+	_, err := Extract(archivePath, defaultTestLimits())
+
+	if err == nil || !strings.Contains(err.Error(), "does not contain manifest.json") {
+		t.Fatalf("expected missing manifest error, got %v", err)
+	}
+}
+
+func TestExtractRejectsInvalidManifest(t *testing.T) {
+	t.Parallel()
+	archivePath := filepath.Join(t.TempDir(), "invalid-manifest.tar.gz")
+	writeConsistentTestArchive(t, archivePath, map[string]string{
+		"manifest.json": "not-json",
+	})
+
+	_, err := Extract(archivePath, defaultTestLimits())
+
+	if err == nil || !strings.Contains(err.Error(), "parse manifest.json") {
+		t.Fatalf("expected invalid manifest error, got %v", err)
 	}
 }
 
@@ -182,9 +215,129 @@ func TestExtractRejectsExcessivePathLength(t *testing.T) {
 	}
 }
 
+func TestExtractEnforcesCompressedArchiveLimit(t *testing.T) {
+	t.Parallel()
+	archivePath := filepath.Join(t.TempDir(), "compressed-limit.tar.gz")
+	writeTestArchive(t, archivePath, map[string]string{"data.jsonl": "{}\n"})
+	info, err := os.Stat(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := defaultTestLimits()
+	limits.MaxArchiveBytes = info.Size() - 1
+
+	_, err = Extract(archivePath, limits)
+
+	if err == nil || !strings.Contains(err.Error(), "compressed bytes") {
+		t.Fatalf("expected compressed archive limit error, got %v", err)
+	}
+}
+
+func TestExtractRejectsOversizedChecksumBeforeWritingIt(t *testing.T) {
+	t.Parallel()
+	archivePath := filepath.Join(t.TempDir(), "large-checksums.tar.gz")
+	writeTestArchive(t, archivePath, map[string]string{
+		"checksums.sha256": strings.Repeat("x", int(maxChecksumsBytes)+1),
+	})
+	root := t.TempDir()
+	limits := defaultTestLimits()
+	limits.MaxArchiveBytes = 8 << 20
+	limits.MaxExtractedBytes = 8 << 20
+	limits.MaxFileBytes = 8 << 20
+
+	_, err := extractArchive(archivePath, root, limits)
+
+	if err == nil || !strings.Contains(err.Error(), "checksums.sha256 exceeds 4 MiB") {
+		t.Fatalf("expected checksum size error, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "checksums.sha256")); !os.IsNotExist(statErr) {
+		t.Fatalf("oversized checksum file was created: %v", statErr)
+	}
+}
+
+func TestExtractRejectsCorruptGzipTrailer(t *testing.T) {
+	t.Parallel()
+	archivePath := filepath.Join(t.TempDir(), "corrupt-trailer.tar.gz")
+	writeTestArchive(t, archivePath, map[string]string{"data.jsonl": "{}\n"})
+	data, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[len(data)-1] ^= 0xff
+	if err := os.WriteFile(archivePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Extract(archivePath, defaultTestLimits())
+
+	if err == nil || !strings.Contains(err.Error(), "gzip") {
+		t.Fatalf("expected corrupt gzip trailer error, got %v", err)
+	}
+}
+
+func TestExtractRejectsDataAfterGzipStream(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name   string
+		append func(*testing.T, string)
+	}{
+		{
+			name: "raw data",
+			append: func(t *testing.T, path string) {
+				t.Helper()
+				file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := file.WriteString("appended"); err != nil {
+					t.Fatal(err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "gzip member",
+			append: func(t *testing.T, path string) {
+				t.Helper()
+				file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writer := gzip.NewWriter(file)
+				if _, err := writer.Write([]byte("appended")); err != nil {
+					t.Fatal(err)
+				}
+				if err := writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			archivePath := filepath.Join(t.TempDir(), "appended.tar.gz")
+			writeTestArchive(t, archivePath, map[string]string{"data.jsonl": "{}\n"})
+			testCase.append(t, archivePath)
+
+			_, err := Extract(archivePath, defaultTestLimits())
+
+			if err == nil || !strings.Contains(err.Error(), "after the gzip stream") {
+				t.Fatalf("expected appended data error, got %v", err)
+			}
+		})
+	}
+}
+
 func defaultTestLimits() ExtractionLimits {
 	return ExtractionLimits{
 		MaxFiles:          100,
+		MaxArchiveBytes:   2 << 20,
 		MaxExtractedBytes: 1 << 20,
 		MaxFileBytes:      1 << 20,
 	}
@@ -201,6 +354,17 @@ func writeTestArchive(t *testing.T, path string, files map[string]string) {
 		})
 	}
 	writeTestArchiveEntries(t, path, entries)
+}
+
+func writeConsistentTestArchive(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	checksums := strings.Builder{}
+	for name, content := range files {
+		digest := sha256.Sum256([]byte(content))
+		_, _ = fmt.Fprintf(&checksums, "%x  %s\n", digest, name)
+	}
+	files["checksums.sha256"] = checksums.String()
+	writeTestArchive(t, path, files)
 }
 
 type testArchiveEntry struct {

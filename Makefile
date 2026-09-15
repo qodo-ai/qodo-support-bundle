@@ -11,7 +11,7 @@ build:
 test: format-check
 	go test -race ./...
 	go vet ./...
-	node --test internal/viewer/web/request_sequence_test.mjs
+	node --test internal/viewer/web/*_test.mjs
 
 format-check:
 	@files="$$(git ls-files --cached --others --exclude-standard '*.go')"; \

@@ -1,6 +1,8 @@
 package viewer
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -18,7 +20,7 @@ untimestamped diagnostic
 `,
 	})
 
-	response, err := readTimeline(bundle, "", "all", 100)
+	response, err := readTimeline(context.Background(), bundle, "", "all", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +53,7 @@ func TestReadTimelineKeepsLatestBoundedRecords(t *testing.T) {
 `,
 	})
 
-	response, err := readTimeline(bundle, "", "all", 2)
+	response, err := readTimeline(context.Background(), bundle, "", "all", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +77,7 @@ func TestReadTimelineReservesCapacityAcrossLanes(t *testing.T) {
 `,
 	})
 
-	response, err := readTimeline(bundle, "", "all", 2)
+	response, err := readTimeline(context.Background(), bundle, "", "all", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +99,7 @@ func TestReadTimelineReservesCapacityAcrossContainerGroups(t *testing.T) {
 		"kubernetes/logs/zitadel/zitadel-1/main.log": "2026-09-15T07:02:00Z second\n",
 	})
 
-	response, err := readTimeline(bundle, "", "all", 2)
+	response, err := readTimeline(context.Background(), bundle, "", "all", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +169,7 @@ func TestReadTimelineAppliesAuthenticationFilter(t *testing.T) {
 `,
 	})
 
-	response, err := readTimeline(bundle, "", "auth", 100)
+	response, err := readTimeline(context.Background(), bundle, "", "auth", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +178,21 @@ func TestReadTimelineAppliesAuthenticationFilter(t *testing.T) {
 		response.Records[0].Summary !=
 			"GET 200 https://example.com/auth/v1/oidc/userinfo" {
 		t.Fatalf("unexpected auth timeline: %+v", response.Records)
+	}
+}
+
+func TestReadTimelineStopsWhenContextIsCanceled(t *testing.T) {
+	t.Parallel()
+	bundle := testExtractedBundle(t, map[string]string{
+		"kubernetes/logs/platform/main.log": "2026-09-15T07:01:00Z first\n",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := readTimeline(ctx, bundle, "", "all", 100)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
 	}
 }
 

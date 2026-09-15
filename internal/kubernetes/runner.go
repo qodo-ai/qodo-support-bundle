@@ -2,7 +2,9 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"os/exec"
+	"path/filepath"
 )
 
 // ExecRunner executes a kubectl-compatible binary.
@@ -16,6 +18,9 @@ func (runner ExecRunner) Run(
 	maxBytes int64,
 	arguments ...string,
 ) (CommandResult, error) {
+	if !filepath.IsAbs(runner.Binary) {
+		return CommandResult{}, errors.New("kubectl binary path must be absolute")
+	}
 	stdout := newBoundedBuffer(maxBytes)
 	stderr := newBoundedBuffer(64 << 10)
 	command := exec.CommandContext(ctx, runner.Binary, arguments...)

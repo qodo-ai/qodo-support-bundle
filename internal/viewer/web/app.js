@@ -1,4 +1,5 @@
 import { RequestSequence } from "./request_sequence.mjs";
+import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
 
 (() => {
   "use strict";
@@ -30,15 +31,12 @@ import { RequestSequence } from "./request_sequence.mjs";
     requestSequence: 0,
     detailRequests: new RequestSequence(),
     selectedMarker: null,
-    accessToken: "",
+    accessToken: takeLauncherToken(),
+    sessionClaimed: false,
+    timelineController: null,
   };
 
   const elements = {
-    authDialog: document.querySelector("#auth-dialog"),
-    authError: document.querySelector("#auth-error"),
-    authForm: document.querySelector("#auth-form"),
-    authSubmit: document.querySelector("#auth-submit"),
-    authToken: document.querySelector("#auth-token"),
     browserCount: document.querySelector("#browser-count"),
     bundleStatus: document.querySelector("#bundle-status"),
     closeDialog: document.querySelector("#close-dialog"),
@@ -58,6 +56,7 @@ import { RequestSequence } from "./request_sequence.mjs";
     previousPage: document.querySelector("#previous-page"),
     records: document.querySelector("#records"),
     recordTemplate: document.querySelector("#record-template"),
+    retry: document.querySelector("#retry"),
     resultCount: document.querySelector("#result-count"),
     searchInput: document.querySelector("#search-input"),
     selectedCategory: document.querySelector("#selected-category"),
@@ -75,7 +74,7 @@ import { RequestSequence } from "./request_sequence.mjs";
     recordDialog: document.querySelector("#record-dialog"),
   };
 
-  async function fetchJSON(path, parameters = null) {
+  async function fetchJSON(path, parameters = null, options = {}) {
     const url = new URL(path, window.location.origin);
     if (parameters) {
       Object.entries(parameters).forEach(([key, value]) => {
@@ -86,6 +85,7 @@ import { RequestSequence } from "./request_sequence.mjs";
     }
     const response = await fetch(url, {
       credentials: "same-origin",
+      signal: options.signal,
       headers: {
         Accept: "application/json",
         Authorization: `Bearer ${state.accessToken}`,
@@ -111,7 +111,7 @@ import { RequestSequence } from "./request_sequence.mjs";
     if (defaultFile) {
       selectFile(defaultFile, false);
     }
-    await loadTimeline();
+    await loadTimeline(true);
   }
 
   function updateSummary(manifest) {
@@ -119,9 +119,10 @@ import { RequestSequence } from "./request_sequence.mjs";
     const browser = collection.browser || {};
     const browserStats = browser.stats || {};
     const kubernetes = collection.kubernetes || {};
-    elements.bundleStatus.textContent = collection.status || "Unknown";
+    const status = collection.status || "Unknown";
+    elements.bundleStatus.textContent = status;
     elements.bundleStatus.className =
-      collection.status === "complete" ? "status-complete" : "status-partial";
+      `status-${String(status).toLowerCase().replace(/[^a-z0-9_-]/g, "-")}`;
     elements.browserCount.textContent = formatNumber(browserStats.entries_written);
     elements.logCount.textContent = formatNumber(kubernetes.log_files);
     elements.generatedAt.textContent = formatTimestamp(manifest.generated_at);
@@ -163,8 +164,11 @@ import { RequestSequence } from "./request_sequence.mjs";
     }
   }
 
-  async function loadTimeline() {
+  async function loadTimeline(initializing = false) {
     const sequence = ++state.requestSequence;
+    state.timelineController?.abort();
+    const controller = new AbortController();
+    state.timelineController = controller;
     elements.timeline.replaceChildren(createTimelineEmpty("Building correlated timeline…"));
     hideNotice();
     try {
@@ -172,6 +176,8 @@ import { RequestSequence } from "./request_sequence.mjs";
         query: state.query,
         filter: state.filter,
         limit: timelineLimit,
+      }, {
+        signal: controller.signal,
       });
       if (sequence !== state.requestSequence) {
         return;
@@ -180,11 +186,21 @@ import { RequestSequence } from "./request_sequence.mjs";
       resetTimelineViewport();
       renderTimeline();
     } catch (error) {
+      if (error.name === "AbortError") {
+        return;
+      }
+      if (initializing) {
+        throw error;
+      }
       if (sequence !== state.requestSequence) {
         return;
       }
       elements.timeline.replaceChildren();
       showNotice(`Could not build timeline: ${error.message}`);
+    } finally {
+      if (state.timelineController === controller) {
+        state.timelineController = null;
+      }
     }
   }
 
@@ -606,14 +622,19 @@ import { RequestSequence } from "./request_sequence.mjs";
     elements.nextPage.disabled = !state.hasMore;
   }
 
-  function showNotice(message) {
+  function showNotice(message, retry = false) {
     elements.notice.textContent = message;
+    if (retry) {
+      elements.notice.append(" ", elements.retry);
+      elements.retry.classList.remove("hidden");
+    }
     elements.notice.classList.remove("hidden");
   }
 
   function hideNotice() {
     elements.notice.classList.add("hidden");
     elements.notice.textContent = "";
+    elements.retry.classList.add("hidden");
   }
 
   function createEmpty(message) {
@@ -863,35 +884,29 @@ import { RequestSequence } from "./request_sequence.mjs";
     state.selectedMarker = null;
   });
 
-  elements.authForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const token = elements.authToken.value.trim();
-    if (!token) {
-      elements.authError.textContent = "Enter the access token printed in the terminal.";
+  async function openViewer() {
+    if (!state.accessToken) {
+      showNotice("Open this viewer through the launcher file printed by the server.");
       return;
     }
-    state.accessToken = token;
-    elements.authToken.value = "";
-    elements.authError.textContent = "";
-    elements.authSubmit.disabled = true;
     try {
-      await initialize();
-      elements.authDialog.close();
+      await initializeClaimedViewer(state, initialize);
     } catch (error) {
-      state.accessToken = "";
-      elements.authError.textContent =
-        error.message.startsWith("401")
-          ? "The access token is not valid."
-          : `Could not load the bundle: ${error.message}`;
-      elements.authToken.focus();
-    } finally {
-      elements.authSubmit.disabled = false;
+      showNotice(
+        error.status === 409
+          ? "This viewer session is already open in another tab. Restart the viewer to open a new session."
+          : `Could not open the bundle: ${error.message}`,
+        error.status !== 409,
+      );
     }
-  });
-  elements.authDialog.addEventListener("cancel", (event) => {
-    event.preventDefault();
+  }
+
+  elements.retry.addEventListener("click", () => {
+    elements.retry.disabled = true;
+    void openViewer().finally(() => {
+      elements.retry.disabled = false;
+    });
   });
 
-  elements.authDialog.showModal();
-  elements.authToken.focus();
+  void openViewer();
 })();
