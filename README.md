@@ -1,9 +1,10 @@
 # Qodo Support Bundle
 
 `qodo-support-bundle` is a portable Go CLI for customer-assisted diagnostics. It
-imports a browser-exported HAR, collects bounded Kubernetes diagnostics through
-the customer's existing `kubectl` access, redacts sensitive values, and creates
-a checksummed `.tar.gz` archive.
+imports a browser-exported HAR, extracts request and trace correlation IDs,
+collects matching Kubernetes log context through the customer's existing
+`kubectl` access, redacts sensitive values, and creates a checksummed `.tar.gz`
+archive.
 
 The collector is read-only. It never collects Kubernetes Secrets, ConfigMaps,
 workload environment variables, or HAR request/response bodies.
@@ -46,10 +47,11 @@ qodo-support-bundle collect ~/Downloads/qodo-login.har
 
 That command uses the current `kubectl` context, discovers application
 namespaces, excludes Kubernetes and managed GKE control-plane namespaces,
-imports the required HAR, reads container logs concurrently, shows progress,
-and writes a timestamped bundle in the current directory. Before accessing the
-cluster, it resolves symlinks to an absolute `kubectl` path and prints that path
-so the operator can verify which client will run.
+imports the required HAR, uses its clock-adjusted time range and correlation
+headers to select container log context, reads logs concurrently, shows
+progress, and writes a timestamped bundle in the current directory. Before
+accessing the cluster, it resolves symlinks to an absolute `kubectl` path and
+prints that path so the operator can verify which client will run.
 
 Use `--context` only when the current `kubectl` context is not the target
 cluster. Explicit namespace scope remains available for shared clusters:
@@ -88,12 +90,32 @@ Application dependencies such as `rabbitmq-system` remain included. Other
 non-Qodo application namespaces may still be collected on a shared cluster.
 Container logs use eight concurrent readers by default; tune this with
 `--log-workers` (maximum 64) for unusually small or large API servers. Each
-stream is capped at 10 MiB by default (`--max-log-bytes`, maximum 100 MiB), and
-current plus previous logs share a 1 GiB retained-data budget
+stream retains at most 10 MiB by default (`--max-log-bytes`, maximum 100 MiB)
+after scanning at most 32 MiB of raw output (`--max-log-scan-bytes`, maximum
+256 MiB). Concurrent raw scans are capped at 256 MiB. Current plus previous logs
+share a 1 GiB retained-data budget
 (`--max-total-log-bytes`, maximum 8 GiB). Once that aggregate budget is
 exhausted, remaining streams are skipped and reported as non-fatal collection
 issues. HAR input defaults to 256 MiB and can be raised with `--max-har-bytes`
-up to 4 GiB.
+up to 4 GiB. Each Kubernetes command defaults to a two-minute timeout and
+`--command-timeout` cannot exceed 30 minutes.
+
+Add the customer's context directly to the auditable manifest and summary:
+
+```bash
+qodo-support-bundle collect \
+  --activity "Signing in through the corporate identity provider" \
+  --problem "Login returned to the portal and showed Not authenticated" \
+  ~/Downloads/qodo-login.har
+```
+
+The collector recognizes `x-request-id`, `x-correlation-id`, and `traceparent`
+response headers. It computes the median browser-to-cluster clock offset from
+HTTP `Date` headers, applies that offset to the HAR window, and retains three
+lines before and after each matching log line by default. Use
+`--correlation-context-lines` and `--correlation-window-padding` to tune those
+bounds. When the HAR contains no usable correlation IDs, the adjusted time
+window still limits the logs, but all lines in that window are retained.
 
 Exit code `0` means collection completed. Exit code `3` means a usable partial
 bundle was created; inspect `collection-issues.jsonl` for unavailable resources
@@ -138,14 +160,17 @@ and mutation requests. It has no upload API or external web dependencies.
 
 ```text
 manifest.json
+summary.md
 checksums.sha256
 browser/network.jsonl
 kubernetes/pods.jsonl
 kubernetes/events.jsonl
+kubernetes/container_events.jsonl
 kubernetes/logs/<pod>/<container>.log
 # Multi-namespace bundles use:
 kubernetes/pods/<namespace>.jsonl
 kubernetes/events/<namespace>.jsonl
+kubernetes/container_events/<namespace>.jsonl
 kubernetes/logs/<namespace>/<pod>/<container>.log
 kubernetes/logs/<namespace>/<pod>/<container>-previous.log
 collection-issues.jsonl
@@ -156,6 +181,12 @@ HAR records and Kubernetes metadata are newline-delimited JSON with a
 can be ingested by Elastic Agent/Filebeat, Logstash, OpenSearch, Splunk, or a
 custom JSONL pipeline. Container logs retain their original line structure
 after redaction.
+
+The versioned manifest records the tool and schema versions, capture timestamp,
+customer context, redaction ruleset version and hash, browser clock offset,
+collection statistics, and the SHA-256 and byte size of every collected
+artifact. `summary.md` provides the request failure, correlation, restart,
+OOMKill, truncation, and collection-issue counts without requiring the viewer.
 
 Verify integrity after extracting:
 

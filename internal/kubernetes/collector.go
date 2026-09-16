@@ -16,11 +16,13 @@ import (
 )
 
 const (
-	metadataOutputLimit  int64 = 64 << 20
-	defaultLogWorkers          = 8
-	MaximumLogBytes      int64 = 100 << 20
-	MaximumTotalLogBytes int64 = 8 << 30
-	MaximumLogWorkers          = 64
+	metadataOutputLimit           int64 = 64 << 20
+	defaultLogWorkers                   = 8
+	MaximumLogBytes               int64 = 100 << 20
+	MaximumLogScanBytes           int64 = 256 << 20
+	MaximumConcurrentLogScanBytes int64 = 256 << 20
+	MaximumTotalLogBytes          int64 = 8 << 30
+	MaximumLogWorkers                   = 64
 )
 
 var (
@@ -55,8 +57,28 @@ func Collect(
 	if config.MaxLogBytes > config.MaxTotalLogBytes {
 		return Report{}, errors.New("max log bytes must not exceed max total log bytes")
 	}
+	if config.MaxLogScanBytes > MaximumLogScanBytes {
+		return Report{}, fmt.Errorf(
+			"max log scan bytes must not exceed %d",
+			MaximumLogScanBytes,
+		)
+	}
+	if config.MaxLogScanBytes > 0 && config.MaxLogScanBytes < config.MaxLogBytes {
+		return Report{}, errors.New("max log scan bytes must not be less than max log bytes")
+	}
 	if config.LogWorkers > MaximumLogWorkers {
 		return Report{}, fmt.Errorf("log workers must not exceed %d", MaximumLogWorkers)
+	}
+	effectiveWorkers := config.LogWorkers
+	if effectiveWorkers <= 0 {
+		effectiveWorkers = defaultLogWorkers
+	}
+	if config.MaxLogScanBytes > 0 &&
+		config.MaxLogScanBytes*int64(effectiveWorkers) > MaximumConcurrentLogScanBytes {
+		return Report{}, fmt.Errorf(
+			"concurrent log scan bytes must not exceed %d",
+			MaximumConcurrentLogScanBytes,
+		)
 	}
 	if config.ExcludeSystemNamespaces && !config.AllNamespaces {
 		return Report{}, errors.New(
@@ -178,6 +200,23 @@ func Collect(
 			podRecords,
 		); err != nil {
 			return report, fmt.Errorf("add pod metadata: %w", err)
+		}
+		containerEvents, restarts, oomKills, err := marshalContainerEventRecords(
+			pods.Items,
+			redactor,
+		)
+		if err != nil {
+			return report, err
+		}
+		report.ContainerRestarts += restarts
+		report.OOMKills += oomKills
+		if len(containerEvents) > 0 {
+			if err := sink.Add(
+				containerEventPath(namespace, len(namespaces)),
+				containerEvents,
+			); err != nil {
+				return report, fmt.Errorf("add container events: %w", err)
+			}
 		}
 
 		collectEvents(
@@ -365,23 +404,40 @@ func collectLogs(
 		retained := int64(0)
 		if result.issue != nil {
 			report.Issues = append(report.Issues, *result.issue)
-		} else if err := sink.Add(result.path, result.data); err != nil {
-			report.Issues = append(report.Issues, Issue{
-				Operation: "add container log",
-				Resource:  result.path,
-				Message:   redactor.Text(err.Error()),
-			})
 		} else {
-			retained = int64(len(result.data))
-			report.LogFiles++
-			if result.truncated {
+			report.LogStreamsScanned++
+			if result.scanTruncated {
+				report.TruncatedLogScans++
+				report.Issues = append(report.Issues, Issue{
+					Operation: "scan container log",
+					Resource:  redactor.Text(result.path),
+					Message:   "raw log scan limit reached; correlation matches may be incomplete",
+				})
+			}
+			if result.scanTruncated || result.retainedTruncated {
 				report.TruncatedLogFiles++
-				if result.reserved < config.MaxLogBytes {
+			}
+			if result.retainedTruncated && result.reserved < config.MaxLogBytes {
+				report.Issues = append(report.Issues, Issue{
+					Operation: "collect container log",
+					Resource:  redactor.Text(result.path),
+					Message:   "total log collection limit truncated this stream",
+				})
+			}
+			if len(result.data) > 0 {
+				if err := sink.Add(result.path, result.data); err != nil {
 					report.Issues = append(report.Issues, Issue{
-						Operation: "collect container log",
-						Resource:  redactor.Text(result.path),
-						Message:   "total log collection limit truncated this stream",
+						Operation: "add container log",
+						Resource:  result.path,
+						Message:   redactor.Text(err.Error()),
 					})
+				} else {
+					retained = int64(len(result.data))
+					report.LogFiles++
+					if len(config.CorrelationIDs) > 0 {
+						report.MatchedLogFiles++
+						report.MatchedLogLines += result.matchedLines
+					}
 				}
 			}
 		}
@@ -411,8 +467,16 @@ func readLog(
 		request.podName,
 		"--container", request.containerName,
 		"--timestamps=true",
-		"--since", durationArgument(config.Since),
 	)
+	if config.SinceTime.IsZero() {
+		arguments = append(arguments, "--since", durationArgument(config.Since))
+	} else {
+		arguments = append(
+			arguments,
+			"--since-time",
+			config.SinceTime.Format(time.RFC3339Nano),
+		)
+	}
 	suffix := ""
 	operation := "collect current log"
 	if request.previous {
@@ -420,11 +484,15 @@ func readLog(
 		suffix = "-previous"
 		operation = "collect previous log"
 	}
+	scanLimit := config.MaxLogScanBytes
+	if scanLimit <= 0 {
+		scanLimit = request.maxBytes
+	}
 	result, err := runWithTimeout(
 		ctx,
 		config.Timeout,
 		runner,
-		request.maxBytes,
+		scanLimit,
 		arguments...,
 	)
 	resource := request.namespace + "/" + request.podName + "/" + request.containerName
@@ -443,17 +511,26 @@ func readLog(
 		safePathSegment(request.containerName)+suffix+".log",
 	)
 	path := filepath.ToSlash(filepath.Join(pathParts...))
-	data := sanitizeLog(result.Stdout, redactor)
-	truncated := result.Truncated
+	filtered, matchedLines := filterLog(
+		result.Stdout,
+		config.CorrelationIDs,
+		config.SinceTime,
+		config.UntilTime,
+		config.CorrelationContextLines,
+	)
+	data := sanitizeLog(filtered, redactor)
+	retainedTruncated := false
 	if int64(len(data)) > request.maxBytes {
 		data = data[:int(request.maxBytes)]
-		truncated = true
+		retainedTruncated = true
 	}
 	return collectedLog{
-		path:      path,
-		data:      data,
-		truncated: truncated,
-		reserved:  request.maxBytes,
+		path:              path,
+		data:              data,
+		scanTruncated:     result.Truncated,
+		retainedTruncated: retainedTruncated,
+		matchedLines:      matchedLines,
+		reserved:          request.maxBytes,
 	}
 }
 
@@ -548,6 +625,72 @@ func marshalEventRecords(events []event, redactor *redact.Redactor) ([]byte, err
 		}
 	}
 	return output.Bytes(), nil
+}
+
+func marshalContainerEventRecords(
+	pods []pod,
+	redactor *redact.Redactor,
+) ([]byte, int, int, error) {
+	var output bytes.Buffer
+	encoder := json.NewEncoder(&output)
+	encoder.SetEscapeHTML(false)
+	restarts := 0
+	oomKills := 0
+	for _, currentPod := range pods {
+		statuses := append(
+			append([]containerStatus{}, currentPod.Status.ContainerStatuses...),
+			currentPod.Status.InitContainerStatuses...,
+		)
+		for _, status := range statuses {
+			terminated := status.LastState["terminated"]
+			if terminated.Reason == "" && terminated.FinishedAt == "" {
+				terminated = status.State["terminated"]
+			}
+			oomKilled := strings.EqualFold(terminated.Reason, "OOMKilled")
+			if status.RestartCount <= 0 && !oomKilled {
+				continue
+			}
+			restarts += status.RestartCount
+			kind := "ContainerRestart"
+			severity := "warning"
+			if oomKilled {
+				kind = "OOMKilled"
+				severity = "error"
+				oomKills++
+			}
+			timestamp := firstNonEmptyValue(
+				terminated.FinishedAt,
+				terminated.StartedAt,
+				currentPod.Status.StartTime,
+			)
+			record := outputContainerEvent{
+				SchemaVersion: "1",
+				Timestamp:     redactor.Text(timestamp),
+				Kind:          kind,
+				Severity:      severity,
+				Namespace:     redactor.Text(currentPod.Metadata.Namespace),
+				Pod:           redactor.Text(currentPod.Metadata.Name),
+				Container:     redactor.Text(status.Name),
+				RestartCount:  status.RestartCount,
+				Reason:        redactor.Text(terminated.Reason),
+				Message:       redactor.Text(terminated.Message),
+				Source:        map[string]string{"type": "kubernetes_container"},
+			}
+			if err := encoder.Encode(record); err != nil {
+				return nil, 0, 0, fmt.Errorf("encode container event: %w", err)
+			}
+		}
+	}
+	return output.Bytes(), restarts, oomKills, nil
+}
+
+func firstNonEmptyValue(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func sanitizeLog(input []byte, redactor *redact.Redactor) []byte {
@@ -756,6 +899,17 @@ func eventMetadataPath(namespace string, namespaceCount int) string {
 	return filepath.ToSlash(filepath.Join(
 		"kubernetes",
 		"events",
+		safePathSegment(namespace)+".jsonl",
+	))
+}
+
+func containerEventPath(namespace string, namespaceCount int) string {
+	if namespaceCount == 1 {
+		return "kubernetes/container_events.jsonl"
+	}
+	return filepath.ToSlash(filepath.Join(
+		"kubernetes",
+		"container_events",
 		safePathSegment(namespace)+".jsonl",
 	))
 }

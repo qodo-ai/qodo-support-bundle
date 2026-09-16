@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 type handler struct {
@@ -19,6 +20,8 @@ type handler struct {
 	claimCleanup        func() error
 	sessionMutex        sync.RWMutex
 	sessionToken        string
+	claimFailures       int
+	nextClaimAt         time.Time
 	mux                 *http.ServeMux
 }
 
@@ -277,6 +280,9 @@ func categoryForPath(path string) string {
 		return "Browser"
 	case strings.HasPrefix(path, "kubernetes/logs/"):
 		return "Backend logs"
+	case path == "kubernetes/container_events.jsonl" ||
+		strings.HasPrefix(path, "kubernetes/container_events/"):
+		return "Container failures"
 	case path == "kubernetes/events.jsonl" ||
 		strings.HasPrefix(path, "kubernetes/events/"):
 		return "Kubernetes events"

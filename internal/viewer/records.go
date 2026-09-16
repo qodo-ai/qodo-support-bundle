@@ -187,12 +187,29 @@ func normalizeRecord(path string, lineNumber int, line string) Record {
 		normalizeBrowserRecord(&record, object)
 	case nestedString(object, "source", "type") == "kubernetes_event":
 		normalizeEventRecord(&record, object)
+	case nestedString(object, "source", "type") == "kubernetes_container":
+		normalizeContainerEventRecord(&record, object)
 	case nestedString(object, "source", "type") == "kubernetes":
 		normalizePodRecord(&record, object)
 	default:
 		normalizeLogRecord(&record, object, line)
 	}
 	return record
+}
+
+func normalizeContainerEventRecord(record *Record, object map[string]any) {
+	kind := stringValue(object["kind"])
+	namespace := stringValue(object["namespace"])
+	pod := stringValue(object["pod"])
+	container := stringValue(object["container"])
+	restarts := intValue(object["restart_count"])
+	reason := stringValue(object["reason"])
+	record.Kind = strings.ToLower(kind)
+	record.Group = strings.Trim(strings.Join([]string{namespace, pod, container}, " / "), " /")
+	record.Severity = normalizeSeverity(stringValue(object["severity"]))
+	record.Summary = strings.TrimSpace(
+		fmt.Sprintf("%s: %s (%d restarts) — %s", kind, record.Group, restarts, reason),
+	)
 }
 
 func normalizeBrowserRecord(record *Record, object map[string]any) {
@@ -391,6 +408,9 @@ func sourceForPath(path string) string {
 		return "browser"
 	case strings.HasPrefix(path, "kubernetes/logs/"):
 		return "backend"
+	case path == "kubernetes/container_events.jsonl" ||
+		strings.HasPrefix(path, "kubernetes/container_events/"):
+		return "kubernetes-container"
 	case path == "kubernetes/events.jsonl" ||
 		strings.HasPrefix(path, "kubernetes/events/"):
 		return "kubernetes-event"
@@ -408,6 +428,9 @@ func laneForPath(path string) string {
 		return "Browser"
 	case strings.HasPrefix(path, "kubernetes/logs/"):
 		return "Backend logs"
+	case path == "kubernetes/container_events.jsonl" ||
+		strings.HasPrefix(path, "kubernetes/container_events/"):
+		return "Container failures"
 	case path == "kubernetes/events.jsonl" ||
 		strings.HasPrefix(path, "kubernetes/events/"):
 		return "Kubernetes events"
@@ -425,6 +448,9 @@ func kindForPath(path string) string {
 		return "request"
 	case strings.HasPrefix(path, "kubernetes/logs/"):
 		return "log"
+	case path == "kubernetes/container_events.jsonl" ||
+		strings.HasPrefix(path, "kubernetes/container_events/"):
+		return "container-event"
 	case path == "kubernetes/events.jsonl" ||
 		strings.HasPrefix(path, "kubernetes/events/"):
 		return "event"

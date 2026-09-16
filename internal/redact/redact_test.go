@@ -197,3 +197,19 @@ func TestHeaderRecordsSensitiveHeaderWithoutValue(t *testing.T) {
 		t.Fatalf("unexpected safe header output: %s", output)
 	}
 }
+
+func TestValueRedactsPersonalDataInDynamicObjectKeys(t *testing.T) {
+	t.Parallel()
+	redactor := New()
+
+	output := redactor.Value("", map[string]any{
+		"user@example.com": "failed",
+	}).(map[string]any)
+
+	if _, leaked := output["user@example.com"]; leaked {
+		t.Fatalf("dynamic object key was not redacted: %+v", output)
+	}
+	if output[Replacement] != "failed" {
+		t.Fatalf("unexpected redacted object: %+v", output)
+	}
+}

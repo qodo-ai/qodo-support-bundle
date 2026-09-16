@@ -10,6 +10,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/redact"
 )
 
 type failingCloser struct {
@@ -258,9 +261,19 @@ func TestCollectRejectsUnsafeResourceLimits(t *testing.T) {
 			message:   "--max-total-log-bytes must not exceed",
 		},
 		{
+			name:      "raw log scan bytes",
+			arguments: []string{"--max-log-scan-bytes", fmt.Sprint(maxLogScanLimit + 1)},
+			message:   "--max-log-scan-bytes must not exceed",
+		},
+		{
 			name:      "workers",
 			arguments: []string{"--log-workers", fmt.Sprint(maxLogWorkers + 1)},
 			message:   "--log-workers must not exceed",
+		},
+		{
+			name:      "command timeout",
+			arguments: []string{"--command-timeout", (maxCommandTimeout + time.Second).String()},
+			message:   "--command-timeout must not exceed",
 		},
 		{
 			name:      "HAR bytes",
@@ -279,6 +292,22 @@ func TestCollectRejectsUnsafeResourceLimits(t *testing.T) {
 				"--max-total-log-bytes", "512",
 			},
 			message: "--max-log-bytes must not exceed --max-total-log-bytes",
+		},
+		{
+			name: "scan bytes below retained bytes",
+			arguments: []string{
+				"--max-log-bytes", "1024",
+				"--max-log-scan-bytes", "512",
+			},
+			message: "--max-log-scan-bytes must not be less than --max-log-bytes",
+		},
+		{
+			name: "concurrent scan memory",
+			arguments: []string{
+				"--max-log-scan-bytes", fmt.Sprint(64 << 20),
+				"--log-workers", "8",
+			},
+			message: "--max-log-scan-bytes times --log-workers must not exceed",
 		},
 	}
 
@@ -346,5 +375,15 @@ func TestResolveKubectlReturnsCanonicalAbsolutePath(t *testing.T) {
 	}
 	if resolved != expected || !filepath.IsAbs(resolved) {
 		t.Fatalf("unexpected resolved path: got %q want %q", resolved, expected)
+	}
+}
+
+func TestTerminalTextRemovesControlCharacters(t *testing.T) {
+	t.Parallel()
+
+	output := terminalText(redact.New(), "capture.har\r\n\x1b[2Jforged")
+
+	if output != "capture.har   [2Jforged" {
+		t.Fatalf("unexpected terminal-safe text: %q", output)
 	}
 }

@@ -567,6 +567,104 @@ func TestBoundedBufferCapsOutputWithoutBreakingWriterContract(t *testing.T) {
 	}
 }
 
+func TestReadLogUsesHARWindowAndCorrelationContext(t *testing.T) {
+	t.Parallel()
+	since := time.Date(2026, 9, 15, 6, 1, 0, 0, time.UTC)
+	until := since.Add(time.Minute)
+	runner := &fakeRunner{
+		run: func(arguments string) (CommandResult, error) {
+			if !strings.Contains(
+				arguments,
+				"--since-time 2026-09-15T06:01:00Z",
+			) {
+				return CommandResult{}, errors.New("missing HAR lower bound")
+			}
+			return CommandResult{Stdout: []byte(
+				"2026-09-15T06:01:01Z before\n" +
+					"2026-09-15T06:01:02Z request_id=request-1234 error\n" +
+					"2026-09-15T06:01:03Z after\n" +
+					"2026-09-15T06:03:00Z too-late\n",
+			)}, nil
+		},
+	}
+
+	result := readLog(
+		context.Background(),
+		Config{
+			SinceTime:               since,
+			UntilTime:               until,
+			CorrelationIDs:          []string{"request-1234"},
+			CorrelationContextLines: 1,
+			Timeout:                 time.Second,
+			MaxLogScanBytes:         100 << 20,
+		},
+		runner,
+		redact.New(),
+		logRequest{
+			namespace:      "qodo",
+			namespaceCount: 1,
+			podName:        "platform-1",
+			containerName:  "platform",
+			maxBytes:       1 << 20,
+		},
+	)
+
+	if result.issue != nil || result.matchedLines != 1 {
+		t.Fatalf("unexpected correlated result: %+v", result)
+	}
+	if !reflect.DeepEqual(runner.logLimits, []int64{100 << 20}) {
+		t.Fatalf("raw scan did not use its independent cap: %+v", runner.logLimits)
+	}
+	text := string(result.data)
+	for _, expected := range []string{"before", "request_id=request-1234", "after"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("missing %q from correlated log: %s", expected, text)
+		}
+	}
+	if strings.Contains(text, "too-late") {
+		t.Fatalf("upper time bound was not applied: %s", text)
+	}
+}
+
+func TestMarshalContainerEventsIncludesRestartsAndOOMKills(t *testing.T) {
+	t.Parallel()
+	input := []pod{{
+		Metadata: objectMetadata{Name: "platform-1", Namespace: "qodo"},
+		Status: podStatus{
+			StartTime: "2026-09-15T06:00:00Z",
+			ContainerStatuses: []containerStatus{{
+				Name:         "platform",
+				RestartCount: 2,
+				LastState: map[string]containerState{
+					"terminated": {
+						Reason:     "OOMKilled",
+						FinishedAt: "2026-09-15T06:05:00Z",
+					},
+				},
+			}},
+		},
+	}}
+
+	data, restarts, oomKills, err := marshalContainerEventRecords(input, redact.New())
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarts != 2 || oomKills != 1 {
+		t.Fatalf("unexpected lifecycle counts: restarts=%d oom=%d", restarts, oomKills)
+	}
+	text := string(data)
+	for _, expected := range []string{
+		`"@timestamp":"2026-09-15T06:05:00Z"`,
+		`"kind":"OOMKilled"`,
+		`"restart_count":2`,
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("missing %s: %s", expected, text)
+		}
+	}
+}
+
 func containsCall(calls []string, value string) bool {
 	for _, call := range calls {
 		if strings.Contains(call, value) {

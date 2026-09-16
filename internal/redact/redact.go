@@ -1,13 +1,25 @@
 package redact
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 )
 
-const Replacement = "[REDACTED]"
+const (
+	Replacement    = "[REDACTED]"
+	RulesetVersion = "1"
+)
+
+// RulesetMetadata identifies the exact built-in redaction policy.
+type RulesetMetadata struct {
+	Version string `json:"version"`
+	SHA256  string `json:"sha256"`
+}
 
 const sensitiveAssignmentKeyPattern = `aws[_-]?secret[_-]?access[_-]?key|aws[_-]?access[_-]?key[_-]?id|access[_-]?token|refresh[_-]?token|id[_-]?token|code[_-]?verifier|saml[_-]?response|token|api[_-]?key|password|passwd|secret|client[_-]?secret|client[_-]?assertion|authorization|proxy[_-]?authorization|cookie|set-cookie|credentials?|private[_-]?key|email|first[_-]?name|last[_-]?name|full[_-]?name|phone|address|ssn|mrn|date[_-]?of[_-]?birth|birth[_-]?date|dob`
 
@@ -114,6 +126,30 @@ func New() *Redactor {
 				replacement: Replacement,
 			},
 		},
+	}
+}
+
+// Ruleset returns a stable version and hash for audit manifests.
+func (redactor *Redactor) Ruleset() RulesetMetadata {
+	parts := []string{
+		RulesetVersion,
+		Replacement,
+		sensitiveAssignmentKeyPattern,
+		malformedURLUserinfoPattern.String(),
+	}
+	keys := make([]string, 0, len(sensitiveKeys))
+	for key := range sensitiveKeys {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts = append(parts, keys...)
+	for _, pattern := range redactor.patterns {
+		parts = append(parts, pattern.expression.String(), pattern.replacement)
+	}
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return RulesetMetadata{
+		Version: RulesetVersion,
+		SHA256:  fmt.Sprintf("%x", digest),
 	}
 }
 
@@ -257,7 +293,11 @@ func (redactor *Redactor) Value(key string, value any) any {
 	case map[string]any:
 		sanitized := make(map[string]any, len(typed))
 		for childKey, childValue := range typed {
-			sanitized[childKey] = redactor.Value(childKey, childValue)
+			sanitizedKey := redactor.Text(childKey)
+			if sanitizedKey == "" {
+				continue
+			}
+			sanitized[sanitizedKey] = redactor.Value(childKey, childValue)
 		}
 		return sanitized
 	case []any:

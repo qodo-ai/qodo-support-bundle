@@ -32,8 +32,13 @@ type Config struct {
 	Context                 string
 	Kubeconfig              string
 	Since                   time.Duration
+	SinceTime               time.Time
+	UntilTime               time.Time
+	CorrelationIDs          []string
+	CorrelationContextLines int
 	Timeout                 time.Duration
 	MaxLogBytes             int64
+	MaxLogScanBytes         int64
 	MaxTotalLogBytes        int64
 	LogWorkers              int
 	Progress                func(Progress)
@@ -64,8 +69,14 @@ type Report struct {
 	Pods                int      `json:"pods"`
 	Containers          int      `json:"containers"`
 	InitContainers      int      `json:"init_containers"`
+	ContainerRestarts   int      `json:"container_restarts"`
+	OOMKills            int      `json:"oom_kills"`
 	LogFiles            int      `json:"log_files"`
+	LogStreamsScanned   int      `json:"log_streams_scanned"`
+	MatchedLogFiles     int      `json:"matched_log_files"`
+	MatchedLogLines     int      `json:"matched_log_lines"`
 	TruncatedLogFiles   int      `json:"truncated_log_files"`
+	TruncatedLogScans   int      `json:"truncated_log_scans"`
 	Issues              []Issue  `json:"issues,omitempty"`
 }
 
@@ -85,11 +96,13 @@ type logRequest struct {
 }
 
 type collectedLog struct {
-	path      string
-	data      []byte
-	truncated bool
-	issue     *Issue
-	reserved  int64
+	path              string
+	data              []byte
+	scanTruncated     bool
+	retainedTruncated bool
+	matchedLines      int
+	issue             *Issue
+	reserved          int64
 }
 
 type podList struct {
@@ -218,4 +231,18 @@ type outputEvent struct {
 	LastTimestamp      string            `json:"last_timestamp,omitempty"`
 	ReportingComponent string            `json:"reporting_component,omitempty"`
 	Source             map[string]string `json:"source"`
+}
+
+type outputContainerEvent struct {
+	SchemaVersion string            `json:"schema_version"`
+	Timestamp     string            `json:"@timestamp,omitempty"`
+	Kind          string            `json:"kind"`
+	Severity      string            `json:"severity"`
+	Namespace     string            `json:"namespace"`
+	Pod           string            `json:"pod"`
+	Container     string            `json:"container"`
+	RestartCount  int               `json:"restart_count"`
+	Reason        string            `json:"reason,omitempty"`
+	Message       string            `json:"message,omitempty"`
+	Source        map[string]string `json:"source"`
 }

@@ -22,18 +22,26 @@ import (
 )
 
 const (
-	defaultHARLimit          int64 = 256 << 20
-	maxHARLimit              int64 = 4 << 30
-	defaultLogLimit          int64 = 10 << 20
-	maxLogLimit                    = kubernetes.MaximumLogBytes
-	defaultTotalLogLimit     int64 = 1 << 30
-	maxTotalLogLimit               = kubernetes.MaximumTotalLogBytes
-	defaultLogWorkers              = 8
-	maxLogWorkers                  = kubernetes.MaximumLogWorkers
-	defaultMaxHAREntries           = 100_000
-	maxHAREntryLimit               = 1_000_000
-	collectionStatusComplete       = "complete"
-	collectionStatusPartial        = "partial"
+	defaultHARLimit                 int64 = 256 << 20
+	maxHARLimit                     int64 = 4 << 30
+	defaultLogLimit                 int64 = 10 << 20
+	maxLogLimit                           = kubernetes.MaximumLogBytes
+	defaultLogScanLimit             int64 = 32 << 20
+	maxLogScanLimit                       = kubernetes.MaximumLogScanBytes
+	maxConcurrentLogScanLimit             = kubernetes.MaximumConcurrentLogScanBytes
+	defaultTotalLogLimit            int64 = 1 << 30
+	maxTotalLogLimit                      = kubernetes.MaximumTotalLogBytes
+	defaultLogWorkers                     = 8
+	maxLogWorkers                         = kubernetes.MaximumLogWorkers
+	defaultMaxHAREntries                  = 100_000
+	maxHAREntryLimit                      = 1_000_000
+	defaultCorrelationContextLines        = 3
+	maxCorrelationContextLines            = 100
+	defaultCorrelationWindowPadding       = 2 * time.Minute
+	maxCustomerContextLength              = 4096
+	maxCommandTimeout                     = 30 * time.Minute
+	collectionStatusComplete              = "complete"
+	collectionStatusPartial               = "partial"
 )
 
 // Version is replaced during release builds.
@@ -109,7 +117,7 @@ func runServe(
 		},
 	})
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, redact.New().Text(err.Error()))
+		_, _ = fmt.Fprintln(stderr, terminalText(redact.New(), err.Error()))
 		return 1
 	}
 	return 0
@@ -157,6 +165,11 @@ func runCollect(
 		defaultTotalLogLimit,
 		"Maximum bytes retained across all container logs (up to 8 GiB)",
 	)
+	maxLogScanBytes := flags.Int64(
+		"max-log-scan-bytes",
+		defaultLogScanLimit,
+		"Maximum raw bytes scanned from each container log (up to 256 MiB)",
+	)
 	logWorkers := flags.Int(
 		"log-workers",
 		defaultLogWorkers,
@@ -171,6 +184,26 @@ func runCollect(
 		"max-har-entries",
 		defaultMaxHAREntries,
 		"Maximum HAR requests included",
+	)
+	correlationContextLines := flags.Int(
+		"correlation-context-lines",
+		defaultCorrelationContextLines,
+		"Log lines retained before and after a correlation-ID match",
+	)
+	correlationWindowPadding := flags.Duration(
+		"correlation-window-padding",
+		defaultCorrelationWindowPadding,
+		"Time added before and after the HAR capture window",
+	)
+	activity := flags.String(
+		"activity",
+		"",
+		"Customer description of what they were doing",
+	)
+	problem := flags.String(
+		"problem",
+		"",
+		"Customer description of what failed",
 	)
 	if err := flags.Parse(arguments); err != nil {
 		return 2
@@ -236,12 +269,37 @@ func runCollect(
 		*since,
 		*timeout,
 		*maxLogBytes,
+		*maxLogScanBytes,
 		*maxTotalLogBytes,
 		*logWorkers,
 		*maxHARBytes,
 		*maxHAREntries,
 	); err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
+		return 2
+	}
+	if *correlationContextLines < 0 ||
+		*correlationContextLines > maxCorrelationContextLines {
+		_, _ = fmt.Fprintf(
+			stderr,
+			"correlation-context-lines must be between 0 and %d\n",
+			maxCorrelationContextLines,
+		)
+		return 2
+	}
+	if *correlationWindowPadding < 0 || *correlationWindowPadding > 24*time.Hour {
+		_, _ = fmt.Fprintln(
+			stderr,
+			"correlation-window-padding must be between 0 and 24h",
+		)
+		return 2
+	}
+	if len(*activity) > maxCustomerContextLength || len(*problem) > maxCustomerContextLength {
+		_, _ = fmt.Fprintf(
+			stderr,
+			"activity and problem must not exceed %d characters\n",
+			maxCustomerContextLength,
+		)
 		return 2
 	}
 
@@ -255,7 +313,7 @@ func runCollect(
 	}
 	builder, err := bundle.New(*output)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, redactor.Text(err.Error()))
+		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
 	cleanupPending := true
@@ -269,7 +327,7 @@ func runCollect(
 	_, _ = fmt.Fprintf(
 		stderr,
 		"Importing HAR: %s\n",
-		filepath.Base(redactor.Text(*harPath)),
+		terminalText(redactor, filepath.Base(*harPath)),
 	)
 	var harStats har.Stats
 	if err := builder.AddStream("browser/network.jsonl", func(writer io.Writer) error {
@@ -284,18 +342,20 @@ func runCollect(
 		)
 		return importErr
 	}); err != nil {
-		_, _ = fmt.Fprintln(stderr, redactor.Text(err.Error()))
+		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
 	_, _ = fmt.Fprintf(
 		stderr,
-		"Imported %d browser requests.\n",
+		"Imported %d browser requests with %d correlation values.\n",
 		harStats.EntriesWritten,
+		harStats.CorrelationIDCount,
 	)
+	sinceTime, untilTime := correlationWindow(harStats, *correlationWindowPadding)
 
 	resolvedKubectl, err := resolveKubectl(*kubectl)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, redactor.Text(err.Error()))
+		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
 	_, _ = fmt.Fprintf(stderr, "Using kubectl: %q\n", resolvedKubectl)
@@ -309,8 +369,13 @@ func runCollect(
 			Context:                 *kubeContext,
 			Kubeconfig:              *kubeconfig,
 			Since:                   *since,
+			SinceTime:               sinceTime,
+			UntilTime:               untilTime,
+			CorrelationIDs:          harStats.CorrelationIDs,
+			CorrelationContextLines: *correlationContextLines,
 			Timeout:                 *timeout,
 			MaxLogBytes:             *maxLogBytes,
+			MaxLogScanBytes:         *maxLogScanBytes,
 			MaxTotalLogBytes:        *maxTotalLogBytes,
 			LogWorkers:              *logWorkers,
 			Progress: func(progress kubernetes.Progress) {
@@ -338,12 +403,12 @@ func runCollect(
 	}
 	issuesData, err := marshalIssues(kubernetesReport.Issues)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, redactor.Text(err.Error()))
+		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
 	if len(issuesData) > 0 {
 		if err := builder.Add("collection-issues.jsonl", issuesData); err != nil {
-			_, _ = fmt.Fprintln(stderr, redactor.Text(err.Error()))
+			_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 			return 1
 		}
 	}
@@ -355,9 +420,34 @@ func runCollect(
 		namespaceValue = "*"
 	}
 	generatedAt := time.Now().UTC()
+	customerContext := map[string]string{}
+	if sanitizedActivity := strings.TrimSpace(redactor.Text(*activity)); sanitizedActivity != "" {
+		customerContext["activity"] = sanitizedActivity
+	}
+	if sanitizedProblem := strings.TrimSpace(redactor.Text(*problem)); sanitizedProblem != "" {
+		customerContext["problem"] = sanitizedProblem
+	}
+	summary := buildSummary(
+		generatedAt,
+		collectionStatus,
+		harStats,
+		kubernetesReport,
+		customerContext,
+	)
+	if err := builder.Add("summary.md", []byte(summary)); err != nil {
+		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
+		return 1
+	}
+	ruleset := redactor.Ruleset()
 	archivePath, err := builder.FinalizeContext(ctx, bundle.Manifest{
-		CollectorVersion: Version,
-		GeneratedAt:      generatedAt,
+		CollectorVersion:      Version,
+		GeneratedAt:           generatedAt,
+		ClockSkewMilliseconds: harStats.ClockSkewMilliseconds,
+		Redaction: map[string]string{
+			"version": ruleset.Version,
+			"sha256":  ruleset.SHA256,
+		},
+		CustomerContext: customerContext,
 		Collection: map[string]any{
 			"status":                    collectionStatus,
 			"namespace":                 redactor.Text(namespaceValue),
@@ -366,6 +456,14 @@ func runCollect(
 			"exclude_system_namespaces": *excludeSystemNamespaces,
 			"selector":                  redactor.Text(*selector),
 			"since":                     since.String(),
+			"correlation": map[string]any{
+				"id_count":              harStats.CorrelationIDCount,
+				"context_lines":         *correlationContextLines,
+				"window_start":          formatOptionalTime(sinceTime),
+				"window_end":            formatOptionalTime(untilTime),
+				"window_padding":        correlationWindowPadding.String(),
+				"scan_bytes_per_stream": *maxLogScanBytes,
+			},
 			"browser": map[string]any{
 				"source_file": filepath.Base(redactor.Text(*harPath)),
 				"stats":       harStats,
@@ -384,7 +482,7 @@ func runCollect(
 			)
 			return 1
 		}
-		_, _ = fmt.Fprintln(stderr, redactor.Text(err.Error()))
+		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
 	cleanupPending = false
@@ -439,6 +537,98 @@ func closeBundle(closer io.Closer, stderr io.Writer, exitCode *int) {
 	}
 }
 
+func correlationWindow(stats har.Stats, padding time.Duration) (time.Time, time.Time) {
+	startedAt, startErr := time.Parse(time.RFC3339Nano, stats.AdjustedStartedAt)
+	endedAt, endErr := time.Parse(time.RFC3339Nano, stats.AdjustedEndedAt)
+	if startErr != nil || endErr != nil {
+		return time.Time{}, time.Time{}
+	}
+	return startedAt.Add(-padding), endedAt.Add(padding)
+}
+
+func formatOptionalTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format(time.RFC3339Nano)
+}
+
+func buildSummary(
+	generatedAt time.Time,
+	status string,
+	harStats har.Stats,
+	kubernetesReport kubernetes.Report,
+	customerContext map[string]string,
+) string {
+	var summary strings.Builder
+	fmt.Fprintln(&summary, "# Qodo support bundle summary")
+	fmt.Fprintf(&summary, "\n- Captured: %s\n", generatedAt.Format(time.RFC3339Nano))
+	fmt.Fprintf(&summary, "- Collection status: %s\n", status)
+	if activity := summaryValue(customerContext["activity"]); activity != "" {
+		fmt.Fprintf(&summary, "- Customer activity: %s\n", activity)
+	}
+	if problem := summaryValue(customerContext["problem"]); problem != "" {
+		fmt.Fprintf(&summary, "- Reported problem: %s\n", problem)
+	}
+	fmt.Fprintln(&summary, "\n## Browser and correlation")
+	fmt.Fprintf(&summary, "\n- HTTP requests: %d\n", harStats.EntriesWritten)
+	fmt.Fprintf(&summary, "- HTTP failures (4xx/5xx): %d\n", harStats.HTTPFailures)
+	fmt.Fprintf(&summary, "- Unique correlation values: %d\n", harStats.CorrelationIDCount)
+	fmt.Fprintf(
+		&summary,
+		"- Browser-to-cluster clock offset: %d ms (%d Date-header samples)\n",
+		harStats.ClockSkewMilliseconds,
+		harStats.ClockSkewSamples,
+	)
+	if harStats.CaptureStartedAt != "" {
+		fmt.Fprintf(
+			&summary,
+			"- HAR capture window: %s to %s\n",
+			harStats.CaptureStartedAt,
+			harStats.CaptureEndedAt,
+		)
+	}
+	fmt.Fprintln(&summary, "\n## Kubernetes")
+	fmt.Fprintf(
+		&summary,
+		"\n- Scope: %d/%d namespaces, %d pods, %d containers\n",
+		len(kubernetesReport.Namespaces),
+		kubernetesReport.NamespacesRequested,
+		kubernetesReport.Pods,
+		kubernetesReport.Containers,
+	)
+	fmt.Fprintf(&summary, "- Container restarts: %d\n", kubernetesReport.ContainerRestarts)
+	fmt.Fprintf(&summary, "- OOMKills: %d\n", kubernetesReport.OOMKills)
+	fmt.Fprintf(
+		&summary,
+		"- Correlated logs: %d lines across %d files (%d streams scanned)\n",
+		kubernetesReport.MatchedLogLines,
+		kubernetesReport.MatchedLogFiles,
+		kubernetesReport.LogStreamsScanned,
+	)
+	fmt.Fprintf(&summary, "- Truncated log files: %d\n", kubernetesReport.TruncatedLogFiles)
+	fmt.Fprintf(&summary, "- Truncated raw log scans: %d\n", kubernetesReport.TruncatedLogScans)
+	fmt.Fprintf(&summary, "- Collection issues: %d\n", len(kubernetesReport.Issues))
+	fmt.Fprintln(
+		&summary,
+		"\nOpen this bundle with `qodo-support-bundle serve` for the merged timeline.",
+	)
+	return summary.String()
+}
+
+func summaryValue(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func terminalText(redactor *redact.Redactor, value string) string {
+	return strings.Map(func(character rune) rune {
+		if character < 0x20 || character == 0x7f {
+			return ' '
+		}
+		return character
+	}, redactor.Text(value))
+}
+
 func validateCollectFlags(
 	namespaces []string,
 	allNamespaces bool,
@@ -446,6 +636,7 @@ func validateCollectFlags(
 	since time.Duration,
 	timeout time.Duration,
 	maxLogBytes int64,
+	maxLogScanBytes int64,
 	maxTotalLogBytes int64,
 	logWorkers int,
 	maxHARBytes int64,
@@ -460,10 +651,21 @@ func validateCollectFlags(
 		return errors.New("--since must be positive")
 	case timeout <= 0:
 		return errors.New("--command-timeout must be positive")
+	case timeout > maxCommandTimeout:
+		return fmt.Errorf("--command-timeout must not exceed %s", maxCommandTimeout)
 	case maxLogBytes <= 0:
 		return errors.New("--max-log-bytes must be positive")
 	case maxLogBytes > maxLogLimit:
 		return fmt.Errorf("--max-log-bytes must not exceed %d bytes", maxLogLimit)
+	case maxLogScanBytes <= 0:
+		return errors.New("--max-log-scan-bytes must be positive")
+	case maxLogScanBytes > maxLogScanLimit:
+		return fmt.Errorf(
+			"--max-log-scan-bytes must not exceed %d bytes",
+			maxLogScanLimit,
+		)
+	case maxLogScanBytes < maxLogBytes:
+		return errors.New("--max-log-scan-bytes must not be less than --max-log-bytes")
 	case maxTotalLogBytes <= 0:
 		return errors.New("--max-total-log-bytes must be positive")
 	case maxTotalLogBytes > maxTotalLogLimit:
@@ -477,6 +679,11 @@ func validateCollectFlags(
 		return errors.New("--log-workers must be positive")
 	case logWorkers > maxLogWorkers:
 		return fmt.Errorf("--log-workers must not exceed %d", maxLogWorkers)
+	case maxLogScanBytes*int64(logWorkers) > maxConcurrentLogScanLimit:
+		return fmt.Errorf(
+			"--max-log-scan-bytes times --log-workers must not exceed %d bytes",
+			maxConcurrentLogScanLimit,
+		)
 	case maxHARBytes <= 0:
 		return errors.New("--max-har-bytes must be positive")
 	case maxHARBytes > maxHARLimit:
@@ -539,7 +746,7 @@ func writeCollectionProgress(
 				"Scanning namespace %d/%d: %s\n",
 				progress.Current,
 				progress.Total,
-				redactor.Text(progress.Namespace),
+				terminalText(redactor, progress.Namespace),
 			)
 		}
 	case "collect_logs":

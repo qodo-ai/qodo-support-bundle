@@ -1,6 +1,8 @@
 VERSION ?= dev
 MODULE := github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle
-LDFLAGS := -s -w -X $(MODULE)/internal/app.Version=$(VERSION)
+override QODO_SUPPORT_BUNDLE_VERSION := $(value VERSION)
+export QODO_SUPPORT_BUNDLE_VERSION
+LDFLAGS := -s -w -X $(MODULE)/internal/app.Version=$$QODO_SUPPORT_BUNDLE_VERSION
 
 .PHONY: build test format-check release clean
 

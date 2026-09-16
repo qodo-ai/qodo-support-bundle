@@ -43,6 +43,51 @@ func TestImportContextHonorsCancellationBeforeOpening(t *testing.T) {
 	}
 }
 
+func TestImportExtractsCorrelationWindowAndClockSkew(t *testing.T) {
+	t.Parallel()
+	harPath := filepath.Join(t.TempDir(), "capture.har")
+	input := `{"log":{"entries":[{
+		"startedDateTime":"2026-09-15T06:00:00+03:00",
+		"time":2000,
+		"timings":{"blocked":0,"dns":0,"connect":0,"send":0,"wait":1000,"receive":1000},
+		"request":{"method":"GET","url":"https://example.com/auth"},
+		"response":{"status":500,"headers":[
+			{"name":"Date","value":"Tue, 15 Sep 2026 03:02:01 GMT"},
+			{"name":"X-Request-ID","value":"request-1234"},
+			{"name":"X-Correlation-ID","value":"correlation-5678"},
+			{"name":"traceparent","value":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}
+		]}
+	}]}}`
+	if err := os.WriteFile(harPath, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+
+	stats, err := Import(harPath, &output, 1<<20, 100, redact.New())
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.CaptureStartedAt != "2026-09-15T06:00:00+03:00" ||
+		stats.CaptureEndedAt != "2026-09-15T06:00:02+03:00" ||
+		stats.AdjustedStartedAt != "2026-09-15T06:02:00+03:00" ||
+		stats.AdjustedEndedAt != "2026-09-15T06:02:02+03:00" ||
+		stats.ClockSkewMilliseconds != 120_000 ||
+		stats.ClockSkewSamples != 1 ||
+		stats.CorrelationIDCount != 4 {
+		t.Fatalf("unexpected correlation stats: %+v", stats)
+	}
+	for _, expected := range []string{
+		`"x-request-id":["request-1234"]`,
+		`"x-correlation-id":["correlation-5678"]`,
+		`"traceparent":["00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"]`,
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("output is missing %s: %s", expected, output.String())
+		}
+	}
+}
+
 func (writer *notifyingWriter) Write(data []byte) (int, error) {
 	written, err := writer.Buffer.Write(data)
 	writer.once.Do(func() {

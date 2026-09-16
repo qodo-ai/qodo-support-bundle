@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"container/heap"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -52,6 +54,7 @@ type TimelineResponse struct {
 	TotalMatches          int              `json:"total_matches"`
 	SkippedWithoutTime    int              `json:"skipped_without_time"`
 	SkippedOversizedFiles int              `json:"skipped_oversized_files"`
+	ClockSkewMilliseconds int64            `json:"clock_skew_milliseconds"`
 	Truncated             bool             `json:"truncated"`
 }
 
@@ -65,6 +68,11 @@ func readTimeline(
 	response := TimelineResponse{
 		Records: make([]TimelineRecord, 0, limit),
 	}
+	clockSkew, err := bundleClockSkew(bundle)
+	if err != nil {
+		return TimelineResponse{}, err
+	}
+	response.ClockSkewMilliseconds = clockSkew.Milliseconds()
 	normalizedQuery := strings.ToLower(strings.TrimSpace(query))
 	normalizedFilter := strings.ToLower(strings.TrimSpace(filter))
 	candidates := newTimelineCandidateStore(limit)
@@ -119,6 +127,10 @@ func readTimeline(
 			if !ok {
 				response.SkippedWithoutTime++
 				continue
+			}
+			if record.Source == "browser" && clockSkew != 0 {
+				timestamp = timestamp.Add(clockSkew)
+				record.Timestamp = timestamp.Format(time.RFC3339Nano)
 			}
 			response.TotalMatches++
 			laneCounts[record.Lane]++
@@ -181,6 +193,29 @@ func readTimeline(
 		response.Truncated = true
 	}
 	return response, nil
+}
+
+func bundleClockSkew(bundle *ExtractedBundle) (time.Duration, error) {
+	manifestPath, exists := bundle.Resolve("manifest.json")
+	if !exists {
+		return 0, nil
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return 0, fmt.Errorf("read manifest clock skew: %w", err)
+	}
+	var manifest struct {
+		ClockSkewMilliseconds int64 `json:"clock_skew_milliseconds"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return 0, fmt.Errorf("parse manifest clock skew: %w", err)
+	}
+	maxClockSkewMilliseconds := int64((24 * time.Hour) / time.Millisecond)
+	if manifest.ClockSkewMilliseconds < -maxClockSkewMilliseconds ||
+		manifest.ClockSkewMilliseconds > maxClockSkewMilliseconds {
+		return 0, errors.New("manifest clock skew exceeds 24 hours")
+	}
+	return time.Duration(manifest.ClockSkewMilliseconds) * time.Millisecond, nil
 }
 
 type timelineCandidateStore struct {
@@ -310,8 +345,9 @@ func orderedTimelineCandidateGroups(
 ) []string {
 	order := []string{
 		"Browser",
-		"Backend logs",
+		"Container failures",
 		"Kubernetes events",
+		"Backend logs",
 		"Kubernetes pods",
 		"Diagnostics",
 	}
@@ -345,8 +381,9 @@ func parseRecordTimestamp(value string) (time.Time, bool) {
 func orderedTimelineLanes(counts map[string]int) []TimelineLane {
 	order := []string{
 		"Browser",
-		"Backend logs",
+		"Container failures",
 		"Kubernetes events",
+		"Backend logs",
 		"Kubernetes pods",
 		"Diagnostics",
 	}

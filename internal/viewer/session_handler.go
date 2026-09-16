@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const (
@@ -54,6 +55,9 @@ func (application *handler) handleSession(
 	token := request.Header.Get(sessionClaimHeader)
 	status, err := application.claimSession(token)
 	if err != nil {
+		if status == http.StatusTooManyRequests {
+			writer.Header().Set("Retry-After", "1")
+		}
 		http.Error(writer, err.Error(), status)
 		return
 	}
@@ -78,6 +82,9 @@ func (application *handler) handleSessionBootstrap(
 	token := request.PostForm.Get("session")
 	status, err := application.claimSession(token)
 	if err != nil {
+		if status == http.StatusTooManyRequests {
+			writer.Header().Set("Retry-After", "1")
+		}
 		http.Error(writer, err.Error(), status)
 		return
 	}
@@ -86,8 +93,15 @@ func (application *handler) handleSessionBootstrap(
 }
 
 func (application *handler) claimSession(token string) (int, error) {
+	application.sessionMutex.Lock()
+	defer application.sessionMutex.Unlock()
+	now := time.Now()
 	decodedToken, err := hex.DecodeString(token)
 	if err != nil || len(decodedToken) != 32 {
+		if now.Before(application.nextClaimAt) {
+			return http.StatusTooManyRequests, errors.New("viewer session claims are rate limited")
+		}
+		application.recordClaimFailure(now)
 		return http.StatusBadRequest, errors.New("a valid session claim is required")
 	}
 	providedDigest := sha256.Sum256([]byte(token))
@@ -95,10 +109,12 @@ func (application *handler) claimSession(token string) (int, error) {
 		providedDigest[:],
 		application.expectedClaimDigest[:],
 	) != 1 {
+		if now.Before(application.nextClaimAt) {
+			return http.StatusTooManyRequests, errors.New("viewer session claims are rate limited")
+		}
+		application.recordClaimFailure(now)
 		return http.StatusForbidden, errors.New("invalid viewer session claim")
 	}
-	application.sessionMutex.Lock()
-	defer application.sessionMutex.Unlock()
 	if application.sessionToken != "" {
 		return http.StatusNoContent, nil
 	}
@@ -109,8 +125,18 @@ func (application *handler) claimSession(token string) (int, error) {
 			)
 		}
 	}
+	application.claimFailures = 0
+	application.nextClaimAt = time.Time{}
 	application.sessionToken = token
 	return http.StatusNoContent, nil
+}
+
+func (application *handler) recordClaimFailure(now time.Time) {
+	application.claimFailures++
+	if application.claimFailures >= 5 {
+		application.claimFailures = 0
+		application.nextClaimAt = now.Add(time.Second)
+	}
 }
 
 func setSessionCookie(writer http.ResponseWriter, token string) {

@@ -196,6 +196,35 @@ func TestReadTimelineStopsWhenContextIsCanceled(t *testing.T) {
 	}
 }
 
+func TestReadTimelineAppliesClockSkewAndOrdersContainerFailures(t *testing.T) {
+	t.Parallel()
+	bundle := testExtractedBundle(t, map[string]string{
+		"manifest.json": `{"clock_skew_milliseconds":120000}`,
+		"browser/network.jsonl": `{"@timestamp":"2026-09-15T07:00:00Z","request":{"method":"GET","url":"https://example.com/auth"},"response":{"status":500}}
+`,
+		"kubernetes/container_events.jsonl": `{"@timestamp":"2026-09-15T07:02:01Z","kind":"OOMKilled","severity":"error","namespace":"qodo","pod":"platform-1","container":"platform","restart_count":1,"reason":"OOMKilled","source":{"type":"kubernetes_container"}}
+`,
+	})
+
+	response, err := readTimeline(context.Background(), bundle, "", "", 10)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.ClockSkewMilliseconds != 120_000 ||
+		len(response.Records) != 2 ||
+		response.Records[0].Timestamp != "2026-09-15T07:02:00Z" ||
+		response.Records[1].Lane != "Container failures" ||
+		response.Records[1].Kind != "oomkilled" {
+		t.Fatalf("unexpected correlated timeline: %+v", response)
+	}
+	if len(response.Lanes) != 2 ||
+		response.Lanes[0].Name != "Browser" ||
+		response.Lanes[1].Name != "Container failures" {
+		t.Fatalf("unexpected lane order: %+v", response.Lanes)
+	}
+}
+
 func TestReadRecordAtLineReturnsFullDetails(t *testing.T) {
 	t.Parallel()
 	bundle := testExtractedBundle(t, map[string]string{

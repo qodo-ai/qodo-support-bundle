@@ -46,6 +46,16 @@ func TestHandlerServesManifestWithSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestCategoryForPathRecognizesContainerFailures(t *testing.T) {
+	t.Parallel()
+
+	if category := categoryForPath(
+		"kubernetes/container_events.jsonl",
+	); category != "Container failures" {
+		t.Fatalf("unexpected category: %s", category)
+	}
+}
+
 func TestHandlerRequiresTokenOnlyForAPIs(t *testing.T) {
 	t.Parallel()
 	bundle := testExtractedBundle(t, map[string]string{
@@ -224,10 +234,18 @@ func TestHandlerOnlyAcceptsServerIssuedSession(t *testing.T) {
 	}
 	waitGroup.Wait()
 	close(statuses)
+	rateLimited := false
 	for status := range statuses {
+		if status == http.StatusTooManyRequests {
+			rateLimited = true
+			continue
+		}
 		if status != http.StatusForbidden {
 			t.Fatalf("unexpected claim status: %d", status)
 		}
+	}
+	if !rateLimited {
+		t.Fatal("concurrent invalid claims were not rate limited")
 	}
 	request := viewerRequest(http.MethodPost, "http://127.0.0.1:4321/api/session")
 	request.Header.Del("Authorization")
@@ -294,6 +312,50 @@ func TestHandlerRequiresCustomHeaderToClaimSession(t *testing.T) {
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("claim without custom header returned %d", response.Code)
+	}
+}
+
+func TestHandlerRateLimitsRepeatedFailedSessionClaims(t *testing.T) {
+	t.Parallel()
+	handler := newHandler(
+		testExtractedBundle(t, map[string]string{}),
+		"127.0.0.1:4321",
+		testViewerToken,
+		nil,
+	)
+	for attempt := 0; attempt < 5; attempt++ {
+		request := httptest.NewRequest(http.MethodPost, "/api/session", nil)
+		request.Host = "127.0.0.1:4321"
+		request.RemoteAddr = "127.0.0.1:12345"
+		request.Header.Set(sessionClaimHeader, strings.Repeat("a", 64))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("attempt %d returned %d", attempt+1, response.Code)
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/session", nil)
+	request.Host = "127.0.0.1:4321"
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.Header.Set(sessionClaimHeader, strings.Repeat("b", 64))
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusTooManyRequests ||
+		response.Header().Get("Retry-After") != "1" {
+		t.Fatalf("unexpected rate-limit response: %+v", response)
+	}
+	validRequest := httptest.NewRequest(http.MethodPost, "/api/session", nil)
+	validRequest.Host = "127.0.0.1:4321"
+	validRequest.RemoteAddr = "127.0.0.1:12345"
+	validRequest.Header.Set(sessionClaimHeader, testViewerToken)
+	validResponse := httptest.NewRecorder()
+
+	handler.ServeHTTP(validResponse, validRequest)
+
+	if validResponse.Code != http.StatusNoContent {
+		t.Fatalf("valid claim was blocked: %d", validResponse.Code)
 	}
 }
 

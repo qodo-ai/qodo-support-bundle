@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -59,6 +60,16 @@ func TestFinalizeCreatesRestrictedChecksummedArchive(t *testing.T) {
 	if !strings.Contains(checksums, "  browser/network.jsonl\n") ||
 		!strings.Contains(checksums, "  manifest.json\n") {
 		t.Fatalf("unexpected checksums:\n%s", checksums)
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(files["manifest.json"], &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Artifacts) != 1 ||
+		manifest.Artifacts[0].Path != "browser/network.jsonl" ||
+		manifest.Artifacts[0].Size != int64(len("{\"status\":200}\n")) ||
+		len(manifest.Artifacts[0].SHA256) != 64 {
+		t.Fatalf("unexpected manifest artifacts: %+v", manifest.Artifacts)
 	}
 }
 

@@ -28,11 +28,22 @@ var ErrCleanup = errors.New("clean up temporary bundle data")
 
 // Manifest describes the collector and sanitized sources in a bundle.
 type Manifest struct {
-	SchemaVersion    string         `json:"schema_version"`
-	CollectorVersion string         `json:"collector_version"`
-	GeneratedAt      time.Time      `json:"generated_at"`
-	Collection       map[string]any `json:"collection"`
-	Files            int            `json:"files"`
+	SchemaVersion         string            `json:"schema_version"`
+	CollectorVersion      string            `json:"collector_version"`
+	GeneratedAt           time.Time         `json:"generated_at"`
+	ClockSkewMilliseconds int64             `json:"clock_skew_milliseconds"`
+	Redaction             map[string]string `json:"redaction"`
+	CustomerContext       map[string]string `json:"customer_context,omitempty"`
+	Collection            map[string]any    `json:"collection"`
+	Artifacts             []ManifestFile    `json:"artifacts"`
+	Files                 int               `json:"files"`
+}
+
+// ManifestFile records the integrity metadata for a collected artifact.
+type ManifestFile struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
 }
 
 // Builder stages sanitized data and creates a checksummed tar.gz archive.
@@ -138,8 +149,13 @@ func (builder *Builder) FinalizeContext(
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	manifest.SchemaVersion = "1"
-	manifest.Files = builder.fileCount + 2
+	manifest.SchemaVersion = "2"
+	artifacts, err := builder.manifestFiles(ctx)
+	if err != nil {
+		return "", err
+	}
+	manifest.Artifacts = artifacts
+	manifest.Files = len(manifest.Artifacts) + 2
 	manifestData, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("encode manifest: %w", err)
@@ -150,7 +166,7 @@ func (builder *Builder) FinalizeContext(
 	}
 
 	if err := builder.AddStream("checksums.sha256", func(writer io.Writer) error {
-		return builder.writeChecksums(ctx, writer)
+		return builder.writeChecksums(ctx, writer, manifest.Artifacts)
 	}); err != nil {
 		return "", err
 	}
@@ -166,6 +182,47 @@ func (builder *Builder) FinalizeContext(
 	}
 	builder.closed = true
 	return builder.outputPath, nil
+}
+
+func (builder *Builder) manifestFiles(ctx context.Context) ([]ManifestFile, error) {
+	paths, err := stagedFiles(builder.stagingDir)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]ManifestFile, 0, len(paths))
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		localPath := filepath.Join(builder.stagingDir, filepath.FromSlash(path))
+		digest, size, err := checksumFile(ctx, localPath)
+		if err != nil {
+			return nil, fmt.Errorf("hash %q for manifest: %w", path, err)
+		}
+		files = append(files, ManifestFile{
+			Path:   path,
+			Size:   size,
+			SHA256: digest,
+		})
+	}
+	return files, nil
+}
+
+func checksumFile(ctx context.Context, path string) (string, int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	hasher := sha256.New()
+	size, copyErr := io.Copy(hasher, contextReader{ctx: ctx, reader: file})
+	closeErr := file.Close()
+	if copyErr != nil {
+		return "", 0, copyErr
+	}
+	if closeErr != nil {
+		return "", 0, closeErr
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
 
 // Close removes staged data when collection fails.
@@ -192,36 +249,30 @@ func (builder *Builder) Close() error {
 	return nil
 }
 
-func (builder *Builder) writeChecksums(ctx context.Context, writer io.Writer) error {
-	paths, err := stagedFiles(builder.stagingDir)
-	if err != nil {
-		return err
-	}
-	for _, path := range paths {
-		if path == "checksums.sha256" {
-			continue
-		}
-		file, err := os.Open(filepath.Join(builder.stagingDir, filepath.FromSlash(path)))
-		if err != nil {
-			return fmt.Errorf("open %q for checksum: %w", path, err)
-		}
-		hasher := sha256.New()
-		_, copyErr := io.Copy(hasher, contextReader{ctx: ctx, reader: file})
-		closeErr := file.Close()
-		if copyErr != nil {
-			return fmt.Errorf("read %q for checksum: %w", path, copyErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close %q after checksum: %w", path, closeErr)
-		}
+func (builder *Builder) writeChecksums(
+	ctx context.Context,
+	writer io.Writer,
+	artifacts []ManifestFile,
+) error {
+	for _, artifact := range artifacts {
 		if _, err := fmt.Fprintf(
 			writer,
 			"%s  %s\n",
-			hex.EncodeToString(hasher.Sum(nil)),
-			path,
+			artifact.SHA256,
+			artifact.Path,
 		); err != nil {
-			return fmt.Errorf("write checksum for %q: %w", path, err)
+			return fmt.Errorf("write checksum for %q: %w", artifact.Path, err)
 		}
+	}
+	manifestDigest, _, err := checksumFile(
+		ctx,
+		filepath.Join(builder.stagingDir, "manifest.json"),
+	)
+	if err != nil {
+		return fmt.Errorf("checksum manifest.json: %w", err)
+	}
+	if _, err := fmt.Fprintf(writer, "%s  manifest.json\n", manifestDigest); err != nil {
+		return fmt.Errorf("write checksum for manifest.json: %w", err)
 	}
 	return nil
 }

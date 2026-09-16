@@ -8,8 +8,9 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
   const timelineLimit = 2000;
   const laneOrder = [
     "Browser",
-    "Backend logs",
+    "Container failures",
     "Kubernetes events",
+    "Backend logs",
     "Kubernetes pods",
     "Diagnostics",
   ];
@@ -673,6 +674,8 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
         return "BR";
       case "Backend logs":
         return "BE";
+      case "Container failures":
+        return "CF";
       case "Kubernetes events":
         return "KE";
       case "Kubernetes pods":

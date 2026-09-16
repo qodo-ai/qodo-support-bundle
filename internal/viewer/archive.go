@@ -434,14 +434,66 @@ func validateManifest(root string, extracted map[string]extractedFile) error {
 	if err != nil {
 		return fmt.Errorf("read manifest.json: %w", err)
 	}
-	var manifest map[string]any
+	var manifest *struct {
+		SchemaVersion string `json:"schema_version"`
+		Artifacts     []struct {
+			Path   string `json:"path"`
+			Size   int64  `json:"size"`
+			SHA256 string `json:"sha256"`
+		} `json:"artifacts"`
+	}
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return fmt.Errorf("parse manifest.json: %w", err)
 	}
 	if manifest == nil {
 		return errors.New("manifest.json must contain a JSON object")
 	}
+	if manifest.SchemaVersion != "2" {
+		return nil
+	}
+	if len(manifest.Artifacts) != len(extracted)-2 {
+		return errors.New("manifest artifact inventory is incomplete")
+	}
+	seen := make(map[string]struct{}, len(manifest.Artifacts))
+	for _, artifact := range manifest.Artifacts {
+		extractedFile, exists := extracted[artifact.Path]
+		if !exists || artifact.Path == "manifest.json" ||
+			artifact.Path == "checksums.sha256" {
+			return fmt.Errorf("manifest references unknown artifact %q", artifact.Path)
+		}
+		if _, duplicate := seen[artifact.Path]; duplicate {
+			return fmt.Errorf("manifest contains duplicate artifact %q", artifact.Path)
+		}
+		seen[artifact.Path] = struct{}{}
+		if artifact.Size != extractedFile.size {
+			return fmt.Errorf("manifest size mismatch for %q", artifact.Path)
+		}
+		digest, err := fileSHA256(filepath.Join(root, filepath.FromSlash(artifact.Path)))
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(artifact.SHA256, digest) {
+			return fmt.Errorf("manifest checksum mismatch for %q", artifact.Path)
+		}
+	}
 	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open artifact for manifest verification: %w", err)
+	}
+	hasher := sha256.New()
+	_, copyErr := io.Copy(hasher, file)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return "", fmt.Errorf("hash artifact for manifest verification: %w", copyErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close artifact after manifest verification: %w", closeErr)
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func validateLimits(limits ExtractionLimits) error {
