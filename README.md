@@ -113,10 +113,11 @@ The collector recognizes `request-id`, `x-request-id`, `x-correlation-id`, and
 `traceparent` request or response headers. It computes the median
 browser-to-cluster clock offset from HTTP `Date` headers, applies that offset to
 the HAR window, and retains three lines before and after each matching log line.
-Use
-`--correlation-context-lines` and `--correlation-window-padding` to tune those
-bounds. When the HAR contains no usable correlation IDs, the adjusted time
-window still limits the logs, but all lines in that window are retained.
+At most 256 unique correlation values are used; overflow is reported as a
+non-fatal collection issue. Use `--correlation-context-lines` and
+`--correlation-window-padding` to tune those bounds. When the HAR contains no
+usable correlation IDs, the adjusted time window still limits the logs, but all
+lines in that window are retained.
 
 Exit code `0` means collection completed. Exit code `3` means a usable partial
 bundle was created; inspect `collection-issues.jsonl` for unavailable resources

@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -88,6 +89,85 @@ func TestImportExtractsCorrelationWindowAndClockSkew(t *testing.T) {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("output is missing %s: %s", expected, output.String())
 		}
+	}
+}
+
+func TestImportCapsGlobalCorrelationIDs(t *testing.T) {
+	t.Parallel()
+	entries := make([]map[string]any, 0, MaximumCorrelationIDs+1)
+	for index := 0; index <= MaximumCorrelationIDs; index++ {
+		entries = append(entries, map[string]any{
+			"request": map[string]any{
+				"headers": []map[string]string{{
+					"name":  "x-request-id",
+					"value": fmt.Sprintf("request-%04d", index),
+				}},
+			},
+			"response": map[string]any{"status": 200},
+		})
+	}
+	input, err := json.Marshal(map[string]any{
+		"log": map[string]any{"entries": entries},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harPath := filepath.Join(t.TempDir(), "capture.har")
+	if err := os.WriteFile(harPath, input, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+
+	stats, err := Import(
+		harPath,
+		&output,
+		1<<20,
+		len(entries),
+		redact.New(),
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stats.CorrelationIDsTruncated ||
+		stats.CorrelationIDCount != MaximumCorrelationIDs ||
+		len(stats.CorrelationIDs) != MaximumCorrelationIDs {
+		t.Fatalf("unexpected bounded correlation stats: %+v", stats)
+	}
+	overflowID := fmt.Sprintf("request-%04d", MaximumCorrelationIDs)
+	decoder := json.NewDecoder(&output)
+	for {
+		var record outputEntry
+		if err := decoder.Decode(&record); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		for _, values := range record.CorrelationIDs {
+			for _, value := range values {
+				if value == overflowID {
+					t.Fatalf("output retained overflow correlation ID %q", overflowID)
+				}
+			}
+		}
+	}
+}
+
+func TestMergeCorrelationIDsDeduplicatesInSourceOrder(t *testing.T) {
+	t.Parallel()
+
+	merged := mergeCorrelationIDs(
+		map[string][]string{
+			"x-request-id": {"request-0001", "request-0002", "request-0001"},
+		},
+		map[string][]string{
+			"x-request-id": {"request-0002", "request-0003"},
+		},
+	)
+
+	expected := []string{"request-0001", "request-0002", "request-0003"}
+	if !reflect.DeepEqual(merged["x-request-id"], expected) {
+		t.Fatalf("unexpected correlation ID order: %+v", merged)
 	}
 }
 

@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -24,18 +25,19 @@ func filterLog(
 	}
 	var output bytes.Buffer
 	previous := make([]indexedLogLine, 0, contextLines)
+	correlationMatcher := newCorrelationMatcher(correlationIDs)
 	remainingAfter := 0
 	lastWritten := -1
 	matchedLines := 0
 	forEachLogLine(input, func(index int, line []byte) {
 		eligible := logLineInWindow(line, since, until)
-		if len(correlationIDs) == 0 {
+		if correlationMatcher == nil {
 			if eligible {
 				writeLogLine(&output, line)
 			}
 			return
 		}
-		matched := eligible && containsCorrelationID(line, correlationIDs)
+		matched := eligible && correlationMatcher.Match(line)
 		if matched {
 			matchedLines++
 			for _, candidate := range previous {
@@ -86,14 +88,23 @@ func logLineInWindow(line []byte, since time.Time, until time.Time) bool {
 	return until.IsZero() || !timestamp.After(until)
 }
 
-func containsCorrelationID(line []byte, correlationIDs []string) bool {
-	text := string(line)
+func newCorrelationMatcher(correlationIDs []string) *regexp.Regexp {
+	patterns := make([]string, 0, len(correlationIDs))
+	seen := make(map[string]struct{}, len(correlationIDs))
 	for _, correlationID := range correlationIDs {
-		if correlationID != "" && strings.Contains(text, correlationID) {
-			return true
+		if correlationID == "" {
+			continue
 		}
+		if _, exists := seen[correlationID]; exists {
+			continue
+		}
+		seen[correlationID] = struct{}{}
+		patterns = append(patterns, regexp.QuoteMeta(correlationID))
 	}
-	return false
+	if len(patterns) == 0 {
+		return nil
+	}
+	return regexp.MustCompile(strings.Join(patterns, "|"))
 }
 
 func writeLogLine(output *bytes.Buffer, line []byte) {

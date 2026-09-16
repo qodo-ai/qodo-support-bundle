@@ -396,12 +396,19 @@ func TestBuildSummaryExplainsHARTruncation(t *testing.T) {
 	summary := buildSummary(
 		time.Date(2026, 9, 16, 8, 0, 0, 0, time.UTC),
 		collectionStatusPartial,
-		har.Stats{EntriesWritten: 10, Truncated: true},
+		har.Stats{
+			EntriesWritten:          10,
+			Truncated:               true,
+			CorrelationIDsTruncated: true,
+		},
 		kubernetes.Report{},
 		nil,
 	)
 
 	if !strings.Contains(summary, "HAR entry truncation: true") {
 		t.Fatalf("summary does not explain partial HAR import: %s", summary)
+	}
+	if !strings.Contains(summary, "Correlation ID truncation: true") {
+		t.Fatalf("summary does not explain correlation truncation: %s", summary)
 	}
 }

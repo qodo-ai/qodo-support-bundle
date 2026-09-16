@@ -66,6 +66,27 @@ func TestFilterLogKeepsCorrelationMatchesWithBoundedContext(t *testing.T) {
 	}
 }
 
+func TestFilterLogQuotesCorrelationPatterns(t *testing.T) {
+	t.Parallel()
+	input := []byte(
+		"2026-09-15T06:01:00Z request_id=request.1234\n" +
+			"2026-09-15T06:01:01Z request_id=requestX1234\n",
+	)
+
+	output, matched := filterLog(
+		input,
+		[]string{"request.1234"},
+		time.Time{},
+		time.Time{},
+		0,
+	)
+
+	if matched != 1 || string(output) !=
+		"2026-09-15T06:01:00Z request_id=request.1234\n" {
+		t.Fatalf("unexpected quoted-pattern match: matched=%d output=%q", matched, output)
+	}
+}
+
 func TestFilterLogWithoutCorrelationIDsOnlyAppliesTimeWindow(t *testing.T) {
 	t.Parallel()
 	input := "2026-09-15T06:00:00Z old\n2026-09-15T06:02:00Z current\n"

@@ -397,6 +397,16 @@ func runCollect(
 			Message:   "browser requests exceeded --max-har-entries",
 		})
 	}
+	if harStats.CorrelationIDsTruncated {
+		kubernetesReport.Issues = append(kubernetesReport.Issues, kubernetes.Issue{
+			Operation: "import HAR",
+			Resource:  redactor.Text(filepath.Base(*harPath)),
+			Message: fmt.Sprintf(
+				"correlation IDs exceeded the %d-value collection limit",
+				har.MaximumCorrelationIDs,
+			),
+		})
+	}
 
 	collectionStatus := collectionStatusComplete
 	if kubernetesErr != nil || len(kubernetesReport.Issues) > 0 || harStats.Truncated {
@@ -582,6 +592,11 @@ func buildSummary(
 	fmt.Fprintf(&summary, "- HTTP failures (4xx/5xx): %d\n", harStats.HTTPFailures)
 	fmt.Fprintf(&summary, "- HAR entry truncation: %t\n", harStats.Truncated)
 	fmt.Fprintf(&summary, "- Unique correlation values: %d\n", harStats.CorrelationIDCount)
+	fmt.Fprintf(
+		&summary,
+		"- Correlation ID truncation: %t\n",
+		harStats.CorrelationIDsTruncated,
+	)
 	fmt.Fprintf(
 		&summary,
 		"- Browser-to-cluster clock offset: %d ms (%d Date-header samples)\n",

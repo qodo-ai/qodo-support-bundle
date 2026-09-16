@@ -17,11 +17,19 @@ import (
 )
 
 const (
-	maxFieldLength    = 4096
-	MaximumInputBytes = int64(256 << 20)
+	maxFieldLength        = 4096
+	MaximumInputBytes     = int64(256 << 20)
+	MaximumCorrelationIDs = 256
 )
 
 var correlationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{7,127}$`)
+
+var correlationHeaderNames = []string{
+	"request-id",
+	"x-request-id",
+	"x-correlation-id",
+	"traceparent",
+}
 
 type entry struct {
 	StartedDateTime string  `json:"startedDateTime"`
@@ -89,21 +97,22 @@ type outputResponse struct {
 
 // Stats summarizes the sanitized records written from an imported HAR.
 type Stats struct {
-	EntriesWritten        int      `json:"entries_written"`
-	HTTPFailures          int      `json:"http_failures"`
-	Truncated             bool     `json:"truncated"`
-	CorrelationIDCount    int      `json:"correlation_id_count"`
-	CaptureStartedAt      string   `json:"capture_started_at,omitempty"`
-	CaptureEndedAt        string   `json:"capture_ended_at,omitempty"`
-	AdjustedStartedAt     string   `json:"adjusted_started_at,omitempty"`
-	AdjustedEndedAt       string   `json:"adjusted_ended_at,omitempty"`
-	ClockSkewMilliseconds int64    `json:"clock_skew_milliseconds"`
-	ClockSkewSamples      int      `json:"clock_skew_samples"`
-	CorrelationIDs        []string `json:"-"`
-	startedAt             time.Time
-	endedAt               time.Time
-	clockSkewSamples      []float64
-	correlationSet        map[string]struct{}
+	EntriesWritten          int      `json:"entries_written"`
+	HTTPFailures            int      `json:"http_failures"`
+	Truncated               bool     `json:"truncated"`
+	CorrelationIDCount      int      `json:"correlation_id_count"`
+	CorrelationIDsTruncated bool     `json:"correlation_ids_truncated"`
+	CaptureStartedAt        string   `json:"capture_started_at,omitempty"`
+	CaptureEndedAt          string   `json:"capture_ended_at,omitempty"`
+	AdjustedStartedAt       string   `json:"adjusted_started_at,omitempty"`
+	AdjustedEndedAt         string   `json:"adjusted_ended_at,omitempty"`
+	ClockSkewMilliseconds   int64    `json:"clock_skew_milliseconds"`
+	ClockSkewSamples        int      `json:"clock_skew_samples"`
+	CorrelationIDs          []string `json:"-"`
+	startedAt               time.Time
+	endedAt                 time.Time
+	clockSkewSamples        []float64
+	correlationSet          map[string]struct{}
 }
 
 // Import writes safe HAR metadata as newline-delimited JSON.
@@ -315,7 +324,7 @@ func importEntries(
 			return errors.New("HAR entries must not contain null elements")
 		}
 		outputEntry := sanitizeEntry(*inputEntry, redactor)
-		observeEntry(stats, *inputEntry, outputEntry)
+		observeEntry(stats, *inputEntry, &outputEntry)
 		if err := encoder.Encode(outputEntry); err != nil {
 			return fmt.Errorf("write HAR record: %w", err)
 		}
@@ -394,28 +403,25 @@ func mergeCorrelationIDs(
 	sources ...map[string][]string,
 ) map[string][]string {
 	merged := make(map[string][]string)
+	seen := make(map[string]map[string]struct{})
 	for _, source := range sources {
 		for name, values := range source {
+			if seen[name] == nil {
+				seen[name] = make(map[string]struct{})
+			}
 			for _, value := range values {
-				if !containsString(merged[name], value) {
-					merged[name] = append(merged[name], value)
+				if _, exists := seen[name][value]; exists {
+					continue
 				}
+				seen[name][value] = struct{}{}
+				merged[name] = append(merged[name], value)
 			}
 		}
 	}
 	return merged
 }
 
-func containsString(values []string, expected string) bool {
-	for _, value := range values {
-		if value == expected {
-			return true
-		}
-	}
-	return false
-}
-
-func observeEntry(stats *Stats, inputEntry entry, output outputEntry) {
+func observeEntry(stats *Stats, inputEntry entry, output *outputEntry) {
 	if output.Response.Status >= http.StatusBadRequest {
 		stats.HTTPFailures++
 	}
@@ -449,17 +455,35 @@ func observeEntry(stats *Stats, inputEntry entry, output outputEntry) {
 	if stats.correlationSet == nil {
 		stats.correlationSet = make(map[string]struct{})
 	}
-	for name, values := range output.CorrelationIDs {
+	boundedCorrelationIDs := make(map[string][]string)
+	for _, name := range correlationHeaderNames {
+		values := output.CorrelationIDs[name]
 		for _, value := range values {
-			stats.correlationSet[value] = struct{}{}
+			if !retainCorrelationID(stats, value) {
+				continue
+			}
+			boundedCorrelationIDs[name] = append(boundedCorrelationIDs[name], value)
 			if name == "traceparent" {
 				parts := strings.Split(value, "-")
 				if len(parts) >= 4 && len(parts[1]) == 32 {
-					stats.correlationSet[parts[1]] = struct{}{}
+					retainCorrelationID(stats, parts[1])
 				}
 			}
 		}
 	}
+	output.CorrelationIDs = boundedCorrelationIDs
+}
+
+func retainCorrelationID(stats *Stats, value string) bool {
+	if _, exists := stats.correlationSet[value]; exists {
+		return true
+	}
+	if len(stats.correlationSet) >= MaximumCorrelationIDs {
+		stats.CorrelationIDsTruncated = true
+		return false
+	}
+	stats.correlationSet[value] = struct{}{}
+	return true
 }
 
 func responseTimestamp(
