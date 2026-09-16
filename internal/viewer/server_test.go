@@ -610,7 +610,7 @@ func createTestViewerArchive(t *testing.T) string {
 	if err := builder.Add("browser/network.jsonl", []byte("{}\n")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := builder.Finalize(archivebundle.Manifest{
+	if _, err := builder.FinalizeContext(context.Background(), archivebundle.Manifest{
 		CollectorVersion: "test",
 		GeneratedAt:      time.Date(2026, 9, 15, 7, 0, 0, 0, time.UTC),
 		Collection:       map[string]any{"status": "complete"},

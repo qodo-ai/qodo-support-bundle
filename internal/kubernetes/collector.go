@@ -39,6 +39,9 @@ func Collect(
 	sink Sink,
 	redactor *redact.Redactor,
 ) (Report, error) {
+	if config.Timeout <= 0 {
+		return Report{}, errors.New("command timeout must be positive")
+	}
 	if config.MaxLogBytes <= 0 {
 		return Report{}, errors.New("max log bytes must be positive")
 	}
@@ -124,6 +127,9 @@ func Collect(
 	}
 	logRequests := make([]logRequest, 0)
 	for namespaceIndex, namespace := range namespaces {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
 		reportProgress(config, Progress{
 			Stage:     "scan_namespace",
 			Current:   namespaceIndex + 1,
@@ -145,6 +151,9 @@ func Collect(
 			podArguments...,
 		)
 		if runErr != nil {
+			if err := ctx.Err(); err != nil {
+				return report, err
+			}
 			namespaceErr := commandError(
 				"list pods",
 				namespace,
@@ -219,7 +228,7 @@ func Collect(
 			}
 		}
 
-		collectEvents(
+		if err := collectEvents(
 			ctx,
 			config,
 			namespace,
@@ -228,7 +237,9 @@ func Collect(
 			sink,
 			redactor,
 			&report,
-		)
+		); err != nil {
+			return report, err
+		}
 		for _, currentPod := range pods.Items {
 			containers := append(
 				append([]containerSpec{}, currentPod.Spec.Containers...),
@@ -267,7 +278,7 @@ func Collect(
 		Total:   len(logRequests),
 		Workers: min(workers, len(logRequests)),
 	})
-	collectLogs(
+	if err := collectLogs(
 		ctx,
 		config,
 		runner,
@@ -275,7 +286,9 @@ func Collect(
 		redactor,
 		logRequests,
 		&report,
-	)
+	); err != nil {
+		return report, err
+	}
 	return report, nil
 }
 
@@ -288,7 +301,7 @@ func collectEvents(
 	sink Sink,
 	redactor *redact.Redactor,
 	report *Report,
-) {
+) error {
 	arguments := append(
 		globalArguments(config),
 		"get", "events", "--namespace", namespace, "--output", "json",
@@ -301,11 +314,14 @@ func collectEvents(
 		arguments...,
 	)
 	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
 		report.Issues = append(
 			report.Issues,
 			issueFromCommand("list events", namespace, result, err, redactor),
 		)
-		return
+		return nil
 	}
 	if result.Truncated {
 		report.Issues = append(report.Issues, Issue{
@@ -313,7 +329,7 @@ func collectEvents(
 			Resource:  redactor.Text(namespace),
 			Message:   "event metadata exceeded the collection limit",
 		})
-		return
+		return nil
 	}
 
 	var events eventList
@@ -323,7 +339,7 @@ func collectEvents(
 			Resource:  redactor.Text(namespace),
 			Message:   redactor.Text(err.Error()),
 		})
-		return
+		return nil
 	}
 	records, err := marshalEventRecords(events.Items, redactor)
 	if err != nil {
@@ -331,7 +347,7 @@ func collectEvents(
 			Operation: "encode events",
 			Message:   redactor.Text(err.Error()),
 		})
-		return
+		return nil
 	}
 	if err := sink.Add(eventMetadataPath(namespace, namespaceCount), records); err != nil {
 		report.Issues = append(report.Issues, Issue{
@@ -340,6 +356,7 @@ func collectEvents(
 			Message:   redactor.Text(err.Error()),
 		})
 	}
+	return nil
 }
 
 func collectLogs(
@@ -350,14 +367,14 @@ func collectLogs(
 	redactor *redact.Redactor,
 	requests []logRequest,
 	report *Report,
-) {
+) error {
 	workers := config.LogWorkers
 	if workers <= 0 {
 		workers = defaultLogWorkers
 	}
 	workers = min(workers, len(requests))
 	if workers == 0 {
-		return
+		return ctx.Err()
 	}
 	results := make(chan collectedLog, workers)
 	remaining := config.MaxTotalLogBytes
@@ -367,6 +384,9 @@ func collectLogs(
 	progressInterval := max(len(requests)/20, 1)
 	for active > 0 || next < len(requests) {
 		for active < workers && next < len(requests) && remaining > 0 {
+			if ctx.Err() != nil {
+				break
+			}
 			if remaining < config.MaxLogBytes && active > 0 {
 				break
 			}
@@ -380,6 +400,9 @@ func collectLogs(
 			}()
 		}
 		if active == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			skipped := len(requests) - next
 			report.Issues = append(report.Issues, Issue{
 				Operation: "collect container logs",
@@ -401,6 +424,9 @@ func collectLogs(
 		result := <-results
 		active--
 		completed++
+		if ctx.Err() != nil {
+			continue
+		}
 		retained := int64(0)
 		if result.issue != nil {
 			report.Issues = append(report.Issues, *result.issue)
@@ -451,6 +477,7 @@ func collectLogs(
 			})
 		}
 	}
+	return ctx.Err()
 }
 
 func readLog(
@@ -694,18 +721,14 @@ func firstNonEmptyValue(values ...string) string {
 }
 
 func sanitizeLog(input []byte, redactor *redact.Redactor) []byte {
-	lines := bytes.Split(input, []byte("\n"))
 	var output bytes.Buffer
 	inPrivateKey := false
-	for index, line := range lines {
-		if index == len(lines)-1 && len(line) == 0 {
-			break
-		}
+	forEachLogLine(input, func(_ int, line []byte) {
 		if len(line) == 0 {
 			if !inPrivateKey {
 				output.WriteByte('\n')
 			}
-			continue
+			return
 		}
 		remaining := string(line)
 		var sanitizedLine strings.Builder
@@ -738,7 +761,7 @@ func sanitizeLog(input []byte, redactor *redact.Redactor) []byte {
 			output.WriteString(sanitizedLine.String())
 			output.WriteByte('\n')
 		}
-	}
+	})
 	return output.Bytes()
 }
 
@@ -1027,13 +1050,19 @@ func safePathSegment(value string) string {
 }
 
 type boundedBuffer struct {
-	buffer    bytes.Buffer
-	remaining int64
-	truncated bool
+	buffer      bytes.Buffer
+	remaining   int64
+	truncated   bool
+	stopAtLimit bool
+	onLimit     func()
 }
 
 func newBoundedBuffer(limit int64) *boundedBuffer {
 	return &boundedBuffer{remaining: limit}
+}
+
+func newStoppingBoundedBuffer(limit int64, onLimit func()) *boundedBuffer {
+	return &boundedBuffer{remaining: limit, stopAtLimit: true, onLimit: onLimit}
 }
 
 func (buffer *boundedBuffer) Write(data []byte) (int, error) {
@@ -1045,6 +1074,13 @@ func (buffer *boundedBuffer) Write(data []byte) (int, error) {
 	if len(data) > 0 {
 		_, _ = buffer.buffer.Write(data)
 		buffer.remaining -= int64(len(data))
+	}
+	if buffer.truncated && buffer.stopAtLimit {
+		if buffer.onLimit != nil {
+			buffer.onLimit()
+			buffer.onLimit = nil
+		}
+		return len(data), errCommandOutputLimit
 	}
 	return originalLength, nil
 }

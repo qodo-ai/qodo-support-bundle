@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+type indexedLogLine struct {
+	index    int
+	line     []byte
+	eligible bool
+}
+
 func filterLog(
 	input []byte,
 	correlationIDs []string,
@@ -13,33 +19,56 @@ func filterLog(
 	until time.Time,
 	contextLines int,
 ) ([]byte, int) {
-	lines := bytes.Split(input, []byte("\n"))
-	eligible := make([]bool, len(lines))
-	for index, line := range lines {
-		eligible[index] = logLineInWindow(line, since, until)
-	}
-	if len(correlationIDs) == 0 {
-		return joinSelectedLogLines(lines, eligible), 0
-	}
 	if contextLines < 0 {
 		contextLines = 0
 	}
-	selected := make([]bool, len(lines))
+	var output bytes.Buffer
+	previous := make([]indexedLogLine, 0, contextLines)
+	remainingAfter := 0
+	lastWritten := -1
 	matchedLines := 0
-	for index, line := range lines {
-		if !eligible[index] || !containsCorrelationID(line, correlationIDs) {
-			continue
-		}
-		matchedLines++
-		start := max(0, index-contextLines)
-		end := min(len(lines)-1, index+contextLines)
-		for contextIndex := start; contextIndex <= end; contextIndex++ {
-			if eligible[contextIndex] {
-				selected[contextIndex] = true
+	forEachLogLine(input, func(index int, line []byte) {
+		eligible := logLineInWindow(line, since, until)
+		if len(correlationIDs) == 0 {
+			if eligible {
+				writeLogLine(&output, line)
 			}
+			return
 		}
-	}
-	return joinSelectedLogLines(lines, selected), matchedLines
+		matched := eligible && containsCorrelationID(line, correlationIDs)
+		if matched {
+			matchedLines++
+			for _, candidate := range previous {
+				if candidate.eligible && candidate.index > lastWritten {
+					writeLogLine(&output, candidate.line)
+					lastWritten = candidate.index
+				}
+			}
+			if index > lastWritten {
+				writeLogLine(&output, line)
+				lastWritten = index
+			}
+			remainingAfter = contextLines
+		} else if remainingAfter > 0 {
+			if eligible && index > lastWritten {
+				writeLogLine(&output, line)
+				lastWritten = index
+			}
+			remainingAfter--
+		}
+		if contextLines > 0 {
+			if len(previous) == contextLines {
+				copy(previous, previous[1:])
+				previous = previous[:contextLines-1]
+			}
+			previous = append(previous, indexedLogLine{
+				index:    index,
+				line:     line,
+				eligible: eligible,
+			})
+		}
+	})
+	return output.Bytes(), matchedLines
 }
 
 func logLineInWindow(line []byte, since time.Time, until time.Time) bool {
@@ -67,14 +96,23 @@ func containsCorrelationID(line []byte, correlationIDs []string) bool {
 	return false
 }
 
-func joinSelectedLogLines(lines [][]byte, selected []bool) []byte {
-	var output bytes.Buffer
-	for index, line := range lines {
-		if !selected[index] || (index == len(lines)-1 && len(line) == 0) {
-			continue
-		}
+func writeLogLine(output *bytes.Buffer, line []byte) {
+	if len(line) > 0 {
 		output.Write(line)
-		output.WriteByte('\n')
 	}
-	return output.Bytes()
+	output.WriteByte('\n')
+}
+
+func forEachLogLine(input []byte, visit func(index int, line []byte)) {
+	index := 0
+	for len(input) > 0 {
+		lineEnd := bytes.IndexByte(input, '\n')
+		if lineEnd < 0 {
+			visit(index, input)
+			return
+		}
+		visit(index, input[:lineEnd])
+		index++
+		input = input[lineEnd+1:]
+	}
 }

@@ -46,6 +46,56 @@ func (sink *memorySink) Add(path string, data []byte) error {
 	return nil
 }
 
+func TestCollectRejectsNonPositiveTimeout(t *testing.T) {
+	t.Parallel()
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		_, err := Collect(
+			context.Background(),
+			Config{
+				Namespace:        "qodo",
+				Timeout:          timeout,
+				MaxLogBytes:      1 << 20,
+				MaxTotalLogBytes: 10 << 20,
+			},
+			&fakeRunner{},
+			&memorySink{},
+			redact.New(),
+		)
+		if err == nil || !strings.Contains(err.Error(), "timeout must be positive") {
+			t.Fatalf("timeout %s returned %v", timeout, err)
+		}
+	}
+}
+
+func TestCollectStopsBeforeNamespaceScanWhenCanceled(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runner := &fakeRunner{
+		run: func(string) (CommandResult, error) {
+			t.Fatal("collector ran a command after cancellation")
+			return CommandResult{}, nil
+		},
+	}
+
+	_, err := Collect(
+		ctx,
+		Config{
+			Namespace:        "qodo",
+			Timeout:          time.Second,
+			MaxLogBytes:      1 << 20,
+			MaxTotalLogBytes: 10 << 20,
+		},
+		runner,
+		&memorySink{},
+		redact.New(),
+	)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+}
+
 func TestCollectWritesSanitizedMetadataEventsAndLogs(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{
@@ -564,6 +614,26 @@ func TestBoundedBufferCapsOutputWithoutBreakingWriterContract(t *testing.T) {
 	}
 	if string(buffer.Bytes()) != "abcd" || !buffer.Truncated() {
 		t.Fatalf("unexpected buffer state: %q truncated=%v", buffer.Bytes(), buffer.Truncated())
+	}
+}
+
+func TestStoppingBoundedBufferTerminatesAtScanLimit(t *testing.T) {
+	t.Parallel()
+	stopped := false
+	buffer := newStoppingBoundedBuffer(4, func() {
+		stopped = true
+	})
+
+	written, err := buffer.Write([]byte("abcdefgh"))
+
+	if !errors.Is(err, errCommandOutputLimit) || written != 4 {
+		t.Fatalf("unexpected write result: written=%d err=%v", written, err)
+	}
+	if string(buffer.Bytes()) != "abcd" || !buffer.Truncated() {
+		t.Fatalf("unexpected buffer state: %q truncated=%v", buffer.Bytes(), buffer.Truncated())
+	}
+	if !stopped {
+		t.Fatal("scan limit did not stop the command")
 	}
 }
 

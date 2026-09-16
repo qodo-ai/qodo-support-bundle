@@ -1,10 +1,29 @@
 package kubernetes
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/redact"
 )
+
+func TestDenseLogsAreProcessedWithoutPerLineIndexes(t *testing.T) {
+	t.Parallel()
+	input := bytes.Repeat([]byte("\n"), 1<<20)
+
+	filtered, matched := filterLog(input, nil, time.Time{}, time.Time{}, 3)
+	sanitized := sanitizeLog(filtered, redact.New())
+
+	if matched != 0 || !bytes.Equal(sanitized, input) {
+		t.Fatalf(
+			"unexpected dense-log result: matched=%d bytes=%d",
+			matched,
+			len(sanitized),
+		)
+	}
+}
 
 func TestFilterLogKeepsCorrelationMatchesWithBoundedContext(t *testing.T) {
 	t.Parallel()

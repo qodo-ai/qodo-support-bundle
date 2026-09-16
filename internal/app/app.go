@@ -23,7 +23,7 @@ import (
 
 const (
 	defaultHARLimit                 int64 = 256 << 20
-	maxHARLimit                     int64 = 4 << 30
+	maxHARLimit                           = har.MaximumInputBytes
 	defaultLogLimit                 int64 = 10 << 20
 	maxLogLimit                           = kubernetes.MaximumLogBytes
 	defaultLogScanLimit             int64 = 32 << 20
@@ -178,7 +178,7 @@ func runCollect(
 	maxHARBytes := flags.Int64(
 		"max-har-bytes",
 		defaultHARLimit,
-		"Maximum accepted HAR file size (up to 4 GiB)",
+		"Maximum accepted HAR file size (up to 256 MiB)",
 	)
 	maxHAREntries := flags.Int(
 		"max-har-entries",
@@ -390,6 +390,13 @@ func runCollect(
 		_, _ = fmt.Fprintln(stderr, "Collection canceled; no bundle was published.")
 		return 1
 	}
+	if harStats.Truncated {
+		kubernetesReport.Issues = append(kubernetesReport.Issues, kubernetes.Issue{
+			Operation: "import HAR",
+			Resource:  redactor.Text(filepath.Base(*harPath)),
+			Message:   "browser requests exceeded --max-har-entries",
+		})
+	}
 
 	collectionStatus := collectionStatusComplete
 	if kubernetesErr != nil || len(kubernetesReport.Issues) > 0 || harStats.Truncated {
@@ -573,6 +580,7 @@ func buildSummary(
 	fmt.Fprintln(&summary, "\n## Browser and correlation")
 	fmt.Fprintf(&summary, "\n- HTTP requests: %d\n", harStats.EntriesWritten)
 	fmt.Fprintf(&summary, "- HTTP failures (4xx/5xx): %d\n", harStats.HTTPFailures)
+	fmt.Fprintf(&summary, "- HAR entry truncation: %t\n", harStats.Truncated)
 	fmt.Fprintf(&summary, "- Unique correlation values: %d\n", harStats.CorrelationIDCount)
 	fmt.Fprintf(
 		&summary,

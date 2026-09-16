@@ -96,9 +96,9 @@ after scanning at most 32 MiB of raw output (`--max-log-scan-bytes`, maximum
 share a 1 GiB retained-data budget
 (`--max-total-log-bytes`, maximum 8 GiB). Once that aggregate budget is
 exhausted, remaining streams are skipped and reported as non-fatal collection
-issues. HAR input defaults to 256 MiB and can be raised with `--max-har-bytes`
-up to 4 GiB. Each Kubernetes command defaults to a two-minute timeout and
-`--command-timeout` cannot exceed 30 minutes.
+issues. HAR input has a 256 MiB hard limit; `--max-har-bytes` can lower it for
+smaller expected captures. Each Kubernetes command defaults to a two-minute
+timeout and `--command-timeout` cannot exceed 30 minutes.
 
 Add the customer's context directly to the auditable manifest and summary:
 
@@ -109,10 +109,11 @@ qodo-support-bundle collect \
   ~/Downloads/qodo-login.har
 ```
 
-The collector recognizes `x-request-id`, `x-correlation-id`, and `traceparent`
-response headers. It computes the median browser-to-cluster clock offset from
-HTTP `Date` headers, applies that offset to the HAR window, and retains three
-lines before and after each matching log line by default. Use
+The collector recognizes `request-id`, `x-request-id`, `x-correlation-id`, and
+`traceparent` request or response headers. It computes the median
+browser-to-cluster clock offset from HTTP `Date` headers, applies that offset to
+the HAR window, and retains three lines before and after each matching log line.
+Use
 `--correlation-context-lines` and `--correlation-window-padding` to tune those
 bounds. When the HAR contains no usable correlation IDs, the adjusted time
 window still limits the logs, but all lines in that window are retained.

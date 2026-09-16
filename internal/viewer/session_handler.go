@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +15,8 @@ const (
 	sessionClaimHeader = "X-Qodo-Viewer-Session"
 	sessionCookieName  = "qodo_viewer_session"
 )
+
+var errRetireViewerLauncher = errors.New("could not retire viewer launcher")
 
 func (application *handler) authorized(request *http.Request) bool {
 	const bearerPrefix = "Bearer "
@@ -58,7 +61,7 @@ func (application *handler) handleSession(
 		if status == http.StatusTooManyRequests {
 			writer.Header().Set("Retry-After", "1")
 		}
-		http.Error(writer, err.Error(), status)
+		http.Error(writer, sessionClaimErrorMessage(err), status)
 		return
 	}
 	setSessionCookie(writer, token)
@@ -85,7 +88,7 @@ func (application *handler) handleSessionBootstrap(
 		if status == http.StatusTooManyRequests {
 			writer.Header().Set("Retry-After", "1")
 		}
-		http.Error(writer, err.Error(), status)
+		http.Error(writer, sessionClaimErrorMessage(err), status)
 		return
 	}
 	setSessionCookie(writer, token)
@@ -120,8 +123,10 @@ func (application *handler) claimSession(token string) (int, error) {
 	}
 	if application.claimCleanup != nil {
 		if err := application.claimCleanup(); err != nil {
-			return http.StatusInternalServerError, errors.New(
-				"could not retire viewer launcher",
+			return http.StatusInternalServerError, fmt.Errorf(
+				"%w: %w",
+				errRetireViewerLauncher,
+				err,
 			)
 		}
 	}
@@ -129,6 +134,13 @@ func (application *handler) claimSession(token string) (int, error) {
 	application.nextClaimAt = time.Time{}
 	application.sessionToken = token
 	return http.StatusNoContent, nil
+}
+
+func sessionClaimErrorMessage(err error) string {
+	if errors.Is(err, errRetireViewerLauncher) {
+		return errRetireViewerLauncher.Error()
+	}
+	return err.Error()
 }
 
 func (application *handler) recordClaimFailure(now time.Time) {
@@ -140,6 +152,8 @@ func (application *handler) recordClaimFailure(now time.Time) {
 }
 
 func setSessionCookie(writer http.ResponseWriter, token string) {
+	// The viewer is loopback-only HTTP; Secure would make the browser drop the
+	// cookie, while self-signed local TLS would not add an authenticated peer.
 	http.SetCookie(writer, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,

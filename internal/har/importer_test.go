@@ -50,7 +50,9 @@ func TestImportExtractsCorrelationWindowAndClockSkew(t *testing.T) {
 		"startedDateTime":"2026-09-15T06:00:00+03:00",
 		"time":2000,
 		"timings":{"blocked":0,"dns":0,"connect":0,"send":0,"wait":1000,"receive":1000},
-		"request":{"method":"GET","url":"https://example.com/auth"},
+		"request":{"method":"GET","url":"https://example.com/auth","headers":[
+			{"name":"Request-id","value":"portal-request-9012"}
+		]},
 		"response":{"status":500,"headers":[
 			{"name":"Date","value":"Tue, 15 Sep 2026 03:02:01 GMT"},
 			{"name":"X-Request-ID","value":"request-1234"},
@@ -74,10 +76,11 @@ func TestImportExtractsCorrelationWindowAndClockSkew(t *testing.T) {
 		stats.AdjustedEndedAt != "2026-09-15T06:02:02+03:00" ||
 		stats.ClockSkewMilliseconds != 120_000 ||
 		stats.ClockSkewSamples != 1 ||
-		stats.CorrelationIDCount != 4 {
+		stats.CorrelationIDCount != 5 {
 		t.Fatalf("unexpected correlation stats: %+v", stats)
 	}
 	for _, expected := range []string{
+		`"request-id":["portal-request-9012"]`,
 		`"x-request-id":["request-1234"]`,
 		`"x-correlation-id":["correlation-5678"]`,
 		`"traceparent":["00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"]`,
@@ -204,6 +207,20 @@ func TestImportRejectsUnrepresentableInputLimit(t *testing.T) {
 	}
 }
 
+func TestImportRejectsNonPositiveEntryLimit(t *testing.T) {
+	t.Parallel()
+	harPath := filepath.Join(t.TempDir(), "capture.har")
+	if err := os.WriteFile(harPath, []byte(`{"log":{"entries":[]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Import(harPath, &bytes.Buffer{}, 1<<20, -1, redact.New())
+
+	if err == nil || !strings.Contains(err.Error(), "entries must be positive") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestImportCapsEntries(t *testing.T) {
 	t.Parallel()
 	harPath := filepath.Join(t.TempDir(), "capture.har")
@@ -229,11 +246,22 @@ func TestImportCapsEntries(t *testing.T) {
 func TestImportRejectsNullEntries(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		maxEntries int
+		name          string
+		input         string
+		maxEntries    int
+		expectsOutput bool
 	}{
-		{name: "within output limit", maxEntries: 100},
-		{name: "beyond output limit", maxEntries: 0},
+		{
+			name:       "within output limit",
+			input:      `{"log":{"entries":[null]}}`,
+			maxEntries: 100,
+		},
+		{
+			name:          "beyond output limit",
+			input:         `{"log":{"entries":[{},null]}}`,
+			maxEntries:    1,
+			expectsOutput: true,
+		},
 	}
 
 	for _, test := range tests {
@@ -243,7 +271,7 @@ func TestImportRejectsNullEntries(t *testing.T) {
 			harPath := filepath.Join(t.TempDir(), "capture.har")
 			if err := os.WriteFile(
 				harPath,
-				[]byte(`{"log":{"entries":[null]}}`),
+				[]byte(test.input),
 				0o600,
 			); err != nil {
 				t.Fatal(err)
@@ -255,8 +283,8 @@ func TestImportRejectsNullEntries(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "null elements") {
 				t.Fatalf("expected null-entry error, got %v", err)
 			}
-			if output.Len() != 0 {
-				t.Fatalf("null entry produced output: %s", output.String())
+			if (output.Len() > 0) != test.expectsOutput {
+				t.Fatalf("unexpected output before null entry: %s", output.String())
 			}
 		})
 	}

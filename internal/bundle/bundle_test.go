@@ -27,7 +27,7 @@ func TestFinalizeCreatesRestrictedChecksummedArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := builder.Finalize(Manifest{
+	result, err := builder.FinalizeContext(context.Background(), Manifest{
 		CollectorVersion: "test",
 		GeneratedAt:      time.Date(2026, 9, 15, 6, 0, 0, 0, time.UTC),
 		Collection:       map[string]any{"status": "complete"},
@@ -111,7 +111,10 @@ func TestFinalizeReportsAndRetriesTemporaryArchiveCleanup(t *testing.T) {
 		return errors.New("injected temporary archive cleanup failure")
 	}
 
-	archivePath, err := builder.Finalize(Manifest{GeneratedAt: time.Now()})
+	archivePath, err := builder.FinalizeContext(
+		context.Background(),
+		Manifest{GeneratedAt: time.Now()},
+	)
 
 	if !errors.Is(err, ErrCleanup) || archivePath != outputPath {
 		t.Fatalf("unexpected finalize result: path=%q err=%v", archivePath, err)
@@ -154,7 +157,7 @@ func TestArchiveOutputIsDeterministic(t *testing.T) {
 		if err := builder.Add("a.jsonl", []byte("a\n")); err != nil {
 			t.Fatal(err)
 		}
-		path, err := builder.Finalize(Manifest{
+		path, err := builder.FinalizeContext(context.Background(), Manifest{
 			CollectorVersion: "test",
 			GeneratedAt:      generatedAt,
 			Collection:       map[string]any{"status": "complete"},
@@ -204,7 +207,7 @@ func TestAddStreamWritesIncrementallyAndRemovesFailedFile(t *testing.T) {
 		t.Fatalf("expected stream error, got %v", err)
 	}
 
-	archivePath, err := builder.Finalize(Manifest{
+	archivePath, err := builder.FinalizeContext(context.Background(), Manifest{
 		CollectorVersion: "test",
 		GeneratedAt:      time.Date(2026, 9, 15, 6, 0, 0, 0, time.UTC),
 	})
@@ -243,7 +246,7 @@ func TestFinalizeDoesNotOverwriteConcurrentOutput(t *testing.T) {
 		CollectorVersion: "test",
 		GeneratedAt:      time.Date(2026, 9, 15, 6, 0, 0, 0, time.UTC),
 	}
-	if _, err := first.Finalize(manifest); err != nil {
+	if _, err := first.FinalizeContext(context.Background(), manifest); err != nil {
 		t.Fatal(err)
 	}
 	original, err := os.ReadFile(outputPath)
@@ -251,7 +254,7 @@ func TestFinalizeDoesNotOverwriteConcurrentOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := second.Finalize(manifest); err == nil {
+	if _, err := second.FinalizeContext(context.Background(), manifest); err == nil {
 		t.Fatal("expected concurrent output publication to fail")
 	}
 	current, err := os.ReadFile(outputPath)
@@ -280,7 +283,7 @@ func TestFinalizeCleanupFailureCanBeRetriedByClose(t *testing.T) {
 		return originalRemoveAll(path)
 	}
 
-	archivePath, err := builder.Finalize(Manifest{
+	archivePath, err := builder.FinalizeContext(context.Background(), Manifest{
 		CollectorVersion: "test",
 		GeneratedAt:      time.Date(2026, 9, 15, 6, 0, 0, 0, time.UTC),
 	})

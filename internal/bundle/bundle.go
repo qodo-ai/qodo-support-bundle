@@ -133,11 +133,6 @@ func (builder *Builder) AddStream(path string, write func(io.Writer) error) erro
 	return nil
 }
 
-// Finalize writes the manifest, checksums, and output archive.
-func (builder *Builder) Finalize(manifest Manifest) (string, error) {
-	return builder.FinalizeContext(context.Background(), manifest)
-}
-
 // FinalizeContext writes the bundle while honoring cancellation.
 func (builder *Builder) FinalizeContext(
 	ctx context.Context,

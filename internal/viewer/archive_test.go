@@ -3,6 +3,7 @@ package viewer
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -29,7 +30,7 @@ func TestExtractVerifiesAndCleansBundle(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := builder.Finalize(bundle.Manifest{
+	if _, err := builder.FinalizeContext(context.Background(), bundle.Manifest{
 		CollectorVersion: "test",
 		GeneratedAt:      time.Date(2026, 9, 15, 7, 0, 0, 0, time.UTC),
 		Collection:       map[string]any{"status": "complete"},

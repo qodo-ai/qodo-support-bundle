@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/har"
+	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/kubernetes"
 	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/redact"
 )
 
@@ -385,5 +387,21 @@ func TestTerminalTextRemovesControlCharacters(t *testing.T) {
 
 	if output != "capture.har   [2Jforged" {
 		t.Fatalf("unexpected terminal-safe text: %q", output)
+	}
+}
+
+func TestBuildSummaryExplainsHARTruncation(t *testing.T) {
+	t.Parallel()
+
+	summary := buildSummary(
+		time.Date(2026, 9, 16, 8, 0, 0, 0, time.UTC),
+		collectionStatusPartial,
+		har.Stats{EntriesWritten: 10, Truncated: true},
+		kubernetes.Report{},
+		nil,
+	)
+
+	if !strings.Contains(summary, "HAR entry truncation: true") {
+		t.Fatalf("summary does not explain partial HAR import: %s", summary)
 	}
 }

@@ -16,7 +16,10 @@ import (
 	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/redact"
 )
 
-const maxFieldLength = 4096
+const (
+	maxFieldLength    = 4096
+	MaximumInputBytes = int64(256 << 20)
+)
 
 var correlationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{7,127}$`)
 
@@ -130,11 +133,14 @@ func ImportContext(
 	maxEntries int,
 	redactor *redact.Redactor,
 ) (Stats, error) {
-	if maxInputBytes < 0 || maxInputBytes == math.MaxInt64 {
+	if maxInputBytes <= 0 || maxInputBytes > MaximumInputBytes {
 		return Stats{}, fmt.Errorf(
-			"maximum HAR input bytes must be between 0 and %d",
-			int64(math.MaxInt64-1),
+			"maximum HAR input bytes must be between 1 and %d",
+			MaximumInputBytes,
 		)
+	}
+	if maxEntries <= 0 {
+		return Stats{}, errors.New("maximum HAR entries must be positive")
 	}
 	if err := ctx.Err(); err != nil {
 		return Stats{}, err
@@ -332,11 +338,14 @@ func skipEntry(decoder *json.Decoder) error {
 
 func sanitizeEntry(inputEntry entry, redactor *redact.Redactor) outputEntry {
 	return outputEntry{
-		SchemaVersion:  "1",
-		Timestamp:      truncate(redactor.Text(inputEntry.StartedDateTime)),
-		DurationMS:     inputEntry.Time,
-		PageRef:        truncate(redactor.Text(inputEntry.PageRef)),
-		CorrelationIDs: extractCorrelationIDs(inputEntry.Response.Headers, redactor),
+		SchemaVersion: "1",
+		Timestamp:     truncate(redactor.Text(inputEntry.StartedDateTime)),
+		DurationMS:    inputEntry.Time,
+		PageRef:       truncate(redactor.Text(inputEntry.PageRef)),
+		CorrelationIDs: mergeCorrelationIDs(
+			extractCorrelationIDs(inputEntry.Request.Headers, redactor),
+			extractCorrelationIDs(inputEntry.Response.Headers, redactor),
+		),
 		Request: outputRequest{
 			Method:      truncate(redactor.Text(inputEntry.Request.Method)),
 			URL:         truncate(redactor.URL(inputEntry.Request.URL)),
@@ -368,7 +377,7 @@ func extractCorrelationIDs(
 	for _, header := range headers {
 		name := strings.ToLower(strings.TrimSpace(header.Name))
 		switch name {
-		case "x-request-id", "x-correlation-id", "traceparent":
+		case "request-id", "x-request-id", "x-correlation-id", "traceparent":
 		default:
 			continue
 		}
@@ -379,6 +388,31 @@ func extractCorrelationIDs(
 		correlationIDs[name] = append(correlationIDs[name], truncate(value))
 	}
 	return correlationIDs
+}
+
+func mergeCorrelationIDs(
+	sources ...map[string][]string,
+) map[string][]string {
+	merged := make(map[string][]string)
+	for _, source := range sources {
+		for name, values := range source {
+			for _, value := range values {
+				if !containsString(merged[name], value) {
+					merged[name] = append(merged[name], value)
+				}
+			}
+		}
+	}
+	return merged
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func observeEntry(stats *Stats, inputEntry entry, output outputEntry) {
