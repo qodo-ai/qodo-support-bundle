@@ -9,7 +9,7 @@ import (
 
 const Replacement = "[REDACTED]"
 
-const sensitiveAssignmentKeyPattern = `aws[_-]?secret[_-]?access[_-]?key|aws[_-]?access[_-]?key[_-]?id|access[_-]?token|refresh[_-]?token|id[_-]?token|code[_-]?verifier|saml[_-]?response|token|api[_-]?key|password|passwd|secret|client[_-]?secret|client[_-]?assertion|authorization|proxy[_-]?authorization|cookie|set-cookie|credentials?|private[_-]?key|email|first[_-]?name|last[_-]?name|full[_-]?name|phone|address|ssn|mrn`
+const sensitiveAssignmentKeyPattern = `aws[_-]?secret[_-]?access[_-]?key|aws[_-]?access[_-]?key[_-]?id|access[_-]?token|refresh[_-]?token|id[_-]?token|code[_-]?verifier|saml[_-]?response|token|api[_-]?key|password|passwd|secret|client[_-]?secret|client[_-]?assertion|authorization|proxy[_-]?authorization|cookie|set-cookie|credentials?|private[_-]?key|email|first[_-]?name|last[_-]?name|full[_-]?name|phone|address|ssn|mrn|date[_-]?of[_-]?birth|birth[_-]?date|dob`
 
 var sensitiveKeys = map[string]struct{}{
 	"accesstoken":        {},
@@ -18,11 +18,14 @@ var sensitiveKeys = map[string]struct{}{
 	"authorization":      {},
 	"awsaccesskeyid":     {},
 	"awssecretaccesskey": {},
+	"birthdate":          {},
 	"clientassertion":    {},
 	"clientsecret":       {},
 	"codeverifier":       {},
 	"cookie":             {},
 	"credential":         {},
+	"dateofbirth":        {},
+	"dob":                {},
 	"email":              {},
 	"firstname":          {},
 	"fullname":           {},
@@ -139,6 +142,7 @@ func IsSensitiveKey(key string) bool {
 		"codeverifier",
 		"cookie",
 		"credential",
+		"dateofbirth",
 		"email",
 		"firstname",
 		"fullname",
@@ -148,6 +152,7 @@ func IsSensitiveKey(key string) bool {
 		"phone",
 		"privatekey",
 		"proxyauthorization",
+		"birthdate",
 		"samlresponse",
 		"secret",
 		"session",
@@ -193,7 +198,7 @@ func (redactor *Redactor) URL(rawURL string) string {
 		if fragmentStart := strings.IndexByte(withoutUserinfo, '#'); fragmentStart >= 0 {
 			withoutUserinfo = withoutUserinfo[:fragmentStart]
 		}
-		return redactor.Text(withoutUserinfo)
+		return redactor.redactMalformedURLQuery(withoutUserinfo)
 	}
 	if parsed.User != nil {
 		parsed.User = url.User(Replacement)
@@ -214,6 +219,33 @@ func (redactor *Redactor) URL(rawURL string) string {
 	parsed.RawQuery = query.Encode()
 	parsed.Fragment = ""
 	return redactor.Text(parsed.String())
+}
+
+func (redactor *Redactor) redactMalformedURLQuery(rawURL string) string {
+	queryStart := strings.IndexByte(rawURL, '?')
+	if queryStart < 0 {
+		return redactor.Text(rawURL)
+	}
+	parts := strings.Split(rawURL[queryStart+1:], "&")
+	for index, part := range parts {
+		key, _, hasValue := strings.Cut(part, "=")
+		if !hasValue {
+			parts[index] = redactor.Text(part)
+			continue
+		}
+		decodedKey, err := url.QueryUnescape(key)
+		if err != nil {
+			decodedKey = key
+		}
+		if IsSensitiveKey(decodedKey) ||
+			strings.EqualFold(decodedKey, "code") ||
+			strings.EqualFold(decodedKey, "state") {
+			parts[index] = key + "=" + Replacement
+			continue
+		}
+		parts[index] = redactor.Text(part)
+	}
+	return redactor.Text(rawURL[:queryStart]) + "?" + strings.Join(parts, "&")
 }
 
 // Value recursively sanitizes JSON-compatible data.

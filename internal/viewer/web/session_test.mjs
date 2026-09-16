@@ -22,6 +22,27 @@ test("takeLauncherToken rejects malformed launcher data", () => {
   assert.equal(windowObject.name, "");
 });
 
+test("takeLauncherToken falls back to the URL fragment and clears it", () => {
+  let replacement;
+  const windowObject = {
+    name: "",
+    location: {
+      hash: `#${"a".repeat(64)}`,
+      pathname: "/",
+      search: "?view=timeline",
+    },
+    history: {
+      replaceState(_state, _title, url) {
+        replacement = url;
+      },
+    },
+  };
+
+  assert.equal(takeLauncherToken(windowObject), "a".repeat(64));
+  assert.equal(windowObject.name, "");
+  assert.equal(replacement, "/?view=timeline");
+});
+
 test("claimViewerSession makes a same-origin custom-header POST", async () => {
   const token = "a".repeat(64);
   let request;

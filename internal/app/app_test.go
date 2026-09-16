@@ -134,6 +134,28 @@ func TestServeRejectsNonPositiveArchiveLimit(t *testing.T) {
 	}
 }
 
+func TestServeRejectsArchiveLimitThatCannotBeIncrementedSafely(t *testing.T) {
+	t.Parallel()
+	var stderr bytes.Buffer
+
+	exitCode := Run(
+		context.Background(),
+		[]string{
+			"serve",
+			"--max-archive-bytes",
+			"9223372036854775806",
+			"bundle.tar.gz",
+		},
+		&bytes.Buffer{},
+		&stderr,
+	)
+
+	if exitCode != 2 ||
+		!strings.Contains(stderr.String(), "max-archive-bytes is too large") {
+		t.Fatalf("unexpected result: exit=%d stderr=%q", exitCode, stderr.String())
+	}
+}
+
 func TestParseNamespacesUsesExplicitDeploymentScope(t *testing.T) {
 	t.Parallel()
 

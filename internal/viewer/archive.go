@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +21,7 @@ import (
 const (
 	DefaultMaxFiles          = 10_000
 	DefaultMaxArchiveBytes   = int64(4 << 30)
+	MaxSupportedArchiveBytes = int64(math.MaxInt64 - 2)
 	DefaultMaxExtractedBytes = int64(2 << 30)
 	DefaultMaxFileBytes      = int64(512 << 20)
 	maxChecksumsBytes        = int64(4 << 20)
@@ -45,8 +47,9 @@ type File struct {
 
 // ExtractedBundle contains a structurally valid, checksum-consistent bundle.
 type ExtractedBundle struct {
-	Root  string
-	Files []File
+	Root      string
+	Files     []File
+	removeAll func(string) error
 }
 
 // Extract validates, bounds, extracts, and checks a bundle for internal consistency.
@@ -84,7 +87,7 @@ func Extract(bundlePath string, limits ExtractionLimits) (*ExtractedBundle, erro
 	sort.Slice(files, func(left int, right int) bool {
 		return files[left].Path < files[right].Path
 	})
-	return &ExtractedBundle{Root: root, Files: files}, nil
+	return &ExtractedBundle{Root: root, Files: files, removeAll: os.RemoveAll}, nil
 }
 
 // Close removes all temporary viewer data.
@@ -93,8 +96,15 @@ func (bundle *ExtractedBundle) Close() error {
 		return nil
 	}
 	root := bundle.Root
+	removeAll := bundle.removeAll
+	if removeAll == nil {
+		removeAll = os.RemoveAll
+	}
+	if err := removeAll(root); err != nil {
+		return err
+	}
 	bundle.Root = ""
-	return os.RemoveAll(root)
+	return nil
 }
 
 // Resolve returns the checksum-consistent local path for a bundle member.
@@ -440,7 +450,7 @@ func validateLimits(limits ExtractionLimits) error {
 		return errors.New("maximum file count must be positive")
 	case limits.MaxArchiveBytes <= 0:
 		return errors.New("maximum archive bytes must be positive")
-	case limits.MaxArchiveBytes == int64(^uint64(0)>>1):
+	case limits.MaxArchiveBytes > MaxSupportedArchiveBytes:
 		return errors.New("maximum archive bytes is too large")
 	case limits.MaxExtractedBytes <= 0:
 		return errors.New("maximum extracted bytes must be positive")

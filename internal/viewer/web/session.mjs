@@ -1,9 +1,20 @@
 export const sessionClaimHeader = "X-Qodo-Viewer-Session";
 
 export function takeLauncherToken(windowObject = globalThis.window) {
-  const token = windowObject.name;
+  const nameToken = windowObject.name;
+  const fragmentToken = windowObject.location?.hash?.replace(/^#/, "") || "";
   windowObject.name = "";
-  return /^[0-9a-f]{64}$/.test(token) ? token : "";
+  if (windowObject.location?.hash && windowObject.history?.replaceState) {
+    windowObject.history.replaceState(
+      null,
+      "",
+      `${windowObject.location.pathname}${windowObject.location.search}`,
+    );
+  }
+  if (/^[0-9a-f]{64}$/.test(nameToken)) {
+    return nameToken;
+  }
+  return /^[0-9a-f]{64}$/.test(fragmentToken) ? fragmentToken : "";
 }
 
 export async function claimViewerSession(

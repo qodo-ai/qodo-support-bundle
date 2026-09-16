@@ -58,6 +58,9 @@ func TestIsSensitiveKeyRejectsDecoratedCredentialNames(t *testing.T) {
 	t.Parallel()
 	for _, key := range []string{
 		"prefix_AWS_ACCESS_KEY_ID_suffix",
+		"customer_birth_date",
+		"dateOfBirth",
+		"dob",
 		"oauth_code_verifier_value",
 		"raw_saml_response_payload",
 	} {
@@ -165,11 +168,14 @@ func TestURLMalformedEscapesStillRedactUserinfo(t *testing.T) {
 	tests := []string{
 		"https://user:password@example.com/path/%zz?request_id=req-123#secret",
 		"https://user:p@ssword@example.com/%gh?code_verifier=raw-verifier",
+		"https://example.com/%gh?session=raw-session&request_id=req-123",
 	}
 
 	for _, input := range tests {
 		output := New().URL(input)
-		for _, forbidden := range []string{"user:", "password", "p@ssword", "raw-verifier", "#secret"} {
+		for _, forbidden := range []string{
+			"user:", "password", "p@ssword", "raw-verifier", "raw-session", "#secret",
+		} {
 			if strings.Contains(output, forbidden) {
 				t.Errorf("output contains sensitive value %q: %s", forbidden, output)
 			}

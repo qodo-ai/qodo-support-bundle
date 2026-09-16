@@ -4,14 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 )
@@ -27,7 +28,7 @@ type Config struct {
 }
 
 // Serve checks a bundle for internal consistency and exposes it through a loopback-only UI.
-func Serve(ctx context.Context, config Config) error {
+func Serve(ctx context.Context, config Config) (returnErr error) {
 	if config.BundlePath == "" {
 		return errors.New("bundle path is required")
 	}
@@ -46,7 +47,11 @@ func Serve(ctx context.Context, config Config) error {
 	if err != nil {
 		return err
 	}
-	defer bundle.Close()
+	defer func() {
+		if err := bundle.Close(); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("clean up viewer data: %w", err))
+		}
+	}()
 
 	listener, err := net.Listen("tcp", config.ListenAddress)
 	if err != nil {
@@ -146,26 +151,23 @@ func createLauncher(viewerURL string) (*launcherFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate launcher CSP nonce: %w", err)
 	}
-	encodedToken, err := json.Marshal(token)
-	if err != nil {
-		return nil, fmt.Errorf("encode viewer session secret: %w", err)
-	}
-	encodedURL, err := json.Marshal(viewerURL)
-	if err != nil {
-		return nil, fmt.Errorf("encode viewer URL: %w", err)
-	}
+	escapedURL := html.EscapeString(viewerURL)
+	escapedAction := html.EscapeString(viewerURL + "api/session/bootstrap")
 	content := fmt.Sprintf(`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-%s'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-%s'; base-uri 'none'; form-action %s">
 <title>Opening Qodo Support Bundle Viewer</title>
 </head>
 <body>
-<script nonce="%s">window.name=%s;window.location.replace(%s);</script>
+<form id="launcher" method="post" action="%s">
+<input type="hidden" name="session" value="%s">
+</form>
+<script nonce="%s">document.getElementById("launcher").submit();</script>
 </body>
 </html>
-`, nonce, nonce, encodedToken, encodedURL)
+`, nonce, escapedURL, escapedAction, token, nonce)
 	file, err := os.CreateTemp("", "qodo-support-viewer-*.html")
 	if err != nil {
 		return nil, fmt.Errorf("create viewer launcher: %w", err)
@@ -209,14 +211,9 @@ func randomHex(byteCount int) (string, error) {
 }
 
 func launchBrowser(path string, errorOutput io.Writer) error {
-	var command *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		command = exec.Command("open", path)
-	case "windows":
-		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
-	default:
-		command = exec.Command("xdg-open", path)
+	command, err := newBrowserCommand(path)
+	if err != nil {
+		return err
 	}
 	if err := command.Start(); err != nil {
 		return err
@@ -227,6 +224,27 @@ func launchBrowser(path string, errorOutput io.Writer) error {
 		}
 	}()
 	return nil
+}
+
+func newBrowserCommand(path string) (*exec.Cmd, error) {
+	var binary string
+	var arguments []string
+	switch runtime.GOOS {
+	case "darwin":
+		binary = "/usr/bin/open"
+		arguments = []string{path}
+	case "windows":
+		systemRoot := os.Getenv("SystemRoot")
+		if systemRoot == "" {
+			return nil, errors.New("SystemRoot is not configured")
+		}
+		binary = filepath.Join(systemRoot, "System32", "rundll32.exe")
+		arguments = []string{"url.dll,FileProtocolHandler", path}
+	default:
+		binary = "/usr/bin/xdg-open"
+		arguments = []string{path}
+	}
+	return exec.Command(binary, arguments...), nil
 }
 
 func reportBrowserFailure(output io.Writer, launcherPath string, err error) {

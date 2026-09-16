@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -58,6 +59,58 @@ func TestFinalizeCreatesRestrictedChecksummedArchive(t *testing.T) {
 	if !strings.Contains(checksums, "  browser/network.jsonl\n") ||
 		!strings.Contains(checksums, "  manifest.json\n") {
 		t.Fatalf("unexpected checksums:\n%s", checksums)
+	}
+}
+
+func TestFinalizeContextDoesNotPublishAfterCancellation(t *testing.T) {
+	t.Parallel()
+	outputPath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	builder, err := New(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer builder.Close()
+	if err := builder.Add("data.jsonl", []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = builder.FinalizeContext(ctx, Manifest{GeneratedAt: time.Now()})
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	if _, statErr := os.Stat(outputPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("canceled finalization published output: %v", statErr)
+	}
+}
+
+func TestFinalizeReportsAndRetriesTemporaryArchiveCleanup(t *testing.T) {
+	t.Parallel()
+	outputPath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	builder, err := New(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.Add("data.jsonl", []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	builder.remove = func(string) error {
+		return errors.New("injected temporary archive cleanup failure")
+	}
+
+	archivePath, err := builder.Finalize(Manifest{GeneratedAt: time.Now()})
+
+	if !errors.Is(err, ErrCleanup) || archivePath != outputPath {
+		t.Fatalf("unexpected finalize result: path=%q err=%v", archivePath, err)
+	}
+	if builder.temporaryArchivePath == "" {
+		t.Fatal("temporary archive path was not retained for retry")
+	}
+	builder.remove = os.Remove
+	if err := builder.Close(); err != nil {
+		t.Fatalf("retry cleanup failed: %v", err)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -238,6 +239,49 @@ func TestHandlerOnlyAcceptsServerIssuedSession(t *testing.T) {
 	}
 }
 
+func TestHandlerBootstrapsSessionThroughFormWithoutURLCredential(t *testing.T) {
+	t.Parallel()
+	bundle := testExtractedBundle(t, map[string]string{"manifest.json": `{}`})
+	handler := newHandler(bundle, "127.0.0.1:4321", testViewerToken, nil)
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"http://127.0.0.1:4321/api/session/bootstrap",
+		strings.NewReader("session="+testViewerToken),
+	)
+	request.Host = "127.0.0.1:4321"
+	request.RemoteAddr = "127.0.0.1:1234"
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusSeeOther ||
+		response.Header().Get("Location") != "/" {
+		t.Fatalf("unexpected bootstrap response: %d %s", response.Code, response.Body)
+	}
+	result := response.Result()
+	cookies := result.Cookies()
+	if len(cookies) != 1 || cookies[0].Name != sessionCookieName ||
+		!cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("unexpected session cookie: %#v", cookies)
+	}
+	manifestRequest := viewerRequest(
+		http.MethodGet,
+		"http://127.0.0.1:4321/api/manifest",
+	)
+	manifestRequest.Header.Del("Authorization")
+	manifestRequest.AddCookie(cookies[0])
+	manifestResponse := httptest.NewRecorder()
+	handler.ServeHTTP(manifestResponse, manifestRequest)
+	if manifestResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"cookie-authenticated manifest failed: %d %s",
+			manifestResponse.Code,
+			manifestResponse.Body,
+		)
+	}
+}
+
 func TestHandlerRequiresCustomHeaderToClaimSession(t *testing.T) {
 	t.Parallel()
 	bundle := testExtractedBundle(t, map[string]string{"manifest.json": `{}`})
@@ -334,10 +378,26 @@ func TestCreateLauncherProtectsSecretAndUsesBrowserCompatibleCSP(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(data)
-	if !strings.Contains(content, `window.name="`+launcher.token+`"`) ||
-		!strings.Contains(content, "window.location.replace(") ||
+	if !strings.Contains(content, `name="session" value="`+launcher.token+`"`) ||
+		!strings.Contains(content, `action="http://127.0.0.1:4321/api/session/bootstrap"`) ||
+		!strings.Contains(content, `.submit()`) ||
 		!strings.Contains(content, `script-src 'nonce-`) {
 		t.Fatalf("launcher is missing protected handoff: %s", content)
+	}
+	if strings.Contains(content, "window.name") || strings.Contains(content, "#"+launcher.token) {
+		t.Fatalf("launcher puts the credential in browser navigation state: %s", content)
+	}
+}
+
+func TestBrowserOpenerUsesAbsoluteSystemPath(t *testing.T) {
+	t.Parallel()
+
+	command, err := newBrowserCommand("/tmp/viewer-launcher.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(command.Path) {
+		t.Fatalf("browser opener path is not absolute: %q", command.Path)
 	}
 }
 
@@ -514,7 +574,7 @@ func outputValue(t *testing.T, output string, prefix string) string {
 
 func launcherToken(t *testing.T, content string) string {
 	t.Helper()
-	const prefix = `window.name="`
+	const prefix = `name="session" value="`
 	start := strings.Index(content, prefix)
 	if start < 0 {
 		t.Fatalf("launcher token is missing: %s", content)

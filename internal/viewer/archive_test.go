@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,6 +75,35 @@ func TestExtractRejectsMissingManifest(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "does not contain manifest.json") {
 		t.Fatalf("expected missing manifest error, got %v", err)
+	}
+}
+
+func TestExtractedBundleCloseRetriesCleanupFailure(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	attempts := 0
+	extracted := &ExtractedBundle{
+		Root: root,
+		removeAll: func(path string) error {
+			attempts++
+			if attempts == 1 {
+				return errors.New("injected cleanup failure")
+			}
+			return os.RemoveAll(path)
+		},
+	}
+
+	if err := extracted.Close(); err == nil {
+		t.Fatal("expected initial cleanup failure")
+	}
+	if extracted.Root != root {
+		t.Fatal("cleanup failure discarded the retry path")
+	}
+	if err := extracted.Close(); err != nil {
+		t.Fatalf("cleanup retry failed: %v", err)
+	}
+	if extracted.Root != "" {
+		t.Fatal("successful cleanup retained the root path")
 	}
 }
 

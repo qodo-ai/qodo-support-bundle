@@ -2,6 +2,7 @@ package har
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,25 @@ type notifyingWriter struct {
 	bytes.Buffer
 	once  sync.Once
 	wrote chan struct{}
+}
+
+func TestImportContextHonorsCancellationBeforeOpening(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ImportContext(
+		ctx,
+		filepath.Join(t.TempDir(), "missing.har"),
+		io.Discard,
+		1<<20,
+		100,
+		redact.New(),
+	)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
 }
 
 func (writer *notifyingWriter) Write(data []byte) (int, error) {

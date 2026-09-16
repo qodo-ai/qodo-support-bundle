@@ -1,6 +1,7 @@
 package har
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,11 +91,33 @@ func Import(
 	maxEntries int,
 	redactor *redact.Redactor,
 ) (Stats, error) {
+	return ImportContext(
+		context.Background(),
+		path,
+		writer,
+		maxInputBytes,
+		maxEntries,
+		redactor,
+	)
+}
+
+// ImportContext writes safe HAR metadata while honoring cancellation.
+func ImportContext(
+	ctx context.Context,
+	path string,
+	writer io.Writer,
+	maxInputBytes int64,
+	maxEntries int,
+	redactor *redact.Redactor,
+) (Stats, error) {
 	if maxInputBytes < 0 || maxInputBytes == math.MaxInt64 {
 		return Stats{}, fmt.Errorf(
 			"maximum HAR input bytes must be between 0 and %d",
 			int64(math.MaxInt64-1),
 		)
+	}
+	if err := ctx.Err(); err != nil {
+		return Stats{}, err
 	}
 
 	file, err := openHARFile(path)
@@ -114,7 +137,10 @@ func Import(
 		return Stats{}, inputLimitError(openedFileInfo.Size(), maxInputBytes)
 	}
 
-	limitedReader := &io.LimitedReader{R: file, N: maxInputBytes + 1}
+	limitedReader := &io.LimitedReader{
+		R: contextReader{ctx: ctx, reader: file},
+		N: maxInputBytes + 1,
+	}
 	decoder := json.NewDecoder(limitedReader)
 	encoder := json.NewEncoder(writer)
 	encoder.SetEscapeHTML(false)
@@ -129,6 +155,18 @@ func Import(
 		return stats, fmt.Errorf("decode HAR: %w", decodeErr)
 	}
 	return stats, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader contextReader) Read(data []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(data)
 }
 
 func importArchive(

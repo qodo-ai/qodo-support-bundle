@@ -93,6 +93,10 @@ func runServe(
 		_, _ = fmt.Fprintln(stderr, "max-archive-bytes must be positive")
 		return 2
 	}
+	if *maxArchiveBytes > viewer.MaxSupportedArchiveBytes {
+		_, _ = fmt.Fprintln(stderr, "max-archive-bytes is too large")
+		return 2
+	}
 
 	err := viewer.Serve(ctx, viewer.Config{
 		BundlePath:    flags.Arg(0),
@@ -270,7 +274,8 @@ func runCollect(
 	var harStats har.Stats
 	if err := builder.AddStream("browser/network.jsonl", func(writer io.Writer) error {
 		var importErr error
-		harStats, importErr = har.Import(
+		harStats, importErr = har.ImportContext(
+			ctx,
 			*harPath,
 			writer,
 			*maxHARBytes,
@@ -316,6 +321,10 @@ func runCollect(
 		builder,
 		redactor,
 	)
+	if ctx.Err() != nil {
+		_, _ = fmt.Fprintln(stderr, "Collection canceled; no bundle was published.")
+		return 1
+	}
 
 	collectionStatus := collectionStatusComplete
 	if kubernetesErr != nil || len(kubernetesReport.Issues) > 0 || harStats.Truncated {
@@ -346,7 +355,7 @@ func runCollect(
 		namespaceValue = "*"
 	}
 	generatedAt := time.Now().UTC()
-	archivePath, err := builder.Finalize(bundle.Manifest{
+	archivePath, err := builder.FinalizeContext(ctx, bundle.Manifest{
 		CollectorVersion: Version,
 		GeneratedAt:      generatedAt,
 		Collection: map[string]any{

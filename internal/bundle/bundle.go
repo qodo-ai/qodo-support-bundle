@@ -3,6 +3,7 @@ package bundle
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -36,11 +37,13 @@ type Manifest struct {
 
 // Builder stages sanitized data and creates a checksummed tar.gz archive.
 type Builder struct {
-	outputPath string
-	stagingDir string
-	closed     bool
-	fileCount  int
-	removeAll  func(string) error
+	outputPath           string
+	stagingDir           string
+	closed               bool
+	fileCount            int
+	removeAll            func(string) error
+	remove               func(string) error
+	temporaryArchivePath string
 }
 
 // New creates a bundle staging directory beside the output archive.
@@ -74,6 +77,7 @@ func New(outputPath string) (*Builder, error) {
 		outputPath: absoluteOutput,
 		stagingDir: stagingDirectory,
 		removeAll:  os.RemoveAll,
+		remove:     os.Remove,
 	}, nil
 }
 
@@ -120,8 +124,19 @@ func (builder *Builder) AddStream(path string, write func(io.Writer) error) erro
 
 // Finalize writes the manifest, checksums, and output archive.
 func (builder *Builder) Finalize(manifest Manifest) (string, error) {
+	return builder.FinalizeContext(context.Background(), manifest)
+}
+
+// FinalizeContext writes the bundle while honoring cancellation.
+func (builder *Builder) FinalizeContext(
+	ctx context.Context,
+	manifest Manifest,
+) (string, error) {
 	if builder.closed {
 		return "", errors.New("bundle is closed")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	manifest.SchemaVersion = "1"
 	manifest.Files = builder.fileCount + 2
@@ -134,11 +149,16 @@ func (builder *Builder) Finalize(manifest Manifest) (string, error) {
 		return "", err
 	}
 
-	if err := builder.AddStream("checksums.sha256", builder.writeChecksums); err != nil {
+	if err := builder.AddStream("checksums.sha256", func(writer io.Writer) error {
+		return builder.writeChecksums(ctx, writer)
+	}); err != nil {
 		return "", err
 	}
 
-	if err := builder.createArchive(manifest.GeneratedAt); err != nil {
+	if err := builder.createArchive(ctx, manifest.GeneratedAt); err != nil {
+		if errors.Is(err, ErrCleanup) {
+			return builder.outputPath, err
+		}
 		return "", err
 	}
 	if err := builder.removeAll(builder.stagingDir); err != nil {
@@ -153,14 +173,26 @@ func (builder *Builder) Close() error {
 	if builder.closed {
 		return nil
 	}
+	cleanupFailed := false
+	if builder.temporaryArchivePath != "" {
+		if err := builder.remove(builder.temporaryArchivePath); err != nil &&
+			!errors.Is(err, os.ErrNotExist) {
+			cleanupFailed = true
+		} else {
+			builder.temporaryArchivePath = ""
+		}
+	}
 	if err := builder.removeAll(builder.stagingDir); err != nil {
+		cleanupFailed = true
+	}
+	if cleanupFailed {
 		return ErrCleanup
 	}
 	builder.closed = true
 	return nil
 }
 
-func (builder *Builder) writeChecksums(writer io.Writer) error {
+func (builder *Builder) writeChecksums(ctx context.Context, writer io.Writer) error {
 	paths, err := stagedFiles(builder.stagingDir)
 	if err != nil {
 		return err
@@ -174,7 +206,7 @@ func (builder *Builder) writeChecksums(writer io.Writer) error {
 			return fmt.Errorf("open %q for checksum: %w", path, err)
 		}
 		hasher := sha256.New()
-		_, copyErr := io.Copy(hasher, file)
+		_, copyErr := io.Copy(hasher, contextReader{ctx: ctx, reader: file})
 		closeErr := file.Close()
 		if copyErr != nil {
 			return fmt.Errorf("read %q for checksum: %w", path, copyErr)
@@ -194,7 +226,7 @@ func (builder *Builder) writeChecksums(writer io.Writer) error {
 	return nil
 }
 
-func (builder *Builder) createArchive(generatedAt time.Time) error {
+func (builder *Builder) createArchive(ctx context.Context, generatedAt time.Time) error {
 	outputDirectory := filepath.Dir(builder.outputPath)
 	temporaryFile, err := os.CreateTemp(outputDirectory, ".qodo-support-bundle-*.tar.gz")
 	if err != nil {
@@ -221,6 +253,10 @@ func (builder *Builder) createArchive(generatedAt time.Time) error {
 		return err
 	}
 	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			cleanup()
+			return err
+		}
 		stagedPath := filepath.Join(builder.stagingDir, filepath.FromSlash(path))
 		file, err := os.Open(stagedPath)
 		if err != nil {
@@ -250,7 +286,7 @@ func (builder *Builder) createArchive(generatedAt time.Time) error {
 			cleanup()
 			return fmt.Errorf("write archive header %q: %w", path, err)
 		}
-		_, copyErr := io.Copy(tarWriter, file)
+		_, copyErr := io.Copy(tarWriter, contextReader{ctx: ctx, reader: file})
 		closeErr := file.Close()
 		if copyErr != nil {
 			cleanup()
@@ -277,12 +313,32 @@ func (builder *Builder) createArchive(generatedAt time.Time) error {
 		_ = os.Remove(temporaryPath)
 		return fmt.Errorf("close archive: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
 	if err := os.Link(temporaryPath, builder.outputPath); err != nil {
 		_ = os.Remove(temporaryPath)
 		return fmt.Errorf("publish archive: %w", err)
 	}
-	_ = os.Remove(temporaryPath)
+	builder.temporaryArchivePath = temporaryPath
+	if err := builder.remove(temporaryPath); err != nil {
+		return fmt.Errorf("%w: remove temporary archive: %v", ErrCleanup, err)
+	}
+	builder.temporaryArchivePath = ""
 	return nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader contextReader) Read(data []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(data)
 }
 
 func stagedFiles(root string) ([]string, error) {

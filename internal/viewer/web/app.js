@@ -92,7 +92,9 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
       },
     });
     if (!response.ok) {
-      throw new Error(`${response.status} ${response.statusText}`);
+      const error = new Error(`${response.status} ${response.statusText}`);
+      error.status = response.status;
+      throw error;
     }
     return response.json();
   }
@@ -109,7 +111,7 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
       state.files.find((file) => file.path === "browser/network.jsonl") ||
       state.files[0];
     if (defaultFile) {
-      selectFile(defaultFile, false);
+      selectFile(defaultFile, state.view === "files");
     }
     await loadTimeline(true);
   }
@@ -827,7 +829,7 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
     elements.filesTab.setAttribute("aria-selected", String(!timelineActive));
     if (!timelineActive && state.selectedFile) {
       loadRecords();
-    } else if (timelineActive && !state.timeline) {
+    } else if (timelineActive) {
       loadTimeline();
     }
   }
@@ -904,18 +906,20 @@ import { initializeClaimedViewer, takeLauncherToken } from "./session.mjs";
   });
 
   async function openViewer() {
-    if (!state.accessToken) {
-      showNotice("Open this viewer through the launcher file printed by the server.");
-      return;
-    }
     try {
-      await initializeClaimedViewer(state, initialize);
+      if (state.accessToken) {
+        await initializeClaimedViewer(state, initialize);
+      } else {
+        await initialize();
+      }
     } catch (error) {
       showNotice(
-        error.status === 409
+        error.status === 401
+          ? "Open this viewer through the launcher file printed by the server."
+          : error.status === 409
           ? "This viewer session is already open in another tab. Restart the viewer to open a new session."
           : `Could not open the bundle: ${error.message}`,
-        error.status !== 409,
+        error.status !== 401 && error.status !== 409,
       );
     }
   }
