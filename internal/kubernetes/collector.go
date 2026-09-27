@@ -606,11 +606,8 @@ func readLog(
 		safePathSegment(request.containerName)+suffix+".log",
 	)
 	path := filepath.ToSlash(filepath.Join(pathParts...))
-	data := sanitizeLog(result.Stdout, redactor)
-	retainedTruncated := result.Truncated || int64(len(data)) > request.maxBytes
-	if int64(len(data)) > request.maxBytes {
-		data = data[:int(request.maxBytes)]
-	}
+	data, sanitizationTruncated := sanitizeLog(result.Stdout, redactor, request.maxBytes)
+	retainedTruncated := result.Truncated || sanitizationTruncated
 	return collectedLog{
 		path:              path,
 		data:              data,
@@ -784,18 +781,17 @@ func firstNonEmptyValue(values ...string) string {
 	return ""
 }
 
-func sanitizeLog(input []byte, redactor *redact.Redactor) []byte {
-	var output bytes.Buffer
+func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byte, bool) {
+	output := newBoundedBuffer(maxBytes)
 	inPrivateKey := false
 	forEachLogLine(input, func(_ int, line []byte) {
 		if len(line) == 0 {
 			if !inPrivateKey {
-				output.WriteByte('\n')
+				_, _ = output.WriteString("\n")
 			}
 			return
 		}
 		remaining := string(line)
-		var sanitizedLine strings.Builder
 		writeLine := false
 		for remaining != "" {
 			if inPrivateKey {
@@ -811,22 +807,21 @@ func sanitizeLog(input []byte, redactor *redact.Redactor) []byte {
 
 			begin := privateKeyBeginLine.FindStringIndex(remaining)
 			if begin == nil {
-				sanitizedLine.WriteString(redactor.JSONLine(remaining))
+				_, _ = output.WriteString(redactor.JSONLine(remaining))
 				writeLine = true
 				break
 			}
-			sanitizedLine.WriteString(redactor.JSONLine(remaining[:begin[0]]))
-			sanitizedLine.WriteString(redact.Replacement)
+			_, _ = output.WriteString(redactor.JSONLine(remaining[:begin[0]]))
+			_, _ = output.WriteString(redact.Replacement)
 			writeLine = true
 			remaining = remaining[begin[1]:]
 			inPrivateKey = true
 		}
 		if writeLine {
-			output.WriteString(sanitizedLine.String())
-			output.WriteByte('\n')
+			_, _ = output.WriteString("\n")
 		}
 	})
-	return output.Bytes()
+	return output.Bytes(), output.Truncated()
 }
 
 func forEachLogLine(input []byte, visit func(index int, line []byte)) {
@@ -1163,6 +1158,25 @@ func (buffer *boundedBuffer) Write(data []byte) (int, error) {
 		if buffer.onLimit != nil {
 			buffer.onLimit()
 			buffer.onLimit = nil
+		}
+		return len(data), errCommandOutputLimit
+	}
+	return originalLength, nil
+}
+
+func (buffer *boundedBuffer) WriteString(data string) (int, error) {
+	originalLength := len(data)
+	if int64(len(data)) > buffer.remaining {
+		data = data[:max(buffer.remaining, 0)]
+		buffer.truncated = true
+	}
+	if len(data) > 0 {
+		_, _ = buffer.buffer.WriteString(data)
+		buffer.remaining -= int64(len(data))
+	}
+	if buffer.stopAtLimit && buffer.truncated {
+		if buffer.onLimit != nil {
+			buffer.onLimit()
 		}
 		return len(data), errCommandOutputLimit
 	}

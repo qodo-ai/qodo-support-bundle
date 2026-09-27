@@ -785,7 +785,11 @@ func TestSanitizeLogRedactsMultilinePrivateKeys(t *testing.T) {
 				test.footer + " suffix\n" +
 				"after request_id=req-123\n"
 
-			output := string(sanitizeLog([]byte(input), redact.New()))
+			sanitized, truncated := sanitizeLog([]byte(input), redact.New(), 1<<20)
+			if truncated {
+				t.Fatal("sanitized private-key log was unexpectedly truncated")
+			}
+			output := string(sanitized)
 
 			for _, forbidden := range []string{
 				test.header,
@@ -818,7 +822,11 @@ func TestSanitizeLogRedactsUnterminatedPrivateKey(t *testing.T) {
 			"raw-private-key-body\nmust-also-be-suppressed\n",
 	)
 
-	output := string(sanitizeLog(input, redact.New()))
+	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
+	if truncated {
+		t.Fatal("sanitized private-key log was unexpectedly truncated")
+	}
+	output := string(sanitized)
 
 	if strings.Contains(output, "raw-private-key-body") ||
 		strings.Contains(output, "must-also-be-suppressed") {
@@ -833,7 +841,11 @@ func TestSanitizeLogRedactsSensitiveJSONAssignment(t *testing.T) {
 	t.Parallel()
 	input := []byte(`request_id=req-123 password={"note":"raw-secret"}` + "\n")
 
-	output := string(sanitizeLog(input, redact.New()))
+	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
+	if truncated {
+		t.Fatal("sanitized JSON assignment was unexpectedly truncated")
+	}
+	output := string(sanitized)
 
 	if strings.Contains(output, "raw-secret") {
 		t.Fatalf("output contains assigned JSON secret: %s", output)
@@ -852,16 +864,39 @@ func TestSanitizeLogPrivateKeyStateIsPerCall(t *testing.T) {
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			output := string(sanitizeLog(
+			sanitized, truncated := sanitizeLog(
 				[]byte("-----BEGIN EC PRIVATE KEY-----\nsecret\n"),
 				redactor,
-			))
+				1<<20,
+			)
+			if truncated {
+				t.Error("sanitized private-key log was unexpectedly truncated")
+			}
+			output := string(sanitized)
 			if output != redact.Replacement+"\n" {
 				t.Errorf("unexpected concurrent output: %q", output)
 			}
 		}()
 	}
 	waitGroup.Wait()
+}
+
+func TestSanitizeLogBoundsExpandedOutput(t *testing.T) {
+	t.Parallel()
+	input := []byte(`{"password":"x"}` + "\n")
+	limit := int64(len(input))
+
+	output, truncated := sanitizeLog(input, redact.New(), limit)
+
+	if int64(len(output)) != limit {
+		t.Fatalf("sanitized output exceeded limit: got=%d limit=%d", len(output), limit)
+	}
+	if !truncated {
+		t.Fatal("expanded sanitized output was not marked truncated")
+	}
+	if strings.Contains(string(output), `"x"`) {
+		t.Fatalf("bounded output contains raw secret: %s", output)
+	}
 }
 
 func TestBoundedBufferCapsOutputWithoutBreakingWriterContract(t *testing.T) {
@@ -940,6 +975,44 @@ func TestReadLogUsesSinceAndRetainsBoundedLog(t *testing.T) {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("missing %q from log: %s", expected, text)
 		}
+	}
+}
+
+func TestReadLogBoundsExpandedSanitizedOutput(t *testing.T) {
+	t.Parallel()
+	input := []byte(`{"password":"x"}` + "\n")
+	limit := int64(len(input))
+	runner := &fakeRunner{
+		run: func(_ string) (CommandResult, error) {
+			return CommandResult{Stdout: input}, nil
+		},
+	}
+
+	result := readLog(
+		context.Background(),
+		Config{Timeout: time.Second},
+		runner,
+		redact.New(),
+		logRequest{
+			namespace:      "qodo",
+			namespaceCount: 1,
+			podName:        "platform-1",
+			containerName:  "platform",
+			maxBytes:       limit,
+		},
+	)
+
+	if result.issue != nil {
+		t.Fatalf("unexpected log result: %+v", result)
+	}
+	if int64(len(result.data)) != limit {
+		t.Fatalf("retained log exceeded limit: got=%d limit=%d", len(result.data), limit)
+	}
+	if !result.retainedTruncated {
+		t.Fatal("expanded sanitized log was not marked truncated")
+	}
+	if strings.Contains(string(result.data), `"x"`) {
+		t.Fatalf("retained log contains raw secret: %s", result.data)
 	}
 }
 
