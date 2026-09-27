@@ -70,6 +70,10 @@ var malformedURLUserinfoPattern = regexp.MustCompile(
 	`(?i)((?:[a-z][a-z0-9+.-]*:)?//)[^/?#\s]*@`,
 )
 
+var authorizationAssignmentPattern = regexp.MustCompile(
+	`(?i)(\b(?:proxy[-_]?authorization|authorization)[ \t]*["']?[ \t]*[:=][ \t]*)[^\r\n]+`,
+)
+
 var textQueryAssignmentPattern = regexp.MustCompile(
 	`[?&][^=&#\s]*=[^&#\s]*`,
 )
@@ -96,6 +100,10 @@ func New() *Redactor {
 			{
 				expression:  malformedURLUserinfoPattern,
 				replacement: `${1}` + Replacement + "@",
+			},
+			{
+				expression:  authorizationAssignmentPattern,
+				replacement: `${1}` + Replacement,
 			},
 			{
 				expression:  regexp.MustCompile(`(?i)(bearer|basic)[ \t]+[A-Za-z0-9._~+/\-=]+`),

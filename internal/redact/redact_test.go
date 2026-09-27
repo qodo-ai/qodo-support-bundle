@@ -27,6 +27,26 @@ func TestTextRemovesCredentialsAndEmail(t *testing.T) {
 	}
 }
 
+func TestAuthorizationAssignmentRedactsAnySchemeInTextAndJSON(t *testing.T) {
+	t.Parallel()
+	const credential = "token abc123"
+	redactor := New()
+
+	for name, output := range map[string]string{
+		"text": redactor.Text("Authorization: " + credential),
+		"json": redactor.JSONLine(`{"message":"Authorization: ` + credential + `"}`),
+	} {
+		for _, forbidden := range []string{"token", "abc123"} {
+			if strings.Contains(output, forbidden) {
+				t.Errorf("%s output contains authorization value %q: %s", name, forbidden, output)
+			}
+		}
+		if !strings.Contains(output, "Authorization: "+Replacement) {
+			t.Errorf("%s output does not contain redacted authorization value: %s", name, output)
+		}
+	}
+}
+
 func TestShortPayloadJWTIsRedactedFromTextAndJSON(t *testing.T) {
 	t.Parallel()
 	const token = "eyJhbGciOiJIUzI1NiJ9.e30.abcdefghijklmnopqrstuvwxyz0123456789"
