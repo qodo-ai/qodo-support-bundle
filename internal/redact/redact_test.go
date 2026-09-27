@@ -27,6 +27,24 @@ func TestTextRemovesCredentialsAndEmail(t *testing.T) {
 	}
 }
 
+func TestShortPayloadJWTIsRedactedFromTextAndJSON(t *testing.T) {
+	t.Parallel()
+	const token = "eyJhbGciOiJIUzI1NiJ9.e30.abcdefghijklmnopqrstuvwxyz0123456789"
+	redactor := New()
+
+	for name, output := range map[string]string{
+		"text": redactor.Text("standalone " + token + " token"),
+		"json": redactor.JSONLine(`{"message":"standalone ` + token + ` token"}`),
+	} {
+		if strings.Contains(output, token) {
+			t.Errorf("%s output contains short-payload JWT: %s", name, output)
+		}
+		if !strings.Contains(output, Replacement) {
+			t.Errorf("%s output does not contain redaction marker: %s", name, output)
+		}
+	}
+}
+
 func TestTextRedactsAdditionalSensitiveAssignments(t *testing.T) {
 	t.Parallel()
 	redactor := New()

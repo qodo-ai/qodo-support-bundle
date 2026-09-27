@@ -115,7 +115,7 @@ jobs:
             echo "Checked-out HEAD $HEAD_SHA does not match $RELEASE_TAG at $TAG_SHA" >&2
             exit 1
           fi
-          if [[ "${{ github.sha }}" != "$TAG_SHA" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.sha }}" != "$TAG_SHA" ]]; then
             echo "Workflow revision ${{ github.sha }} does not match $RELEASE_TAG at $TAG_SHA." >&2
             echo "For workflow_dispatch, run this workflow with --ref $RELEASE_TAG." >&2
             exit 1

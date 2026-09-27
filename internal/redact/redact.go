@@ -98,7 +98,7 @@ func New() *Redactor {
 				replacement: `${1} ` + Replacement,
 			},
 			{
-				expression:  regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`),
+				expression:  regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{8,}\b`),
 				replacement: Replacement,
 			},
 			{
