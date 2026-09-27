@@ -84,10 +84,6 @@ var unquotedSensitiveAssignmentPattern = regexp.MustCompile(
 	`(?i)((?:` + sensitiveAssignmentKeyPattern + `)[ \t]*["']?[ \t]*[:=][ \t]*)([^"';&\s]+)`,
 )
 
-var commaFieldSeparatorPattern = regexp.MustCompile(
-	`,[A-Za-z0-9_.-]+[ \t]*[:=]`,
-)
-
 // Redactor removes common credential and personal-data forms from diagnostic data.
 type Redactor struct {
 	patterns []replacementPattern
@@ -158,7 +154,6 @@ func (redactor *Redactor) Ruleset() RulesetMetadata {
 		apiKeySuffixPattern.String(),
 		jsonAssignmentPrefixPattern.String(),
 		unquotedSensitiveAssignmentPattern.String(),
-		commaFieldSeparatorPattern.String(),
 		fmt.Sprint(maxEncodedQueryKeyBytes),
 	}
 	keys := make([]string, 0, len(sensitiveKeys))
@@ -248,8 +243,8 @@ func redactUnquotedSensitiveAssignments(value string) string {
 				return Replacement
 			}
 			suffix := ""
-			if separator := commaFieldSeparatorPattern.FindStringIndex(parts[2]); separator != nil {
-				suffix = parts[2][separator[0]:]
+			if strings.HasSuffix(parts[2], ",") {
+				suffix = ","
 			}
 			return parts[1] + Replacement + suffix
 		},

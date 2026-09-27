@@ -77,7 +77,7 @@ func TestTextRedactsAdditionalSensitiveAssignments(t *testing.T) {
 
 func TestTextRedactsCommaBearingPasswordAndPreservesNextField(t *testing.T) {
 	t.Parallel()
-	input := "password=first,second,request_id=req-123"
+	input := "password=first,second, request_id=req-123"
 
 	output := New().Text(input)
 
@@ -86,9 +86,25 @@ func TestTextRedactsCommaBearingPasswordAndPreservesNextField(t *testing.T) {
 			t.Fatalf("output contains password fragment %q: %s", forbidden, output)
 		}
 	}
-	expected := "password=" + Replacement + ",request_id=req-123"
+	expected := "password=" + Replacement + ", request_id=req-123"
 	if output != expected {
 		t.Fatalf("unexpected redacted assignment: got=%q want=%q", output, expected)
+	}
+}
+
+func TestTextFailsClosedForFieldLikePasswordTail(t *testing.T) {
+	t.Parallel()
+	input := "password=first,request_id=credential-tail"
+
+	output := New().Text(input)
+
+	for _, forbidden := range []string{"first", "request_id", "credential-tail"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("output contains password fragment %q: %s", forbidden, output)
+		}
+	}
+	if output != "password="+Replacement {
+		t.Fatalf("unexpected redacted assignment: %q", output)
 	}
 }
 
