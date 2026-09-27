@@ -75,6 +75,23 @@ func TestTextRedactsAdditionalSensitiveAssignments(t *testing.T) {
 	}
 }
 
+func TestTextRedactsCommaBearingPasswordAndPreservesNextField(t *testing.T) {
+	t.Parallel()
+	input := "password=first,second,request_id=req-123"
+
+	output := New().Text(input)
+
+	for _, forbidden := range []string{"first", "second"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("output contains password fragment %q: %s", forbidden, output)
+		}
+	}
+	expected := "password=" + Replacement + ",request_id=req-123"
+	if output != expected {
+		t.Fatalf("unexpected redacted assignment: got=%q want=%q", output, expected)
+	}
+}
+
 func TestTextRedactsEncodedSensitiveQueryParameterNames(t *testing.T) {
 	t.Parallel()
 	output := New().Text(

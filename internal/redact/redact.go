@@ -80,6 +80,14 @@ var jsonAssignmentPrefixPattern = regexp.MustCompile(
 	`["']?([A-Za-z0-9_.-]+)["']?[ \t]*[:=][ \t]*$`,
 )
 
+var unquotedSensitiveAssignmentPattern = regexp.MustCompile(
+	`(?i)((?:` + sensitiveAssignmentKeyPattern + `)[ \t]*["']?[ \t]*[:=][ \t]*)([^"';&\s]+)`,
+)
+
+var commaFieldSeparatorPattern = regexp.MustCompile(
+	`,[A-Za-z0-9_.-]+[ \t]*[:=]`,
+)
+
 // Redactor removes common credential and personal-data forms from diagnostic data.
 type Redactor struct {
 	patterns []replacementPattern
@@ -149,6 +157,8 @@ func (redactor *Redactor) Ruleset() RulesetMetadata {
 		textQueryAssignmentPattern.String(),
 		apiKeySuffixPattern.String(),
 		jsonAssignmentPrefixPattern.String(),
+		unquotedSensitiveAssignmentPattern.String(),
+		commaFieldSeparatorPattern.String(),
 		fmt.Sprint(maxEncodedQueryKeyBytes),
 	}
 	keys := make([]string, 0, len(sensitiveKeys))
@@ -225,7 +235,25 @@ func (redactor *Redactor) Text(value string) string {
 	for _, pattern := range redactor.patterns {
 		result = pattern.expression.ReplaceAllString(result, pattern.replacement)
 	}
+	result = redactUnquotedSensitiveAssignments(result)
 	return redactTextQueryAssignments(result)
+}
+
+func redactUnquotedSensitiveAssignments(value string) string {
+	return unquotedSensitiveAssignmentPattern.ReplaceAllStringFunc(
+		value,
+		func(assignment string) string {
+			parts := unquotedSensitiveAssignmentPattern.FindStringSubmatch(assignment)
+			if len(parts) != 3 {
+				return Replacement
+			}
+			suffix := ""
+			if separator := commaFieldSeparatorPattern.FindStringIndex(parts[2]); separator != nil {
+				suffix = parts[2][separator[0]:]
+			}
+			return parts[1] + Replacement + suffix
+		},
+	)
 }
 
 func redactTextQueryAssignments(value string) string {
