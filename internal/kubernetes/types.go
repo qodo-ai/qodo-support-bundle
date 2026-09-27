@@ -65,6 +65,7 @@ type Report struct {
 	Pods                      int      `json:"pods"`
 	Containers                int      `json:"containers"`
 	InitContainers            int      `json:"init_containers"`
+	EphemeralContainers       int      `json:"ephemeral_containers"`
 	ContainerRestarts         int      `json:"container_restarts"`
 	OOMKills                  int      `json:"oom_kills"`
 	MetadataBytes             int64    `json:"metadata_bytes"`
@@ -107,9 +108,10 @@ type podList struct {
 type pod struct {
 	Metadata objectMetadata `json:"metadata"`
 	Spec     struct {
-		NodeName       string          `json:"nodeName"`
-		Containers     []containerSpec `json:"containers"`
-		InitContainers []containerSpec `json:"initContainers"`
+		NodeName            string          `json:"nodeName"`
+		Containers          []containerSpec `json:"containers"`
+		InitContainers      []containerSpec `json:"initContainers"`
+		EphemeralContainers []containerSpec `json:"ephemeralContainers"`
 	} `json:"spec"`
 	Status podStatus `json:"status"`
 }
@@ -127,11 +129,12 @@ type containerSpec struct {
 }
 
 type podStatus struct {
-	Phase                 string            `json:"phase"`
-	StartTime             string            `json:"startTime"`
-	Conditions            []podCondition    `json:"conditions"`
-	ContainerStatuses     []containerStatus `json:"containerStatuses"`
-	InitContainerStatuses []containerStatus `json:"initContainerStatuses"`
+	Phase                      string            `json:"phase"`
+	StartTime                  string            `json:"startTime"`
+	Conditions                 []podCondition    `json:"conditions"`
+	ContainerStatuses          []containerStatus `json:"containerStatuses"`
+	InitContainerStatuses      []containerStatus `json:"initContainerStatuses"`
+	EphemeralContainerStatuses []containerStatus `json:"ephemeralContainerStatuses"`
 }
 
 type podCondition struct {
@@ -188,18 +191,19 @@ type objectReference struct {
 }
 
 type outputPod struct {
-	SchemaVersion  string                  `json:"schema_version"`
-	Timestamp      string                  `json:"@timestamp,omitempty"`
-	Kind           string                  `json:"kind"`
-	Namespace      string                  `json:"namespace"`
-	Name           string                  `json:"name"`
-	NodeName       string                  `json:"node_name,omitempty"`
-	Labels         map[string]string       `json:"labels,omitempty"`
-	Phase          string                  `json:"phase"`
-	Conditions     []podCondition          `json:"conditions,omitempty"`
-	Containers     []outputContainerStatus `json:"containers,omitempty"`
-	InitContainers []outputContainerStatus `json:"init_containers,omitempty"`
-	Source         map[string]string       `json:"source"`
+	SchemaVersion       string                  `json:"schema_version"`
+	Timestamp           string                  `json:"@timestamp,omitempty"`
+	Kind                string                  `json:"kind"`
+	Namespace           string                  `json:"namespace"`
+	Name                string                  `json:"name"`
+	NodeName            string                  `json:"node_name,omitempty"`
+	Labels              map[string]string       `json:"labels,omitempty"`
+	Phase               string                  `json:"phase"`
+	Conditions          []podCondition          `json:"conditions,omitempty"`
+	Containers          []outputContainerStatus `json:"containers,omitempty"`
+	InitContainers      []outputContainerStatus `json:"init_containers,omitempty"`
+	EphemeralContainers []outputContainerStatus `json:"ephemeral_containers,omitempty"`
+	Source              map[string]string       `json:"source"`
 }
 
 type outputContainerStatus struct {

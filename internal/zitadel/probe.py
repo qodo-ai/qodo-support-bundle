@@ -9,6 +9,8 @@ import socket
 import ssl
 import sys
 
+from types import FrameType
+from typing import Mapping, NoReturn
 from urllib.parse import urlsplit
 
 MAX_RESPONSE_BYTES = 256 * 1024
@@ -35,8 +37,14 @@ REASON_PROXY_ERROR = "proxy_error"
 REASON_TIMEOUT = "timeout"
 REASON_CONNECTION_ERROR = "connection_error"
 
+TIMEOUT_SENTINEL = {"schema_version": 1, "reason": "exec_timeout"}
 
-def check_result(name, reason="", **fields):
+
+class ProbeTimeout(Exception):
+    """Internal alarm used only to emit a fixed timeout sentinel."""
+
+
+def check_result(name: str, reason: str = "", **fields: object) -> dict[str, object]:
     return {
         "name": name,
         "status": STATUS_FAILED if reason else STATUS_PASSED,
@@ -45,20 +53,20 @@ def check_result(name, reason="", **fields):
     }
 
 
-def configuration_failure(reason):
+def configuration_failure(reason: str) -> dict[str, object]:
     return {"schema_version": 1, "checks": [check_result("configuration", reason)]}
 
 
-def validate_issuer(issuer):
+def validate_issuer(issuer: object) -> str:
     if not isinstance(issuer, str) or not issuer or len(issuer) > 2048:
         raise ValueError(REASON_INVALID_ISSUER)
     parsed = urlsplit(issuer)
     try:
         port = parsed.port
-    except ValueError:
-        raise ValueError(REASON_INVALID_ISSUER)
+    except ValueError as error:
+        raise ValueError(REASON_INVALID_ISSUER) from error
     if (
-        parsed.scheme not in ("http", "https")
+        parsed.scheme != "https"
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
@@ -74,7 +82,32 @@ def validate_issuer(issuer):
     return issuer
 
 
-def transport_reason(error):
+def validate_backend_url(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 2048:
+        raise ValueError(REASON_INVALID_ISSUER)
+    parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(REASON_INVALID_ISSUER) from error
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or "?" in value
+        or "#" in value
+        or "\\" in value
+        or any(character.isspace() or ord(character) < 32 for character in value)
+        or port == 0
+    ):
+        raise ValueError(REASON_INVALID_ISSUER)
+    return value
+
+
+def transport_reason(error: BaseException) -> str:
     import httpx
 
     chain = []
@@ -94,14 +127,28 @@ def transport_reason(error):
     return REASON_CONNECTION_ERROR
 
 
-def read_json(url, timeout):
+def read_json(
+    url: str,
+    timeout: float,
+    headers: Mapping[str, str] | None = None,
+) -> tuple[object | None, str, int | None]:
     import httpx
 
     try:
         # One client per request prevents response cookies from reaching the next endpoint.
-        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+        request_headers = {"Accept-Encoding": "identity"}
+        for name in ("Host", "X-Forwarded-Proto"):
+            if headers and name in headers:
+                request_headers[name] = headers[name]
+        with httpx.Client(
+            timeout=timeout,
+            follow_redirects=False,
+            cookies={},
+        ) as client:
             with client.stream(
-                "GET", url, headers={"Accept-Encoding": "identity"}
+                "GET",
+                url,
+                headers=request_headers,
             ) as response:
                 status = response.status_code
                 if status != 200:
@@ -126,7 +173,7 @@ def read_json(url, timeout):
         return None, transport_reason(error), None
 
 
-def public_key_shape(key):
+def public_key_shape(key: object) -> bool:
     if not isinstance(key, dict):
         return False
     fields = {
@@ -139,23 +186,35 @@ def public_key_shape(key):
     )
 
 
-def probe(issuer, timeout):
-    checks = []
-    base = issuer.rstrip("/")
+def probe(
+    issuer: str,
+    base_url: str,
+    headers: Mapping[str, str],
+    timeout: float,
+) -> dict[str, object]:
+    checks: list[dict[str, object]] = []
+    public_base = issuer.rstrip("/")
+    backend_base = base_url.rstrip("/")
     request_timeout = min(5.0, timeout / 3)
     discovery, reason, status = read_json(
-        base + "/.well-known/openid-configuration", request_timeout
+        backend_base + "/.well-known/openid-configuration",
+        request_timeout,
+        headers,
     )
     if not reason:
         if not isinstance(discovery, dict):
             reason = REASON_INVALID_DISCOVERY
         elif discovery.get("issuer") != issuer:
             reason = REASON_ISSUER_MISMATCH
-        elif discovery.get("jwks_uri") != base + "/oauth/v2/keys":
+        elif discovery.get("jwks_uri") != public_base + "/oauth/v2/keys":
             reason = REASON_JWKS_URI_MISMATCH
     checks.append(check_result("discovery", reason, http_status=status))
 
-    keys, reason, status = read_json(base + "/oauth/v2/keys", request_timeout)
+    keys, reason, status = read_json(
+        backend_base + "/oauth/v2/keys",
+        request_timeout,
+        headers,
+    )
     if not reason and (
         not isinstance(keys, dict)
         or not isinstance(keys.get("keys"), list)
@@ -167,26 +226,33 @@ def probe(issuer, timeout):
     return {"schema_version": 1, "issuer": issuer, "checks": checks}
 
 
-def configured_probe(timeout):
+def configured_probe(timeout: float) -> dict[str, object]:
     try:
+        from common.auth.zitadel_connection import ZitadelConnectionConfig
         from common.config.simple_settings import simple_settings
 
         if simple_settings.get("auth.client_type") not in ("zitadel", "oidc"):
             return configuration_failure(REASON_AUTH_BACKEND_NOT_OIDC)
-        issuer = simple_settings.get("auth.zitadel_issuer")
+        connection = ZitadelConnectionConfig.from_settings()
+        issuer = connection.issuer
     except (ImportError, OSError, ValueError, TypeError, AttributeError, RuntimeError):
         return configuration_failure(REASON_SETTINGS_UNAVAILABLE)
     try:
         issuer = validate_issuer(issuer)
+        base_url = validate_backend_url(connection.base_url)
     except ValueError:
         return configuration_failure(REASON_INVALID_ISSUER)
     try:
-        return probe(issuer, timeout)
+        return probe(issuer, base_url, connection.headers, timeout)
     except (ImportError, OSError, ValueError):
         return configuration_failure(REASON_HTTP_CLIENT_UNAVAILABLE)
 
 
-def main():
+def alarm_timeout(_signum: int, _frame: FrameType | None) -> NoReturn:
+    raise ProbeTimeout
+
+
+def main() -> None:
     # Imports and settings may log secrets. Preserve only a duplicate of stdout for
     # this bounded report, then discard all imported stdout and stderr.
     with os.fdopen(os.dup(sys.stdout.fileno()), "w") as report_stream:
@@ -194,9 +260,15 @@ def main():
             os.dup2(sink.fileno(), sys.stdout.fileno())
             os.dup2(sink.fileno(), sys.stderr.fileno())
         timeout = float(sys.argv[1])
-        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        signal.signal(signal.SIGALRM, alarm_timeout)
         signal.setitimer(signal.ITIMER_REAL, timeout)
-        report_stream.write(json.dumps(configured_probe(timeout), separators=(",", ":")) + "\n")
+        try:
+            result = configured_probe(timeout)
+        except ProbeTimeout:
+            result = TIMEOUT_SENTINEL
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        report_stream.write(json.dumps(result, separators=(",", ":")) + "\n")
         report_stream.flush()
 
 

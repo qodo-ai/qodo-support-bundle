@@ -43,7 +43,7 @@ application namespaces, excludes known Kubernetes and managed GKE system
 namespaces, and writes:
 
 ```text
-~/qodo-support-bundles/qodo-support-bundle-<UTC timestamp>.tar.gz
+~/qodo-support-bundles/qodo-support-bundle-<UTC timestamp>-<random suffix>.tar.gz
 ```
 
 The dedicated output directory and archive use owner-only permissions where
@@ -134,7 +134,9 @@ already provide Python, Platform's `simple_settings`, and HTTPX.
 Inside the container, the probe:
 
 - accepts Platform `zitadel` and `oidc` client types and validates the configured
-  issuer;
+  public HTTPS issuer;
+- uses Platform's configured internal Zitadel API URL and safe forwarding
+  headers when present, while validating responses against the public issuer;
 - honors HTTPX's normal proxy and CA environment behavior;
 - sends no authorization or cookie and uses a fresh client for each request;
 - requests only `/.well-known/openid-configuration` and `/oauth/v2/keys`;

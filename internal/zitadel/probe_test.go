@@ -432,6 +432,44 @@ func TestCollectEnforcesProbeTimeout(t *testing.T) {
 	}
 }
 
+func TestCollectRecognizesInternalProbeTimeoutSentinel(t *testing.T) {
+	t.Parallel()
+	call := 0
+	runner := &fakeRunner{
+		run: func(
+			_ context.Context,
+			_ int64,
+			_ []string,
+		) (kubernetes.CommandResult, error) {
+			call++
+			if call == 1 {
+				return runningPod(), nil
+			}
+			return kubernetes.CommandResult{
+				Stdout: []byte(`{"schema_version":1,"reason":"exec_timeout"}`),
+				Stderr: []byte("private exception canary"),
+			}, errors.New("command exited unexpectedly")
+		},
+	}
+
+	outcome := Collect(context.Background(), testConfig(), runner)
+
+	if outcome.Reason != ReasonExecTimeout ||
+		strings.Contains(outcome.Reason, "canary") {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+}
+
+func TestValidIssuerRequiresHTTPS(t *testing.T) {
+	t.Parallel()
+	if validIssuer("http://id.example") {
+		t.Fatal("HTTP issuer was accepted")
+	}
+	if !validIssuer("https://id.example") {
+		t.Fatal("HTTPS issuer was rejected")
+	}
+}
+
 func TestValidDiagnosticFailuresProduceArtifact(t *testing.T) {
 	t.Parallel()
 	status := 503

@@ -236,15 +236,18 @@ func TestProbeFlagCouplingAndNamespaceInference(t *testing.T) {
 func TestDefaultOutputPathUsesPrivateHomeDirectory(t *testing.T) {
 	oldHome := homeDirectory
 	oldTime := currentTime
+	oldRandomSuffix := randomOutputSuffix
 	t.Cleanup(func() {
 		homeDirectory = oldHome
 		currentTime = oldTime
+		randomOutputSuffix = oldRandomSuffix
 	})
 	home := t.TempDir()
 	homeDirectory = func() (string, error) { return home, nil }
 	currentTime = func() time.Time {
 		return time.Date(2026, 9, 27, 10, 11, 12, 0, time.FixedZone("test", 3*60*60))
 	}
+	randomOutputSuffix = func() (string, error) { return "a1b2c3d4e5f6", nil }
 
 	path, err := defaultOutputPath()
 	if err != nil {
@@ -253,7 +256,7 @@ func TestDefaultOutputPathUsesPrivateHomeDirectory(t *testing.T) {
 	expected := filepath.Join(
 		home,
 		"qodo-support-bundles",
-		"qodo-support-bundle-20260927T071112Z.tar.gz",
+		"qodo-support-bundle-20260927T071112Z-a1b2c3d4e5f6.tar.gz",
 	)
 	if path != expected {
 		t.Fatalf("got %q want %q", path, expected)
@@ -264,6 +267,42 @@ func TestDefaultOutputPathUsesPrivateHomeDirectory(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o700 {
 		t.Fatalf("directory mode=%o", info.Mode().Perm())
+	}
+}
+
+func TestDefaultOutputPathAvoidsSameSecondCollisions(t *testing.T) {
+	oldHome := homeDirectory
+	oldTime := currentTime
+	oldRandomSuffix := randomOutputSuffix
+	t.Cleanup(func() {
+		homeDirectory = oldHome
+		currentTime = oldTime
+		randomOutputSuffix = oldRandomSuffix
+	})
+	home := t.TempDir()
+	homeDirectory = func() (string, error) { return home, nil }
+	currentTime = func() time.Time {
+		return time.Date(2026, 9, 27, 7, 11, 12, 0, time.UTC)
+	}
+	suffixes := []string{"000000000001", "000000000002"}
+	randomOutputSuffix = func() (string, error) {
+		value := suffixes[0]
+		suffixes = suffixes[1:]
+		return value, nil
+	}
+
+	first, err := defaultOutputPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := defaultOutputPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second ||
+		!strings.Contains(first, "qodo-support-bundle-20260927T071112Z-") ||
+		!strings.Contains(second, "qodo-support-bundle-20260927T071112Z-") {
+		t.Fatalf("paths are not collision-resistant: %q %q", first, second)
 	}
 }
 

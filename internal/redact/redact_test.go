@@ -115,19 +115,37 @@ func TestJSONLineSanitizesSemanticURLFields(t *testing.T) {
 	}
 }
 
-func TestJSONLineDoesNotTreatOrdinaryStringKeysAsURLs(t *testing.T) {
+func TestJSONLineRedactsURLUserinfoInOrdinaryStringFields(t *testing.T) {
 	t.Parallel()
 	input := `{"curl":"https://user:plain@localhost/path","message":"https://other:visible@localhost/path","location_id":"rack-1"}`
 
 	output := New().JSONLine(input)
 
-	for _, expected := range []string{
-		`"curl":"https://user:plain@localhost/path"`,
-		`"message":"https://other:visible@localhost/path"`,
-		`"location_id":"rack-1"`,
+	for _, forbidden := range []string{
+		"user:plain",
+		"other:visible",
 	} {
-		if !strings.Contains(output, expected) {
-			t.Fatalf("ordinary string was treated as a URL field: %s", output)
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("URL userinfo survived in ordinary field: %s", output)
+		}
+	}
+	if !strings.Contains(output, `"location_id":"rack-1"`) {
+		t.Fatalf("safe ordinary string was changed: %s", output)
+	}
+}
+
+func TestTextRedactsURLUserinfoInCommandErrorsAndLogs(t *testing.T) {
+	t.Parallel()
+	output := New().Text(
+		`kubectl: failed https://admin:stderr-secret@api.example/path; ` +
+			`log=http://user:log-secret@service.local/status`,
+	)
+	for _, forbidden := range []string{
+		"admin:stderr-secret",
+		"user:log-secret",
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("URL userinfo survived text redaction: %s", output)
 		}
 	}
 }

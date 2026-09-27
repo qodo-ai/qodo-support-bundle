@@ -53,6 +53,7 @@ type Builder struct {
 	fileCount            int
 	removeAll            func(string) error
 	remove               func(string) error
+	closeArchive         func(*os.File) error
 	temporaryArchivePath string
 }
 
@@ -88,6 +89,9 @@ func New(outputPath string) (*Builder, error) {
 		stagingDir: stagingDirectory,
 		removeAll:  os.RemoveAll,
 		remove:     os.Remove,
+		closeArchive: func(file *os.File) error {
+			return file.Close()
+		},
 	}, nil
 }
 
@@ -278,13 +282,12 @@ func (builder *Builder) createArchive(ctx context.Context, generatedAt time.Time
 		return fmt.Errorf("create archive: %w", err)
 	}
 	temporaryPath := temporaryFile.Name()
-	cleanup := func() {
-		_ = temporaryFile.Close()
-		_ = os.Remove(temporaryPath)
-	}
+	builder.temporaryArchivePath = temporaryPath
 	if err := temporaryFile.Chmod(fileMode); err != nil {
-		cleanup()
-		return fmt.Errorf("secure archive: %w", err)
+		return builder.cleanupFailedArchive(
+			temporaryFile,
+			fmt.Errorf("secure archive: %w", err),
+		)
 	}
 
 	gzipWriter := gzip.NewWriter(temporaryFile)
@@ -294,30 +297,38 @@ func (builder *Builder) createArchive(ctx context.Context, generatedAt time.Time
 
 	paths, err := stagedFiles(builder.stagingDir)
 	if err != nil {
-		cleanup()
-		return err
+		return builder.cleanupFailedArchive(temporaryFile, err)
 	}
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
-			cleanup()
-			return err
+			return builder.cleanupFailedArchive(temporaryFile, err)
 		}
 		stagedPath := filepath.Join(builder.stagingDir, filepath.FromSlash(path))
 		file, err := os.Open(stagedPath)
 		if err != nil {
-			cleanup()
-			return fmt.Errorf("open staged file %q: %w", path, err)
+			return builder.cleanupFailedArchive(
+				temporaryFile,
+				fmt.Errorf("open staged file %q: %w", path, err),
+			)
 		}
 		fileInfo, err := file.Stat()
 		if err != nil {
-			_ = file.Close()
-			cleanup()
-			return fmt.Errorf("inspect staged file %q: %w", path, err)
+			return builder.cleanupFailedArchive(
+				temporaryFile,
+				errors.Join(
+					fmt.Errorf("inspect staged file %q: %w", path, err),
+					wrapCloseError(path, file.Close()),
+				),
+			)
 		}
 		if !fileInfo.Mode().IsRegular() {
-			_ = file.Close()
-			cleanup()
-			return fmt.Errorf("staged file %q is not regular", path)
+			return builder.cleanupFailedArchive(
+				temporaryFile,
+				errors.Join(
+					fmt.Errorf("staged file %q is not regular", path),
+					wrapCloseError(path, file.Close()),
+				),
+			)
 		}
 		header := &tar.Header{
 			Name:     path,
@@ -327,51 +338,114 @@ func (builder *Builder) createArchive(ctx context.Context, generatedAt time.Time
 			Typeflag: tar.TypeReg,
 		}
 		if err := tarWriter.WriteHeader(header); err != nil {
-			_ = file.Close()
-			cleanup()
-			return fmt.Errorf("write archive header %q: %w", path, err)
+			return builder.cleanupFailedArchive(
+				temporaryFile,
+				errors.Join(
+					fmt.Errorf("write archive header %q: %w", path, err),
+					wrapCloseError(path, file.Close()),
+				),
+			)
 		}
 		_, copyErr := io.Copy(tarWriter, contextReader{ctx: ctx, reader: file})
 		closeErr := file.Close()
 		if copyErr != nil {
-			cleanup()
-			return fmt.Errorf("write archive file %q: %w", path, copyErr)
+			return builder.cleanupFailedArchive(
+				temporaryFile,
+				errors.Join(
+					fmt.Errorf("write archive file %q: %w", path, copyErr),
+					wrapCloseError(path, closeErr),
+				),
+			)
 		}
 		if closeErr != nil {
-			cleanup()
-			return fmt.Errorf("close staged file %q: %w", path, closeErr)
+			return builder.cleanupFailedArchive(
+				temporaryFile,
+				fmt.Errorf("close staged file %q: %w", path, closeErr),
+			)
 		}
 	}
 	if err := tarWriter.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("close tar stream: %w", err)
+		return builder.cleanupFailedArchive(
+			temporaryFile,
+			fmt.Errorf("close tar stream: %w", err),
+		)
 	}
 	if err := gzipWriter.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("close gzip stream: %w", err)
+		return builder.cleanupFailedArchive(
+			temporaryFile,
+			fmt.Errorf("close gzip stream: %w", err),
+		)
 	}
 	if err := temporaryFile.Sync(); err != nil {
-		cleanup()
-		return fmt.Errorf("sync archive: %w", err)
+		return builder.cleanupFailedArchive(
+			temporaryFile,
+			fmt.Errorf("sync archive: %w", err),
+		)
 	}
-	if err := temporaryFile.Close(); err != nil {
-		_ = os.Remove(temporaryPath)
-		return fmt.Errorf("close archive: %w", err)
+	if err := builder.closeArchive(temporaryFile); err != nil {
+		return builder.cleanupFailedArchive(
+			temporaryFile,
+			fmt.Errorf("close archive: %w", err),
+		)
 	}
 	if err := ctx.Err(); err != nil {
-		_ = os.Remove(temporaryPath)
-		return err
+		return builder.cleanupFailedArchive(temporaryFile, err)
 	}
 	if err := os.Link(temporaryPath, builder.outputPath); err != nil {
-		_ = os.Remove(temporaryPath)
-		return fmt.Errorf("publish archive: %w", err)
+		return builder.cleanupFailedArchive(
+			temporaryFile,
+			fmt.Errorf("publish archive: %w", err),
+		)
 	}
-	builder.temporaryArchivePath = temporaryPath
 	if err := builder.remove(temporaryPath); err != nil {
-		return fmt.Errorf("%w: remove temporary archive: %v", ErrCleanup, err)
+		return fmt.Errorf(
+			"%w: remove temporary archive %q: %v",
+			ErrCleanup,
+			temporaryPath,
+			err,
+		)
 	}
 	builder.temporaryArchivePath = ""
 	return nil
+}
+
+func (builder *Builder) cleanupFailedArchive(file *os.File, cause error) error {
+	closeErr := builder.closeArchive(file)
+	if errors.Is(closeErr, os.ErrClosed) {
+		closeErr = nil
+	}
+	temporaryPath := builder.temporaryArchivePath
+	removeErr := builder.remove(temporaryPath)
+	if removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+		builder.temporaryArchivePath = ""
+		removeErr = nil
+	}
+	return errors.Join(
+		cause,
+		wrapArchiveCloseError(closeErr),
+		wrapArchiveRemoveError(temporaryPath, removeErr),
+	)
+}
+
+func wrapCloseError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("close staged file %q during cleanup: %w", path, err)
+}
+
+func wrapArchiveCloseError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("close temporary archive during cleanup: %w", err)
+}
+
+func wrapArchiveRemoveError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("remove temporary archive %q during cleanup: %w", path, err)
 }
 
 type contextReader struct {

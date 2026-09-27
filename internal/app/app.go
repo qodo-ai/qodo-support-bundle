@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -39,9 +41,16 @@ const (
 )
 
 var (
-	Version         = "dev"
-	homeDirectory   = os.UserHomeDir
-	currentTime     = time.Now
+	Version            = "dev"
+	homeDirectory      = os.UserHomeDir
+	currentTime        = time.Now
+	randomOutputSuffix = func() (string, error) {
+		value := make([]byte, 6)
+		if _, err := rand.Read(value); err != nil {
+			return "", err
+		}
+		return hex.EncodeToString(value), nil
+	}
 	dnsLabelPattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
 	dnsNamePattern  = regexp.MustCompile(
 		`^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$`,
@@ -405,12 +414,13 @@ func runCollect(
 	_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", archivePath)
 	_, _ = fmt.Fprintf(
 		stdout,
-		"Kubernetes scope: %d/%d namespaces, %d pods, %d containers (%d init)\n",
+		"Kubernetes scope: %d/%d namespaces, %d pods, %d containers (%d init, %d ephemeral)\n",
 		len(kubernetesReport.Namespaces),
 		kubernetesReport.NamespacesRequested,
 		kubernetesReport.Pods,
 		kubernetesReport.Containers,
 		kubernetesReport.InitContainers,
+		kubernetesReport.EphemeralContainers,
 	)
 	if collectionStatus == collectionStatusPartial {
 		_, _ = fmt.Fprintln(
@@ -545,7 +555,14 @@ func defaultOutputPath() (string, error) {
 		return "", fmt.Errorf("secure default output directory: %w", err)
 	}
 	timestamp := currentTime().UTC().Format("20060102T150405Z")
-	return filepath.Join(directory, "qodo-support-bundle-"+timestamp+".tar.gz"), nil
+	suffix, err := randomOutputSuffix()
+	if err != nil {
+		return "", fmt.Errorf("generate output filename: %w", err)
+	}
+	return filepath.Join(
+		directory,
+		"qodo-support-bundle-"+timestamp+"-"+suffix+".tar.gz",
+	), nil
 }
 
 func resolveKubectl(binary string) (string, error) {
@@ -615,11 +632,13 @@ func buildSummary(
 	fmt.Fprintln(&summary, "\n## Kubernetes")
 	fmt.Fprintf(
 		&summary,
-		"\n- Scope: %d/%d namespaces, %d pods, %d containers\n",
+		"\n- Scope: %d/%d namespaces, %d pods, %d containers (%d init, %d ephemeral)\n",
 		len(report.Namespaces),
 		report.NamespacesRequested,
 		report.Pods,
 		report.Containers,
+		report.InitContainers,
+		report.EphemeralContainers,
 	)
 	fmt.Fprintf(&summary, "- Container restarts: %d\n", report.ContainerRestarts)
 	fmt.Fprintf(&summary, "- OOMKills: %d\n", report.OOMKills)

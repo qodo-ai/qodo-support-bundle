@@ -30,6 +30,7 @@ func TestEmbeddedPythonProbeHTTPBehavior(t *testing.T) {
 	var mutex sync.Mutex
 	responses := map[string]response{}
 	observedHeaders := make([]http.Header, 0)
+	observedHosts := make([]string, 0)
 	server := httptest.NewServer(http.HandlerFunc(func(
 		writer http.ResponseWriter,
 		request *http.Request,
@@ -37,6 +38,7 @@ func TestEmbeddedPythonProbeHTTPBehavior(t *testing.T) {
 		mutex.Lock()
 		current := responses[request.URL.Path]
 		observedHeaders = append(observedHeaders, request.Header.Clone())
+		observedHosts = append(observedHosts, request.Host)
 		mutex.Unlock()
 		if current.delay > 0 {
 			time.Sleep(current.delay)
@@ -48,6 +50,7 @@ func TestEmbeddedPythonProbeHTTPBehavior(t *testing.T) {
 		_, _ = writer.Write(current.body)
 	}))
 	defer server.Close()
+	issuer := "https://issuer.example"
 	validDiscovery := func(issuer string) []byte {
 		data, _ := json.Marshal(map[string]string{
 			"issuer":   issuer,
@@ -60,11 +63,12 @@ func TestEmbeddedPythonProbeHTTPBehavior(t *testing.T) {
 		responses = map[string]response{
 			"/.well-known/openid-configuration": {
 				status: 200,
-				body:   validDiscovery(server.URL),
+				body:   validDiscovery(issuer),
 			},
 			"/oauth/v2/keys": {status: 200, body: validJWKS},
 		}
 		observedHeaders = nil
+		observedHosts = nil
 	}
 
 	t.Run("success has no auth or cookie forwarding", func(t *testing.T) {
@@ -72,16 +76,22 @@ func TestEmbeddedPythonProbeHTTPBehavior(t *testing.T) {
 		current := responses["/.well-known/openid-configuration"]
 		current.headers = map[string]string{"Set-Cookie": "session=private-canary"}
 		responses["/.well-known/openid-configuration"] = current
-		report := runPythonProbe(t, python, directory, server.URL, 3, nil)
+		report := runPythonProbe(t, python, directory, issuer, 3, map[string]string{
+			"TEST_ZITADEL_API_URL": server.URL,
+		})
 		if report.Checks[0].Status != StatusPassed ||
 			report.Checks[1].Status != StatusPassed {
 			t.Fatalf("checks=%+v", report.Checks)
 		}
 		mutex.Lock()
 		defer mutex.Unlock()
-		for _, headers := range observedHeaders {
+		for index, headers := range observedHeaders {
 			if headers.Get("Authorization") != "" || headers.Get("Cookie") != "" {
 				t.Fatalf("sensitive request headers: %+v", headers)
+			}
+			if observedHosts[index] != issuerHost(issuer) ||
+				headers.Get("X-Forwarded-Proto") != "https" {
+				t.Fatalf("missing safe forwarding headers: %+v", headers)
 			}
 			if headers.Get("Accept-Encoding") != "identity" {
 				t.Fatalf("encoding=%q", headers.Get("Accept-Encoding"))
@@ -113,7 +123,7 @@ func TestEmbeddedPythonProbeHTTPBehavior(t *testing.T) {
 				status: 200,
 				body: []byte(
 					`{"issuer":"https://wrong.example","jwks_uri":"` +
-						server.URL + `/oauth/v2/keys"}`,
+						issuer + `/oauth/v2/keys"}`,
 				),
 			},
 			reason: "issuer_mismatch",
@@ -124,7 +134,7 @@ func TestEmbeddedPythonProbeHTTPBehavior(t *testing.T) {
 			replacement: response{
 				status: 200,
 				body: []byte(
-					`{"issuer":"` + server.URL +
+					`{"issuer":"` + issuer +
 						`","jwks_uri":"https://wrong.example/keys"}`,
 				),
 			},
@@ -187,9 +197,9 @@ func TestEmbeddedPythonProbeHTTPBehavior(t *testing.T) {
 				t,
 				python,
 				directory,
-				server.URL,
+				issuer,
 				probeTimeout,
-				nil,
+				map[string]string{"TEST_ZITADEL_API_URL": server.URL},
 			)
 			if report.Checks[test.checkIndex].Reason != test.reason {
 				t.Fatalf("checks=%+v", report.Checks)
@@ -198,42 +208,15 @@ func TestEmbeddedPythonProbeHTTPBehavior(t *testing.T) {
 	}
 }
 
-func TestEmbeddedPythonProbeUsesProxyAndCAEnvironment(t *testing.T) {
+func TestEmbeddedPythonProbeRequiresHTTPSAndUsesCAEnvironment(t *testing.T) {
 	python := pythonWithHTTPX(t)
 	directory := pythonSettingsDirectory(t)
 
-	t.Run("HTTP proxy", func(t *testing.T) {
+	t.Run("HTTP public issuer is rejected", func(t *testing.T) {
 		issuer := "http://zitadel.invalid"
-		proxy := httptest.NewServer(http.HandlerFunc(func(
-			writer http.ResponseWriter,
-			request *http.Request,
-		) {
-			writer.Header().Set("Content-Type", "application/json")
-			switch {
-			case strings.HasSuffix(
-				request.RequestURI,
-				"/.well-known/openid-configuration",
-			):
-				_, _ = fmt.Fprintf(
-					writer,
-					`{"issuer":%q,"jwks_uri":%q}`,
-					issuer,
-					issuer+"/oauth/v2/keys",
-				)
-			case strings.HasSuffix(request.RequestURI, "/oauth/v2/keys"):
-				_, _ = writer.Write(
-					[]byte(`{"keys":[{"kty":"OKP","crv":"Ed25519","x":"key"}]}`),
-				)
-			default:
-				http.NotFound(writer, request)
-			}
-		}))
-		defer proxy.Close()
-		report := runPythonProbe(t, python, directory, issuer, 3, map[string]string{
-			"HTTP_PROXY": proxy.URL,
-			"NO_PROXY":   "",
-		})
-		if report.FailedChecks() != 0 {
+		report := runPythonProbe(t, python, directory, issuer, 3, nil)
+		if len(report.Checks) != 1 ||
+			report.Checks[0].Reason != ReasonInvalidIssuer {
 			t.Fatalf("checks=%+v", report.Checks)
 		}
 	})
@@ -285,6 +268,24 @@ func TestEmbeddedPythonProbeUsesProxyAndCAEnvironment(t *testing.T) {
 	})
 }
 
+func TestEmbeddedPythonProbeEmitsFixedInternalTimeoutSentinel(t *testing.T) {
+	python := pythonWithHTTPX(t)
+	directory := pythonSettingsDirectory(t)
+	report := runPythonProbe(
+		t,
+		python,
+		directory,
+		"https://issuer.example",
+		0.1,
+		map[string]string{"TEST_SETTINGS_DELAY": "1"},
+	)
+	if report.SchemaVersion != 1 ||
+		report.Issuer != "" ||
+		report.Checks != nil {
+		t.Fatalf("unexpected timeout sentinel: %+v", report)
+	}
+}
+
 func pythonWithHTTPX(t *testing.T) string {
 	t.Helper()
 	python, err := exec.LookPath("python3")
@@ -301,16 +302,52 @@ func pythonSettingsDirectory(t *testing.T) string {
 	t.Helper()
 	directory := t.TempDir()
 	config := filepath.Join(directory, "common", "config")
+	auth := filepath.Join(directory, "common", "auth")
 	if err := os.MkdirAll(config, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(auth, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{
 		filepath.Join(directory, "common", "__init__.py"),
 		filepath.Join(config, "__init__.py"),
+		filepath.Join(auth, "__init__.py"),
 	} {
 		if err := os.WriteFile(path, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	connectionModule := `import os
+from common.config.simple_settings import simple_settings
+from urllib.parse import urlsplit
+
+class ZitadelConnectionConfig:
+    @classmethod
+    def from_settings(cls):
+        instance = cls()
+        instance.issuer = simple_settings["auth.zitadel_issuer"]
+        instance.api_url = simple_settings.get("auth.zitadel_api_url")
+        return instance
+
+    @property
+    def base_url(self):
+        return (self.api_url or self.issuer).rstrip("/")
+
+    @property
+    def headers(self):
+        public = urlsplit(self.issuer)
+        backend = urlsplit(self.base_url)
+        if (public.scheme, public.netloc) != (backend.scheme, backend.netloc):
+            return {"Host": public.netloc, "X-Forwarded-Proto": public.scheme}
+        return {}
+`
+	if err := os.WriteFile(
+		filepath.Join(auth, "zitadel_connection.py"),
+		[]byte(connectionModule),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
 	}
 	return directory
 }
@@ -326,9 +363,14 @@ func runPythonProbe(
 	t.Helper()
 	settings := fmt.Sprintf(
 		"import os\n"+
+			"import time\n"+
 			"print('private-settings-canary')\n"+
 			"os.write(2, b'private-settings-canary')\n"+
-			"simple_settings = %s\n",
+			"if os.environ.get('TEST_SETTINGS_DELAY'):\n"+
+			"    time.sleep(float(os.environ['TEST_SETTINGS_DELAY']))\n"+
+			"simple_settings = %s\n"+
+			"if os.environ.get('TEST_ZITADEL_API_URL'):\n"+
+			"    simple_settings['auth.zitadel_api_url'] = os.environ['TEST_ZITADEL_API_URL']\n",
 		fmt.Sprintf(
 			`{"auth.client_type": "oidc", "auth.zitadel_issuer": %q}`,
 			issuer,
@@ -397,4 +439,8 @@ func runPythonProbe(
 		t.Fatalf("decode report %q: %v", output, err)
 	}
 	return report
+}
+
+func issuerHost(issuer string) string {
+	return strings.TrimPrefix(issuer, "https://")
 }

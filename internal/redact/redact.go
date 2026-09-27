@@ -78,6 +78,10 @@ func New() *Redactor {
 	return &Redactor{
 		patterns: []replacementPattern{
 			{
+				expression:  malformedURLUserinfoPattern,
+				replacement: `${1}` + Replacement + "@",
+			},
+			{
 				expression:  regexp.MustCompile(`(?i)(bearer|basic)[ \t]+[A-Za-z0-9._~+/\-=]+`),
 				replacement: `${1} ` + Replacement,
 			},

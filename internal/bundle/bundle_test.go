@@ -129,6 +129,48 @@ func TestFinalizeReportsAndRetriesTemporaryArchiveCleanup(t *testing.T) {
 	}
 }
 
+func TestCreateArchiveFailureReportsCleanupErrorsAndRetainsPath(t *testing.T) {
+	t.Parallel()
+	outputPath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	builder, err := New(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.Add("data.jsonl", []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	closeFailure := errors.New("injected archive close failure")
+	removeFailure := errors.New("injected archive remove failure")
+	builder.closeArchive = func(file *os.File) error {
+		_ = file.Close()
+		return closeFailure
+	}
+	builder.remove = func(string) error {
+		return removeFailure
+	}
+
+	archivePath, err := builder.FinalizeContext(
+		context.Background(),
+		Manifest{GeneratedAt: time.Now()},
+	)
+
+	if archivePath != "" ||
+		!errors.Is(err, closeFailure) ||
+		!errors.Is(err, removeFailure) ||
+		errors.Is(err, ErrCleanup) {
+		t.Fatalf("unexpected finalize result: path=%q err=%v", archivePath, err)
+	}
+	if builder.temporaryArchivePath == "" ||
+		!strings.Contains(err.Error(), builder.temporaryArchivePath) {
+		t.Fatalf("temporary archive path was not retained and reported: %v", err)
+	}
+	builder.closeArchive = func(file *os.File) error { return file.Close() }
+	builder.remove = os.Remove
+	if err := builder.Close(); err != nil {
+		t.Fatalf("retry cleanup failed: %v", err)
+	}
+}
+
 func TestAddRejectsArchiveTraversal(t *testing.T) {
 	t.Parallel()
 	builder, err := New(filepath.Join(t.TempDir(), "bundle.tar.gz"))

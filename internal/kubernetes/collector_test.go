@@ -16,6 +16,7 @@ import (
 type fakeRunner struct {
 	mutex     sync.Mutex
 	calls     []string
+	limits    []int64
 	logLimits []int64
 	run       func(arguments string) (CommandResult, error)
 }
@@ -28,6 +29,7 @@ func (runner *fakeRunner) Run(
 	joined := strings.Join(arguments, " ")
 	runner.mutex.Lock()
 	runner.calls = append(runner.calls, joined)
+	runner.limits = append(runner.limits, maxBytes)
 	if strings.HasPrefix(joined, "logs ") {
 		runner.logLimits = append(runner.logLimits, maxBytes)
 	}
@@ -253,13 +255,20 @@ func TestCollectCoversMultipleNamespacesAndInitContainers(t *testing.T) {
 				  "metadata":{"name":"platform-1","namespace":"qodo"},
 				  "spec":{
 				    "containers":[{"name":"platform","image":"registry/platform:1"}],
-				    "initContainers":[{"name":"bootstrap","image":"registry/bootstrap:1"}]
+				    "initContainers":[{"name":"bootstrap","image":"registry/bootstrap:1"}],
+				    "ephemeralContainers":[{"name":"debug","image":"registry/debug:1"}]
 				  },
 				  "status":{
 				    "phase":"Running",
 				    "startTime":"2026-09-15T06:00:00Z",
 				    "containerStatuses":[{"name":"platform","ready":true}],
-				    "initContainerStatuses":[{"name":"bootstrap","ready":true}]
+				    "initContainerStatuses":[{"name":"bootstrap","ready":true}],
+				    "ephemeralContainerStatuses":[{
+				      "name":"debug",
+				      "ready":false,
+				      "restartCount":2,
+				      "lastState":{"terminated":{"reason":"OOMKilled"}}
+				    }]
 				  }
 				}]}`)}, nil
 			case strings.Contains(arguments, "get pods") &&
@@ -303,9 +312,12 @@ func TestCollectCoversMultipleNamespacesAndInitContainers(t *testing.T) {
 	}
 
 	if report.Pods != 2 ||
-		report.Containers != 3 ||
+		report.Containers != 4 ||
 		report.InitContainers != 1 ||
-		report.LogFiles != 3 {
+		report.EphemeralContainers != 1 ||
+		report.ContainerRestarts != 2 ||
+		report.OOMKills != 1 ||
+		report.LogFiles != 4 {
 		t.Fatalf("unexpected report: %+v", report)
 	}
 	for _, path := range []string{
@@ -315,6 +327,7 @@ func TestCollectCoversMultipleNamespacesAndInitContainers(t *testing.T) {
 		"kubernetes/events/zitadel.jsonl",
 		"kubernetes/logs/qodo/platform-1/platform.log",
 		"kubernetes/logs/qodo/platform-1/bootstrap.log",
+		"kubernetes/logs/qodo/platform-1/debug.log",
 		"kubernetes/logs/zitadel/zitadel-1/zitadel.log",
 	} {
 		if _, exists := sink.files[path]; !exists {
@@ -331,6 +344,15 @@ func TestCollectCoversMultipleNamespacesAndInitContainers(t *testing.T) {
 	) {
 		t.Fatal("init-container metadata is missing")
 	}
+	if !strings.Contains(
+		string(sink.files["kubernetes/pods/qodo.jsonl"]),
+		`"ephemeral_containers":[`,
+	) {
+		t.Fatal("ephemeral-container metadata is missing")
+	}
+	if containsCall(runner.calls, "--container debug --timestamps=true --since 1800s --previous=true") {
+		t.Fatalf("previous ephemeral-container log was requested: %+v", runner.calls)
+	}
 	stages := strings.Join(progressStages, ",")
 	for _, expectedStage := range []string{
 		"namespaces_discovered",
@@ -340,6 +362,48 @@ func TestCollectCoversMultipleNamespacesAndInitContainers(t *testing.T) {
 	} {
 		if !strings.Contains(stages, expectedStage) {
 			t.Fatalf("missing progress stage %q: %s", expectedStage, stages)
+		}
+	}
+}
+
+func TestCollectDerivesMetadataCommandLimitAbove64MiB(t *testing.T) {
+	t.Parallel()
+	const metadataLimit int64 = 128 << 20
+	runner := &fakeRunner{
+		run: func(arguments string) (CommandResult, error) {
+			switch {
+			case strings.Contains(arguments, "get pods"),
+				strings.Contains(arguments, "get events"):
+				return CommandResult{Stdout: []byte(`{"items":[]}`)}, nil
+			default:
+				return CommandResult{}, errors.New("unexpected command")
+			}
+		},
+	}
+
+	_, err := Collect(
+		context.Background(),
+		Config{
+			Namespace:        "qodo",
+			Since:            time.Minute,
+			Timeout:          time.Second,
+			MaxMetadataBytes: metadataLimit,
+			MaxLogBytes:      1024,
+			MaxTotalLogBytes: 1024,
+		},
+		runner,
+		&memorySink{},
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.limits) != 2 {
+		t.Fatalf("unexpected calls: %+v", runner.calls)
+	}
+	for _, limit := range runner.limits {
+		if limit != metadataLimit {
+			t.Fatalf("metadata command limit=%d want=%d", limit, metadataLimit)
 		}
 	}
 }

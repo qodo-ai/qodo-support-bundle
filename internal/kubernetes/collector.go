@@ -16,7 +16,6 @@ import (
 )
 
 const (
-	metadataOutputLimit  int64 = 64 << 20
 	defaultLogWorkers          = 8
 	MaximumMetadataBytes int64 = 1 << 30
 	MaximumLogBytes      int64 = 100 << 20
@@ -155,7 +154,7 @@ func Collect(
 			ctx,
 			config.Timeout,
 			runner,
-			metadataOutputLimit,
+			metadataCommandLimit(metadata.remaining),
 			podArguments...,
 		)
 		if runErr != nil {
@@ -264,8 +263,11 @@ func Collect(
 				append([]containerSpec{}, currentPod.Spec.Containers...),
 				currentPod.Spec.InitContainers...,
 			)
+			ephemeralContainers := currentPod.Spec.EphemeralContainers
 			report.Containers += len(containers)
 			report.InitContainers += len(currentPod.Spec.InitContainers)
+			report.Containers += len(ephemeralContainers)
+			report.EphemeralContainers += len(ephemeralContainers)
 			for _, container := range containers {
 				logRequests = append(logRequests, logRequest{
 					namespace:      namespace,
@@ -282,6 +284,14 @@ func Collect(
 						previous:       true,
 					})
 				}
+			}
+			for _, container := range ephemeralContainers {
+				logRequests = append(logRequests, logRequest{
+					namespace:      namespace,
+					namespaceCount: len(namespaces),
+					podName:        currentPod.Metadata.Name,
+					containerName:  container.Name,
+				})
 			}
 		}
 	}
@@ -383,7 +393,7 @@ func collectEvents(
 		ctx,
 		config.Timeout,
 		runner,
-		metadataOutputLimit,
+		metadataCommandLimit(metadata.remaining),
 		arguments...,
 	)
 	if err != nil {
@@ -634,6 +644,11 @@ func marshalPodRecords(pods []pod, redactor *redact.Redactor) ([]byte, error) {
 				currentPod.Status.InitContainerStatuses,
 				redactor,
 			),
+			EphemeralContainers: marshalContainerStatuses(
+				currentPod.Spec.EphemeralContainers,
+				currentPod.Status.EphemeralContainerStatuses,
+				redactor,
+			),
 			Source: map[string]string{"type": "kubernetes"},
 		}
 		if err := encoder.Encode(record); err != nil {
@@ -716,6 +731,7 @@ func marshalContainerEventRecords(
 			append([]containerStatus{}, currentPod.Status.ContainerStatuses...),
 			currentPod.Status.InitContainerStatuses...,
 		)
+		statuses = append(statuses, currentPod.Status.EphemeralContainerStatuses...)
 		for _, status := range statuses {
 			terminated := status.LastState["terminated"]
 			if terminated.Reason == "" && terminated.FinishedAt == "" {
@@ -889,7 +905,7 @@ func discoverNamespaces(
 		ctx,
 		config.Timeout,
 		runner,
-		metadataOutputLimit,
+		metadataCommandLimit(config.MaxMetadataBytes),
 		arguments...,
 	)
 	if err != nil {
@@ -1066,12 +1082,18 @@ func containerRestartCount(currentPod pod, containerName string) int {
 		append([]containerStatus{}, currentPod.Status.ContainerStatuses...),
 		currentPod.Status.InitContainerStatuses...,
 	)
+	statuses = append(statuses, currentPod.Status.EphemeralContainerStatuses...)
 	for _, status := range statuses {
 		if status.Name == containerName {
 			return status.RestartCount
 		}
 	}
 	return 0
+}
+
+func metadataCommandLimit(budget int64) int64 {
+	const minimumDecodableMetadataBytes int64 = 1 << 20
+	return min(max(budget, minimumDecodableMetadataBytes), MaximumMetadataBytes)
 }
 
 func eventTimestamp(currentEvent event) string {

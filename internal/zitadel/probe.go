@@ -102,6 +102,7 @@ type probeReport struct {
 	SchemaVersion int     `json:"schema_version"`
 	Issuer        string  `json:"issuer,omitempty"`
 	Checks        []Check `json:"checks"`
+	Reason        string  `json:"reason,omitempty"`
 }
 
 // Outcome distinguishes diagnostic check failures from collection failures.
@@ -146,6 +147,9 @@ func Collect(
 	}
 	if result.Truncated {
 		return Outcome{Reason: ReasonOutputLimit}
+	}
+	if isInternalTimeout(result.Stdout) {
+		return Outcome{Reason: ReasonExecTimeout}
 	}
 	if err != nil {
 		return Outcome{Reason: commandFailureReason(result.Stderr, ReasonExecError)}
@@ -235,6 +239,9 @@ func validateReport(data []byte) (*Report, error) {
 	if wire.SchemaVersion != 1 {
 		return nil, errors.New("unsupported schema")
 	}
+	if wire.Reason != "" {
+		return nil, errors.New("unexpected probe sentinel")
+	}
 	switch len(wire.Checks) {
 	case 1:
 		check := wire.Checks[0]
@@ -320,11 +327,28 @@ func validIssuer(value string) bool {
 	}
 	parsed, err := url.Parse(value)
 	return err == nil &&
-		(parsed.Scheme == "http" || parsed.Scheme == "https") &&
+		parsed.Scheme == "https" &&
 		parsed.Hostname() != "" &&
+		parsed.Port() != "0" &&
 		parsed.User == nil &&
 		parsed.RawQuery == "" &&
 		parsed.Fragment == ""
+}
+
+func isInternalTimeout(data []byte) bool {
+	if len(data) == 0 || int64(len(data)) > MaxOutputBytes {
+		return false
+	}
+	var wire probeReport
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&wire); err != nil || ensureEOF(decoder) != nil {
+		return false
+	}
+	return wire.SchemaVersion == 1 &&
+		wire.Reason == ReasonExecTimeout &&
+		wire.Issuer == "" &&
+		len(wire.Checks) == 0
 }
 
 func ensureEOF(decoder *json.Decoder) error {
