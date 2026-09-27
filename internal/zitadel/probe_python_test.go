@@ -286,6 +286,24 @@ func TestEmbeddedPythonProbeEmitsFixedInternalTimeoutSentinel(t *testing.T) {
 	}
 }
 
+func TestEmbeddedPythonProbeTreatsMissingIssuerAsUnavailableSettings(t *testing.T) {
+	python := pythonWithHTTPX(t)
+	directory := pythonSettingsDirectory(t)
+	report := runPythonProbe(
+		t,
+		python,
+		directory,
+		"https://issuer.example",
+		3,
+		map[string]string{"TEST_MISSING_ISSUER": "1"},
+	)
+	if len(report.Checks) != 1 ||
+		report.Checks[0].Name != checkConfiguration ||
+		report.Checks[0].Reason != ReasonSettingsUnavailable {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
 func pythonWithHTTPX(t *testing.T) string {
 	t.Helper()
 	python, err := exec.LookPath("python3")
@@ -324,18 +342,18 @@ from urllib.parse import urlsplit
 
 class ZitadelConnectionConfig:
     @classmethod
-    def from_settings(cls):
+    def from_settings(cls) -> "ZitadelConnectionConfig":
         instance = cls()
         instance.issuer = simple_settings["auth.zitadel_issuer"]
         instance.api_url = simple_settings.get("auth.zitadel_api_url")
         return instance
 
     @property
-    def base_url(self):
+    def base_url(self) -> str:
         return (self.api_url or self.issuer).rstrip("/")
 
     @property
-    def headers(self):
+    def headers(self) -> dict[str, str]:
         public = urlsplit(self.issuer)
         backend = urlsplit(self.base_url)
         if (public.scheme, public.netloc) != (backend.scheme, backend.netloc):
@@ -369,6 +387,8 @@ func runPythonProbe(
 			"if os.environ.get('TEST_SETTINGS_DELAY'):\n"+
 			"    time.sleep(float(os.environ['TEST_SETTINGS_DELAY']))\n"+
 			"simple_settings = %s\n"+
+			"if os.environ.get('TEST_MISSING_ISSUER'):\n"+
+			"    del simple_settings['auth.zitadel_issuer']\n"+
 			"if os.environ.get('TEST_ZITADEL_API_URL'):\n"+
 			"    simple_settings['auth.zitadel_api_url'] = os.environ['TEST_ZITADEL_API_URL']\n",
 		fmt.Sprintf(

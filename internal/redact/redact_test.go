@@ -38,6 +38,9 @@ func TestTextRedactsAdditionalSensitiveAssignments(t *testing.T) {
 		`Proxy_Authorization=raw-proxy-authorization`,
 		`SAMLResponse=raw-saml-response`,
 		`code_verifier=raw-code-verifier`,
+		`session=raw-session`,
+		`session_id: "raw-session-id"`,
+		`session-id='raw-hyphenated-session-id'`,
 		`AWS_SECRET_ACCESS_KEY=raw-aws-secret`,
 		`AWS_ACCESS_KEY_ID=raw-aws-key-id`,
 		`prefix AWS-SECRET-ACCESS-KEY : "raw-hyphenated-aws-secret"`,
@@ -51,6 +54,19 @@ func TestTextRedactsAdditionalSensitiveAssignments(t *testing.T) {
 		if !strings.Contains(output, Replacement) {
 			t.Errorf("output does not contain redaction marker: %s", output)
 		}
+	}
+}
+
+func TestTextRedactsFirebaseKeyQueryParameter(t *testing.T) {
+	t.Parallel()
+	output := New().Text(
+		`request failed: https://firebase.example/resource?key=raw-firebase-key&request_id=req-1`,
+	)
+	if strings.Contains(output, "raw-firebase-key") {
+		t.Fatalf("Firebase key survived text redaction: %s", output)
+	}
+	if !strings.Contains(output, "request_id=req-1") {
+		t.Fatalf("safe query parameter was removed: %s", output)
 	}
 }
 
@@ -94,7 +110,8 @@ func TestJSONLineSanitizesSemanticURLFields(t *testing.T) {
 		"request_url":"https://request-user:request-pass@example.com/path?code=request-code",
 		"nested":{"uri":"https://uri-user:uri-pass@example.com/path?state=uri-state"},
 		"redirect_location":"https://location-user:location-pass@example.com/path?password=location-password",
-		"http-referer":"https://referer-user:referer-pass@example.com/path?api_key=referer-key"
+		"http-referer":"https://referer-user:referer-pass@example.com/path?api_key=referer-key",
+		"firebase_url":"https://firebase.example/resource?key=raw-firebase-key&request_id=req-2"
 	}`
 
 	output := New().JSONLine(input)
@@ -105,6 +122,7 @@ func TestJSONLineSanitizesSemanticURLFields(t *testing.T) {
 		"uri-user", "uri-pass", "uri-state",
 		"location-user", "location-pass", "location-password",
 		"referer-user", "referer-pass", "referer-key",
+		"raw-firebase-key",
 	} {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("output contains URL-sensitive value %q: %s", forbidden, output)
@@ -112,6 +130,9 @@ func TestJSONLineSanitizesSemanticURLFields(t *testing.T) {
 	}
 	if !strings.Contains(output, "request_id=req-1") {
 		t.Fatalf("safe URL query value was removed: %s", output)
+	}
+	if !strings.Contains(output, "request_id=req-2") {
+		t.Fatalf("safe Firebase URL query value was removed: %s", output)
 	}
 }
 

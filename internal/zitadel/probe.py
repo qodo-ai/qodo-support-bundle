@@ -40,7 +40,7 @@ REASON_CONNECTION_ERROR = "connection_error"
 TIMEOUT_SENTINEL = {"schema_version": 1, "reason": "exec_timeout"}
 
 
-class ProbeTimeout(Exception):
+class ProbeTimeoutError(Exception):
     """Internal alarm used only to emit a fixed timeout sentinel."""
 
 
@@ -235,7 +235,15 @@ def configured_probe(timeout: float) -> dict[str, object]:
             return configuration_failure(REASON_AUTH_BACKEND_NOT_OIDC)
         connection = ZitadelConnectionConfig.from_settings()
         issuer = connection.issuer
-    except (ImportError, OSError, ValueError, TypeError, AttributeError, RuntimeError):
+    except (
+        ImportError,
+        KeyError,
+        OSError,
+        ValueError,
+        TypeError,
+        AttributeError,
+        RuntimeError,
+    ):
         return configuration_failure(REASON_SETTINGS_UNAVAILABLE)
     try:
         issuer = validate_issuer(issuer)
@@ -249,7 +257,7 @@ def configured_probe(timeout: float) -> dict[str, object]:
 
 
 def alarm_timeout(_signum: int, _frame: FrameType | None) -> NoReturn:
-    raise ProbeTimeout
+    raise ProbeTimeoutError
 
 
 def main() -> None:
@@ -264,7 +272,7 @@ def main() -> None:
         signal.setitimer(signal.ITIMER_REAL, timeout)
         try:
             result = configured_probe(timeout)
-        except ProbeTimeout:
+        except ProbeTimeoutError:
             result = TIMEOUT_SENTINEL
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)

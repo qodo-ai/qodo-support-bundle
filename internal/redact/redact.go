@@ -21,7 +21,7 @@ type RulesetMetadata struct {
 	SHA256  string `json:"sha256"`
 }
 
-const sensitiveAssignmentKeyPattern = `aws[_-]?secret[_-]?access[_-]?key|aws[_-]?access[_-]?key[_-]?id|access[_-]?token|refresh[_-]?token|id[_-]?token|code[_-]?verifier|saml[_-]?response|token|api[_-]?key|password|passwd|secret|client[_-]?secret|client[_-]?assertion|authorization|proxy[_-]?authorization|cookie|set-cookie|credentials?|private[_-]?key|email|first[_-]?name|last[_-]?name|full[_-]?name|phone|address|ssn|mrn|date[_-]?of[_-]?birth|birth[_-]?date|dob`
+const sensitiveAssignmentKeyPattern = `aws[_-]?secret[_-]?access[_-]?key|aws[_-]?access[_-]?key[_-]?id|access[_-]?token|refresh[_-]?token|id[_-]?token|code[_-]?verifier|saml[_-]?response|session(?:[_-]?id)?|token|api[_-]?key|password|passwd|secret|client[_-]?secret|client[_-]?assertion|authorization|proxy[_-]?authorization|cookie|set-cookie|credentials?|private[_-]?key|email|first[_-]?name|last[_-]?name|full[_-]?name|phone|address|ssn|mrn|date[_-]?of[_-]?birth|birth[_-]?date|dob`
 
 var sensitiveKeys = map[string]struct{}{
 	"accesstoken":        {},
@@ -109,7 +109,7 @@ func New() *Redactor {
 			},
 			{
 				expression: regexp.MustCompile(
-					`(?i)([?&](?:access_token|refresh_token|id_token|api_key|password|client_secret|code_verifier|code|state)=)[^&#\s]+`,
+					`(?i)([?&](?:access_token|refresh_token|id_token|api_key|password|client_secret|code_verifier|code|state|key)=)[^&#\s]+`,
 				),
 				replacement: `${1}` + Replacement,
 			},
@@ -246,9 +246,7 @@ func (redactor *Redactor) URL(rawURL string) string {
 	query := parsed.Query()
 	for key, values := range query {
 		for index, value := range values {
-			if IsSensitiveKey(key) ||
-				strings.EqualFold(key, "code") ||
-				strings.EqualFold(key, "state") {
+			if isSensitiveURLQueryKey(key) {
 				values[index] = Replacement
 			} else {
 				values[index] = redactor.Text(value)
@@ -277,15 +275,20 @@ func (redactor *Redactor) redactMalformedURLQuery(rawURL string) string {
 		if err != nil {
 			decodedKey = key
 		}
-		if IsSensitiveKey(decodedKey) ||
-			strings.EqualFold(decodedKey, "code") ||
-			strings.EqualFold(decodedKey, "state") {
+		if isSensitiveURLQueryKey(decodedKey) {
 			parts[index] = key + "=" + Replacement
 			continue
 		}
 		parts[index] = redactor.Text(part)
 	}
 	return redactor.Text(rawURL[:queryStart]) + "?" + strings.Join(parts, "&")
+}
+
+func isSensitiveURLQueryKey(key string) bool {
+	return IsSensitiveKey(key) ||
+		strings.EqualFold(key, "code") ||
+		strings.EqualFold(key, "state") ||
+		strings.EqualFold(key, "key")
 }
 
 // Value recursively sanitizes JSON-compatible data.
