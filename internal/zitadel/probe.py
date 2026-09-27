@@ -13,6 +13,7 @@ from types import FrameType
 from typing import Mapping, NoReturn
 from urllib.parse import urlsplit
 
+
 MAX_RESPONSE_BYTES = 256 * 1024
 STATUS_PASSED = "passed"
 STATUS_FAILED = "failed"
@@ -158,7 +159,10 @@ def read_json(
                         else REASON_HTTP_ERROR
                     )
                     return None, reason, status
-                if response.headers.get("content-encoding", "identity").lower() != "identity":
+                if (
+                    response.headers.get("content-encoding", "identity").lower()
+                    != "identity"
+                ):
                     return None, REASON_UNSUPPORTED_ENCODING, status
                 body = bytearray()
                 for chunk in response.iter_raw():
