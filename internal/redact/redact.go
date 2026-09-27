@@ -74,6 +74,12 @@ var textQueryAssignmentPattern = regexp.MustCompile(
 	`[?&][^=&#\s]*=[^&#\s]*`,
 )
 
+var apiKeySuffixPattern = regexp.MustCompile(`(?i)(?:^|[_.-])api[_.-]?key$`)
+
+var jsonAssignmentPrefixPattern = regexp.MustCompile(
+	`["']?([A-Za-z0-9_.-]+)["']?[ \t]*[:=][ \t]*$`,
+)
+
 // Redactor removes common credential and personal-data forms from diagnostic data.
 type Redactor struct {
 	patterns []replacementPattern
@@ -161,6 +167,9 @@ func (redactor *Redactor) Ruleset() RulesetMetadata {
 
 // IsSensitiveKey reports whether a field must be removed rather than inspected.
 func IsSensitiveKey(key string) bool {
+	if apiKeySuffixPattern.MatchString(key) {
+		return true
+	}
 	normalized := strings.Map(func(character rune) rune {
 		switch {
 		case character >= 'A' && character <= 'Z':
@@ -368,11 +377,16 @@ func (redactor *Redactor) JSONLine(line string) string {
 	var value any
 	if err := json.Unmarshal([]byte(line), &value); err != nil {
 		if jsonStart := strings.IndexAny(line, "{["); jsonStart > 0 {
+			prefix := line[:jsonStart]
+			if assignment := jsonAssignmentPrefixPattern.FindStringSubmatch(prefix); assignment != nil &&
+				IsSensitiveKey(assignment[1]) {
+				return redactor.Text(prefix) + Replacement
+			}
 			var suffix any
 			if suffixErr := json.Unmarshal([]byte(line[jsonStart:]), &suffix); suffixErr == nil {
 				sanitized, marshalErr := json.Marshal(redactor.Value("", suffix))
 				if marshalErr == nil {
-					return redactor.Text(line[:jsonStart]) + string(sanitized)
+					return redactor.Text(prefix) + string(sanitized)
 				}
 			}
 		}

@@ -829,6 +829,21 @@ func TestSanitizeLogRedactsUnterminatedPrivateKey(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogRedactsSensitiveJSONAssignment(t *testing.T) {
+	t.Parallel()
+	input := []byte(`request_id=req-123 password={"note":"raw-secret"}` + "\n")
+
+	output := string(sanitizeLog(input, redact.New()))
+
+	if strings.Contains(output, "raw-secret") {
+		t.Fatalf("output contains assigned JSON secret: %s", output)
+	}
+	if !strings.Contains(output, "request_id=req-123") ||
+		!strings.Contains(output, "password="+redact.Replacement) {
+		t.Fatalf("unexpected sanitized output: %s", output)
+	}
+}
+
 func TestSanitizeLogPrivateKeyStateIsPerCall(t *testing.T) {
 	t.Parallel()
 	redactor := redact.New()

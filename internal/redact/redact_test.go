@@ -128,6 +128,29 @@ func TestJSONLineRedactsSensitiveFieldsRecursively(t *testing.T) {
 	}
 }
 
+func TestJSONLineRedactsPrefixedAPIKeyFields(t *testing.T) {
+	t.Parallel()
+	input := `{
+		"DYNACONF_AUTH__QODO_PLATFORM__API_KEY":"opaque-platform-credential",
+		"auth.qodo_platform.api_key":"opaque-config-credential",
+		"request_id":"req-123"
+	}`
+
+	output := New().JSONLine(input)
+
+	for _, forbidden := range []string{
+		"opaque-platform-credential",
+		"opaque-config-credential",
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("output contains API key %q: %s", forbidden, output)
+		}
+	}
+	if !strings.Contains(output, `"request_id":"req-123"`) {
+		t.Fatalf("safe correlation field was removed: %s", output)
+	}
+}
+
 func TestJSONLineRedactsEncodedQueryNamesInOrdinaryMessage(t *testing.T) {
 	t.Parallel()
 	input := `{"message":"before https://example.test/path?%61ccess_token=raw-access&k%65y=raw-key&request_id=req-2 after","component":"worker"}`
