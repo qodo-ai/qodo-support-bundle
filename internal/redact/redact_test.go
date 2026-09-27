@@ -57,16 +57,41 @@ func TestTextRedactsAdditionalSensitiveAssignments(t *testing.T) {
 	}
 }
 
-func TestTextRedactsFirebaseKeyQueryParameter(t *testing.T) {
+func TestTextRedactsEncodedSensitiveQueryParameterNames(t *testing.T) {
 	t.Parallel()
 	output := New().Text(
-		`request failed: https://firebase.example/resource?key=raw-firebase-key&request_id=req-1`,
+		`before https://example.test/resource?%61ccess_token=raw-access-token&k%65y=raw-firebase-key&request_id=req-1 after`,
 	)
-	if strings.Contains(output, "raw-firebase-key") {
-		t.Fatalf("Firebase key survived text redaction: %s", output)
+	for _, forbidden := range []string{"raw-access-token", "raw-firebase-key"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("encoded query key survived text redaction: %s", output)
+		}
 	}
-	if !strings.Contains(output, "request_id=req-1") {
-		t.Fatalf("safe query parameter was removed: %s", output)
+	for _, expected := range []string{
+		`?%61ccess_token=` + Replacement,
+		`&k%65y=` + Replacement,
+		`&request_id=req-1 after`,
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("encoded key or surrounding text changed: %s", output)
+		}
+	}
+}
+
+func TestTextFailsClosedForMalformedEncodedQueryKey(t *testing.T) {
+	t.Parallel()
+	output := New().Text(
+		`before https://example.test/resource?%zz=raw-malformed&request_id=req-1 after`,
+	)
+	if strings.Contains(output, "raw-malformed") {
+		t.Fatalf("malformed query key disclosed its value: %s", output)
+	}
+	if !strings.Contains(
+		output,
+		`before https://example.test/resource?%zz=`+Replacement+
+			`&request_id=req-1 after`,
+	) {
+		t.Fatalf("malformed key or surrounding text changed: %s", output)
 	}
 }
 
@@ -99,6 +124,29 @@ func TestJSONLineRedactsSensitiveFieldsRecursively(t *testing.T) {
 	for _, forbidden := range []string{"user@example.com", "abc123", "two words"} {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("output contains sensitive value %q: %s", forbidden, output)
+		}
+	}
+}
+
+func TestJSONLineRedactsEncodedQueryNamesInOrdinaryMessage(t *testing.T) {
+	t.Parallel()
+	input := `{"message":"before https://example.test/path?%61ccess_token=raw-access&k%65y=raw-key&request_id=req-2 after","component":"worker"}`
+
+	output := New().JSONLine(input)
+
+	for _, forbidden := range []string{"raw-access", "raw-key"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("ordinary JSON field disclosed %q: %s", forbidden, output)
+		}
+	}
+	for _, expected := range []string{
+		`%61ccess_token=` + Replacement,
+		`k%65y=` + Replacement,
+		`request_id=req-2 after`,
+		`"component":"worker"`,
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("ordinary JSON field lost safe text %q: %s", expected, output)
 		}
 	}
 }
@@ -202,18 +250,36 @@ func TestURLRedactsCodeVerifier(t *testing.T) {
 	}
 }
 
+func TestURLRedactsEncodedSensitiveQueryNames(t *testing.T) {
+	t.Parallel()
+	output := New().URL(
+		"https://example.com/resource?%61ccess_token=raw-access&k%65y=raw-key&request_id=req-123",
+	)
+
+	for _, forbidden := range []string{"raw-access", "raw-key"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("parsed URL contains sensitive value %q: %s", forbidden, output)
+		}
+	}
+	if !strings.Contains(output, "request_id=req-123") {
+		t.Fatalf("safe parsed URL query parameter was removed: %s", output)
+	}
+}
+
 func TestURLMalformedEscapesStillRedactUserinfo(t *testing.T) {
 	t.Parallel()
 	tests := []string{
 		"https://user:password@example.com/path/%zz?request_id=req-123#secret",
 		"https://user:p@ssword@example.com/%gh?code_verifier=raw-verifier",
 		"https://example.com/%gh?session=raw-session&request_id=req-123",
+		"https://example.com/%gh?%zz=raw-malformed&request_id=req-123",
 	}
 
 	for _, input := range tests {
 		output := New().URL(input)
 		for _, forbidden := range []string{
-			"user:", "password", "p@ssword", "raw-verifier", "raw-session", "#secret",
+			"user:", "password", "p@ssword", "raw-verifier", "raw-session",
+			"raw-malformed", "#secret",
 		} {
 			if strings.Contains(output, forbidden) {
 				t.Errorf("output contains sensitive value %q: %s", forbidden, output)

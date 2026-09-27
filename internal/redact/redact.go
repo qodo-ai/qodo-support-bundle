@@ -3,6 +3,7 @@ package redact
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -11,8 +12,9 @@ import (
 )
 
 const (
-	Replacement    = "[REDACTED]"
-	RulesetVersion = "1"
+	Replacement             = "[REDACTED]"
+	RulesetVersion          = "1"
+	maxEncodedQueryKeyBytes = 2048
 )
 
 // RulesetMetadata identifies the exact built-in redaction policy.
@@ -68,6 +70,10 @@ var malformedURLUserinfoPattern = regexp.MustCompile(
 	`(?i)((?:[a-z][a-z0-9+.-]*:)?//)[^/?#\s]*@`,
 )
 
+var textQueryAssignmentPattern = regexp.MustCompile(
+	`[?&][^=&#\s]*=[^&#\s]*`,
+)
+
 // Redactor removes common credential and personal-data forms from diagnostic data.
 type Redactor struct {
 	patterns []replacementPattern
@@ -108,12 +114,6 @@ func New() *Redactor {
 				replacement: `${1}` + Replacement,
 			},
 			{
-				expression: regexp.MustCompile(
-					`(?i)([?&](?:access_token|refresh_token|id_token|api_key|password|client_secret|code_verifier|code|state|key)=)[^&#\s]+`,
-				),
-				replacement: `${1}` + Replacement,
-			},
-			{
 				expression:  regexp.MustCompile(`(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b`),
 				replacement: Replacement,
 			},
@@ -140,6 +140,8 @@ func (redactor *Redactor) Ruleset() RulesetMetadata {
 		Replacement,
 		sensitiveAssignmentKeyPattern,
 		malformedURLUserinfoPattern.String(),
+		textQueryAssignmentPattern.String(),
+		fmt.Sprint(maxEncodedQueryKeyBytes),
 	}
 	keys := make([]string, 0, len(sensitiveKeys))
 	for key := range sensitiveKeys {
@@ -212,7 +214,33 @@ func (redactor *Redactor) Text(value string) string {
 	for _, pattern := range redactor.patterns {
 		result = pattern.expression.ReplaceAllString(result, pattern.replacement)
 	}
-	return result
+	return redactTextQueryAssignments(result)
+}
+
+func redactTextQueryAssignments(value string) string {
+	return textQueryAssignmentPattern.ReplaceAllStringFunc(value, func(assignment string) string {
+		equals := strings.IndexByte(assignment, '=')
+		if equals < 0 {
+			return assignment
+		}
+		encodedKey := assignment[1:equals]
+		decodedKey, err := decodeTextQueryKey(encodedKey)
+		if err == nil && !isSensitiveURLQueryKey(decodedKey) {
+			return assignment
+		}
+		return assignment[:equals+1] + Replacement
+	})
+}
+
+func decodeTextQueryKey(encodedKey string) (string, error) {
+	if encodedKey == "" || len(encodedKey) > maxEncodedQueryKeyBytes {
+		return "", errors.New("invalid query key length")
+	}
+	decodedKey, err := url.QueryUnescape(encodedKey)
+	if err != nil {
+		return "", fmt.Errorf("decode query key: %w", err)
+	}
+	return decodedKey, nil
 }
 
 // Header preserves safe header values and records sensitive headers as present.
@@ -271,11 +299,8 @@ func (redactor *Redactor) redactMalformedURLQuery(rawURL string) string {
 			parts[index] = redactor.Text(part)
 			continue
 		}
-		decodedKey, err := url.QueryUnescape(key)
-		if err != nil {
-			decodedKey = key
-		}
-		if isSensitiveURLQueryKey(decodedKey) {
+		decodedKey, err := decodeTextQueryKey(key)
+		if err != nil || isSensitiveURLQueryKey(decodedKey) {
 			parts[index] = key + "=" + Replacement
 			continue
 		}
