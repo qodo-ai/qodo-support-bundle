@@ -147,6 +147,8 @@ func (redactor *Redactor) Ruleset() RulesetMetadata {
 		sensitiveAssignmentKeyPattern,
 		malformedURLUserinfoPattern.String(),
 		textQueryAssignmentPattern.String(),
+		apiKeySuffixPattern.String(),
+		jsonAssignmentPrefixPattern.String(),
 		fmt.Sprint(maxEncodedQueryKeyBytes),
 	}
 	keys := make([]string, 0, len(sensitiveKeys))
