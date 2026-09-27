@@ -23,7 +23,7 @@ func TestFinalizeCreatesRestrictedChecksummedArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer builder.Close()
-	if err := builder.Add("browser/network.jsonl", []byte("{\"status\":200}\n")); err != nil {
+	if err := builder.Add("kubernetes/pods.jsonl", []byte("{\"kind\":\"Pod\"}\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -48,7 +48,7 @@ func TestFinalizeCreatesRestrictedChecksummedArchive(t *testing.T) {
 
 	files := readArchive(t, outputPath)
 	for _, path := range []string{
-		"browser/network.jsonl",
+		"kubernetes/pods.jsonl",
 		"manifest.json",
 		"checksums.sha256",
 	} {
@@ -57,7 +57,7 @@ func TestFinalizeCreatesRestrictedChecksummedArchive(t *testing.T) {
 		}
 	}
 	checksums := string(files["checksums.sha256"])
-	if !strings.Contains(checksums, "  browser/network.jsonl\n") ||
+	if !strings.Contains(checksums, "  kubernetes/pods.jsonl\n") ||
 		!strings.Contains(checksums, "  manifest.json\n") {
 		t.Fatalf("unexpected checksums:\n%s", checksums)
 	}
@@ -65,9 +65,10 @@ func TestFinalizeCreatesRestrictedChecksummedArchive(t *testing.T) {
 	if err := json.Unmarshal(files["manifest.json"], &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if len(manifest.Artifacts) != 1 ||
-		manifest.Artifacts[0].Path != "browser/network.jsonl" ||
-		manifest.Artifacts[0].Size != int64(len("{\"status\":200}\n")) ||
+	if manifest.SchemaVersion != "3" ||
+		len(manifest.Artifacts) != 1 ||
+		manifest.Artifacts[0].Path != "kubernetes/pods.jsonl" ||
+		manifest.Artifacts[0].Size != int64(len("{\"kind\":\"Pod\"}\n")) ||
 		len(manifest.Artifacts[0].SHA256) != 64 {
 		t.Fatalf("unexpected manifest artifacts: %+v", manifest.Artifacts)
 	}

@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -54,6 +55,7 @@ func TestCollectRejectsNonPositiveTimeout(t *testing.T) {
 			Config{
 				Namespace:        "qodo",
 				Timeout:          timeout,
+				MaxMetadataBytes: 1 << 20,
 				MaxLogBytes:      1 << 20,
 				MaxTotalLogBytes: 10 << 20,
 			},
@@ -63,6 +65,29 @@ func TestCollectRejectsNonPositiveTimeout(t *testing.T) {
 		)
 		if err == nil || !strings.Contains(err.Error(), "timeout must be positive") {
 			t.Fatalf("timeout %s returned %v", timeout, err)
+		}
+	}
+}
+
+func TestCollectRejectsUnsafeMetadataBounds(t *testing.T) {
+	t.Parallel()
+	for _, limit := range []int64{0, -1, MaximumMetadataBytes + 1} {
+		_, err := Collect(
+			context.Background(),
+			Config{
+				Namespace:        "qodo",
+				Since:            time.Minute,
+				Timeout:          time.Second,
+				MaxMetadataBytes: limit,
+				MaxLogBytes:      1024,
+				MaxTotalLogBytes: 1024,
+			},
+			&fakeRunner{},
+			&memorySink{},
+			redact.New(),
+		)
+		if err == nil || !strings.Contains(err.Error(), "max metadata bytes") {
+			t.Fatalf("limit %d returned %v", limit, err)
 		}
 	}
 }
@@ -83,6 +108,7 @@ func TestCollectStopsBeforeNamespaceScanWhenCanceled(t *testing.T) {
 		Config{
 			Namespace:        "qodo",
 			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
 			MaxLogBytes:      1 << 20,
 			MaxTotalLogBytes: 10 << 20,
 		},
@@ -144,6 +170,7 @@ func TestCollectWritesSanitizedMetadataEventsAndLogs(t *testing.T) {
 			Selector:         "app=platform",
 			Since:            30 * time.Minute,
 			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
 			MaxLogBytes:      1 << 20,
 			MaxTotalLogBytes: 10 << 20,
 		},
@@ -198,6 +225,7 @@ func TestCollectFailsWhenPodsCannotBeListed(t *testing.T) {
 			Namespace:        "qodo",
 			Since:            time.Minute,
 			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
 			MaxLogBytes:      1024,
 			MaxTotalLogBytes: 1024,
 		},
@@ -259,6 +287,7 @@ func TestCollectCoversMultipleNamespacesAndInitContainers(t *testing.T) {
 			Namespaces:       []string{"qodo", "zitadel"},
 			Since:            30 * time.Minute,
 			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
 			MaxLogBytes:      1 << 20,
 			MaxTotalLogBytes: 10 << 20,
 			Progress: func(progress Progress) {
@@ -315,6 +344,150 @@ func TestCollectCoversMultipleNamespacesAndInitContainers(t *testing.T) {
 	}
 }
 
+func TestCollectEnforcesAggregateMetadataBudgetAcrossNamespaces(t *testing.T) {
+	t.Parallel()
+	podForNamespace := func(namespace string) pod {
+		current := pod{
+			Metadata: objectMetadata{
+				Name:      "platform-0",
+				Namespace: namespace,
+				Labels: map[string]string{
+					"app": strings.Repeat("platform", 8),
+				},
+			},
+		}
+		current.Spec.Containers = []containerSpec{{Name: "platform"}}
+		current.Status.Phase = "Running"
+		current.Status.ContainerStatuses = []containerStatus{{
+			Name:         "platform",
+			RestartCount: 1,
+			LastState: map[string]containerState{
+				"terminated": {Reason: "Error"},
+			},
+		}}
+		return current
+	}
+	eventForNamespace := func(namespace string) event {
+		return event{
+			Metadata: objectMetadata{Name: "started", Namespace: namespace},
+			Involved: objectReference{
+				Kind:      "Pod",
+				Namespace: namespace,
+				Name:      "platform-0",
+			},
+			Type:    "Warning",
+			Reason:  "Restarted",
+			Message: strings.Repeat("bounded event ", 8),
+			Count:   1,
+		}
+	}
+	firstPod := podForNamespace("one")
+	podRecords, err := marshalPodRecords([]pod{firstPod}, redact.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	containerRecords, _, _, err := marshalContainerEventRecords(
+		[]pod{firstPod},
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventRecords, err := marshalEventRecords(
+		[]event{eventForNamespace("one")},
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstNamespaceBytes := int64(
+		len(podRecords) + len(containerRecords) + len(eventRecords),
+	)
+	metadataLimit := firstNamespaceBytes + 1
+
+	runner := &fakeRunner{
+		run: func(arguments string) (CommandResult, error) {
+			namespace := "one"
+			for _, candidate := range []string{"two", "three"} {
+				if strings.Contains(arguments, "--namespace "+candidate) {
+					namespace = candidate
+				}
+			}
+			switch {
+			case strings.Contains(arguments, "get pods"):
+				data, marshalErr := json.Marshal(podList{
+					Items: []pod{podForNamespace(namespace)},
+				})
+				return CommandResult{Stdout: data}, marshalErr
+			case strings.Contains(arguments, "get events"):
+				data, marshalErr := json.Marshal(eventList{
+					Items: []event{eventForNamespace(namespace)},
+				})
+				return CommandResult{Stdout: data}, marshalErr
+			case strings.HasPrefix(arguments, "logs "):
+				return CommandResult{Stdout: []byte("ready\n")}, nil
+			default:
+				return CommandResult{}, errors.New("unexpected command")
+			}
+		},
+	}
+	sink := &memorySink{}
+
+	report, err := Collect(
+		context.Background(),
+		Config{
+			Namespaces:       []string{"one", "two", "three"},
+			Since:            time.Minute,
+			Timeout:          time.Second,
+			MaxMetadataBytes: metadataLimit,
+			MaxLogBytes:      1 << 20,
+			MaxTotalLogBytes: 10 << 20,
+			LogWorkers:       2,
+		},
+		runner,
+		sink,
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stagedMetadataBytes int64
+	for path, data := range sink.files {
+		if strings.HasPrefix(path, "kubernetes/pods/") ||
+			strings.HasPrefix(path, "kubernetes/events/") ||
+			strings.HasPrefix(path, "kubernetes/container_events/") {
+			stagedMetadataBytes += int64(len(data))
+		}
+	}
+	if stagedMetadataBytes != firstNamespaceBytes ||
+		report.MetadataBytes != firstNamespaceBytes ||
+		stagedMetadataBytes > metadataLimit {
+		t.Fatalf(
+			"metadata budget failed: staged=%d report=%d limit=%d",
+			stagedMetadataBytes,
+			report.MetadataBytes,
+			metadataLimit,
+		)
+	}
+	if report.MetadataLimitBytes != metadataLimit ||
+		report.TruncatedMetadataFiles != 1 ||
+		report.MetadataNamespacesSkipped != 1 {
+		t.Fatalf("unexpected metadata report: %+v", report)
+	}
+	if containsCall(runner.calls, "--namespace three") {
+		t.Fatalf("collector continued after exhaustion: %+v", runner.calls)
+	}
+	issueText := ""
+	for _, issue := range report.Issues {
+		issueText += issue.Message + " "
+	}
+	if !strings.Contains(issueText, "aggregate metadata limit reached") ||
+		!strings.Contains(issueText, "skipped 1 namespaces") {
+		t.Fatalf("missing metadata issues: %+v", report.Issues)
+	}
+}
+
 func TestCollectDiscoversApplicationNamespacesWhenSystemScopeIsExcluded(
 	t *testing.T,
 ) {
@@ -347,6 +520,7 @@ func TestCollectDiscoversApplicationNamespacesWhenSystemScopeIsExcluded(
 			ExcludeSystemNamespaces: true,
 			Since:                   time.Minute,
 			Timeout:                 time.Second,
+			MaxMetadataBytes:        1 << 20,
 			MaxLogBytes:             1024,
 			MaxTotalLogBytes:        1024,
 		},
@@ -413,6 +587,7 @@ func TestCollectContinuesWhenOneOfMultipleNamespacesIsForbidden(t *testing.T) {
 			Namespaces:       []string{"qodo", "zitadel"},
 			Since:            time.Minute,
 			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
 			MaxLogBytes:      1024,
 			MaxTotalLogBytes: 1024,
 		},
@@ -467,6 +642,7 @@ func TestCollectEnforcesAggregateLogBudgetAcrossStreams(t *testing.T) {
 			Namespace:        "qodo",
 			Since:            time.Minute,
 			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
 			MaxLogBytes:      4,
 			MaxTotalLogBytes: 10,
 			LogWorkers:       3,
@@ -493,12 +669,18 @@ func TestCollectEnforcesAggregateLogBudgetAcrossStreams(t *testing.T) {
 	if !reflect.DeepEqual(runner.logLimits, []int64{4, 4, 2}) {
 		t.Fatalf("unexpected per-command log limits: %+v", runner.logLimits)
 	}
-	if len(report.Issues) != 2 {
+	if len(report.Issues) != 4 {
 		t.Fatalf("unexpected aggregate budget issues: %+v", report.Issues)
 	}
-	issueMessages := report.Issues[0].Message + " " + report.Issues[1].Message
-	if !strings.Contains(issueMessages, "truncated this stream") ||
-		!strings.Contains(issueMessages, "skipped 1 log streams") {
+	var issueMessages strings.Builder
+	for _, issue := range report.Issues {
+		issueMessages.WriteString(issue.Message)
+		issueMessages.WriteByte(' ')
+	}
+	messages := issueMessages.String()
+	if !strings.Contains(messages, "truncated this stream") ||
+		!strings.Contains(messages, "skipped 1 log streams") ||
+		!strings.Contains(messages, "per-stream byte limit") {
 		t.Fatalf("missing aggregate budget issue: %+v", report.Issues)
 	}
 	if containsCall(runner.calls, "--container fourth") {
@@ -637,23 +819,16 @@ func TestStoppingBoundedBufferTerminatesAtScanLimit(t *testing.T) {
 	}
 }
 
-func TestReadLogUsesHARWindowAndCorrelationContext(t *testing.T) {
+func TestReadLogUsesSinceAndRetainsBoundedLog(t *testing.T) {
 	t.Parallel()
-	since := time.Date(2026, 9, 15, 6, 1, 0, 0, time.UTC)
-	until := since.Add(time.Minute)
 	runner := &fakeRunner{
 		run: func(arguments string) (CommandResult, error) {
-			if !strings.Contains(
-				arguments,
-				"--since-time 2026-09-15T06:01:00Z",
-			) {
-				return CommandResult{}, errors.New("missing HAR lower bound")
+			if !strings.Contains(arguments, "--since 1800s") {
+				return CommandResult{}, errors.New("missing duration lower bound")
 			}
 			return CommandResult{Stdout: []byte(
 				"2026-09-15T06:01:01Z before\n" +
-					"2026-09-15T06:01:02Z request_id=request-1234 error\n" +
-					"2026-09-15T06:01:03Z after\n" +
-					"2026-09-15T06:03:00Z too-late\n",
+					"2026-09-15T06:01:02Z error\n",
 			)}, nil
 		},
 	}
@@ -661,12 +836,8 @@ func TestReadLogUsesHARWindowAndCorrelationContext(t *testing.T) {
 	result := readLog(
 		context.Background(),
 		Config{
-			SinceTime:               since,
-			UntilTime:               until,
-			CorrelationIDs:          []string{"request-1234"},
-			CorrelationContextLines: 1,
-			Timeout:                 time.Second,
-			MaxLogScanBytes:         100 << 20,
+			Since:   30 * time.Minute,
+			Timeout: time.Second,
 		},
 		runner,
 		redact.New(),
@@ -679,20 +850,17 @@ func TestReadLogUsesHARWindowAndCorrelationContext(t *testing.T) {
 		},
 	)
 
-	if result.issue != nil || result.matchedLines != 1 {
-		t.Fatalf("unexpected correlated result: %+v", result)
+	if result.issue != nil {
+		t.Fatalf("unexpected log result: %+v", result)
 	}
-	if !reflect.DeepEqual(runner.logLimits, []int64{100 << 20}) {
-		t.Fatalf("raw scan did not use its independent cap: %+v", runner.logLimits)
+	if !reflect.DeepEqual(runner.logLimits, []int64{1 << 20}) {
+		t.Fatalf("log did not use its retained cap: %+v", runner.logLimits)
 	}
 	text := string(result.data)
-	for _, expected := range []string{"before", "request_id=request-1234", "after"} {
+	for _, expected := range []string{"before", "error"} {
 		if !strings.Contains(text, expected) {
-			t.Fatalf("missing %q from correlated log: %s", expected, text)
+			t.Fatalf("missing %q from log: %s", expected, text)
 		}
-	}
-	if strings.Contains(text, "too-late") {
-		t.Fatalf("upper time bound was not applied: %s", text)
 	}
 }
 

@@ -1,23 +1,22 @@
 # Qodo Support Bundle
 
-`qodo-support-bundle` is a portable Go CLI for customer-assisted diagnostics. It
-imports a browser-exported HAR, extracts request and trace correlation IDs,
-collects matching Kubernetes log context through the customer's existing
-`kubectl` access, redacts sensitive values, and creates a checksummed `.tar.gz`
-archive.
+`qodo-support-bundle` is a portable, read-only CLI for collecting bounded and
+redacted Kubernetes diagnostics. It collects pod metadata, events, current and
+previous container logs, and an optional Platform-to-Zitadel connectivity
+report.
 
-The collector is read-only. It never collects Kubernetes Secrets, ConfigMaps,
-workload environment variables, or HAR request/response bodies.
+## Prerequisites and scope
 
-## Prerequisites
-
-- The `qodo-support-bundle` binary for the customer's operating system.
+- A release binary for the operator's platform.
 - `kubectl` configured for the target cluster.
-- Permission to list namespaces plus read access to pods, pod logs, and events
-  in the application namespaces.
-- A HAR exported by the customer from browser developer tools.
+- Read access to pods, pod logs, and events in each collected namespace.
+- Cluster-scoped `list` access to namespaces only when automatic discovery or
+  `--all-namespaces` is used.
+- `pods/exec` permission only when `--check-zitadel` is requested.
 
-Minimal Kubernetes permissions:
+The collector never requests Secrets, ConfigMaps, or new workload resources,
+and it does not retain workload environment variables from the Pod metadata it
+reads. A namespace-scoped baseline role is:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -30,215 +29,212 @@ rules:
     verbs: ["get", "list"]
 ```
 
-Bind this role only in the application namespaces and remove the bindings after
-collection when access is temporary. Automatic discovery also requires
-cluster-scoped `list` access to `namespaces`.
+For the optional probe, add `create` on `pods/exec` only in the selected
+Platform namespace and remove temporary bindings after collection.
 
-## Customer workflow
-
-1. Open browser developer tools and select **Network**.
-2. Enable **Preserve log**, clear existing requests, and reproduce the issue.
-3. Export the requests as a HAR file.
-4. Run:
+## Collect
 
 ```bash
-qodo-support-bundle collect ~/Downloads/qodo-login.har
+qodo-support-bundle collect
 ```
 
-That command uses the current `kubectl` context, discovers application
-namespaces, excludes Kubernetes and managed GKE control-plane namespaces,
-imports the required HAR, uses its clock-adjusted time range and correlation
-headers to select container log context, reads logs concurrently, shows
-progress, and writes a timestamped bundle in the current directory. Before
-accessing the cluster, it resolves symlinks to an absolute `kubectl` path and
-prints that path so the operator can verify which client will run.
+By default, the command uses the current kubeconfig and context, discovers
+application namespaces, excludes known Kubernetes and managed GKE system
+namespaces, and writes:
 
-Use `--context` only when the current `kubectl` context is not the target
-cluster. Explicit namespace scope remains available for shared clusters:
+```text
+~/qodo-support-bundles/qodo-support-bundle-<UTC timestamp>.tar.gz
+```
+
+The dedicated output directory and archive use owner-only permissions where
+supported. `--output` is an exact archive file-path override; it is never
+treated as a directory and existing files are not overwritten.
+
+The command may run from any working directory. Standard `kubectl` resolution
+still applies: without `--kubeconfig`, `KUBECONFIG` or the normal user default
+is used; without `--context`, the current context is used. Explicit values are
+passed as argument-array elements:
 
 ```bash
 qodo-support-bundle collect \
-  --namespace <release-namespace> \
-  ~/Downloads/qodo-login.har
+  --kubeconfig /secure/customer.kubeconfig \
+  --context customer-production \
+  --namespace qodo-onprem \
+  --output /secure/cases/case-123.tar.gz
 ```
 
-Set `<release-namespace>` to the namespace where the Qodo Helm release is
-installed, commonly `qodo-onprem`. Qodo Platform, Portal, and Zitadel are
-workloads in that release namespace, not separate namespaces.
+Use `--namespaces qodo-onprem,rabbitmq-system` for several explicit namespaces,
+or `--all-namespaces` for literal cluster-wide collection. The latter can
+include unrelated workloads in shared clusters. `--selector` narrows pod
+collection within each selected namespace. `--namespace` and `--namespaces`
+are mutually exclusive.
 
-`--namespace`, `--namespaces`, and `--all-namespaces` override automatic
-application discovery. `--har` remains supported as an alternative to the
-positional HAR path.
+Logs are requested with `kubectl logs --since <duration> --timestamps=true`.
+Current and restarted-container previous logs are collected concurrently.
+Defaults and hard bounds are:
 
-To include Kubernetes and managed infrastructure too, request literal
-cluster-wide scope:
+- `--since 30m`
+- `--command-timeout 2m` per Kubernetes command, maximum 30 minutes
+- `--max-metadata-bytes 128 MiB` across staged pod, container-event, and event
+  records, maximum 1 GiB
+- `--max-log-bytes 10 MiB` per stream, maximum 100 MiB
+- `--max-total-log-bytes 1 GiB`, maximum 8 GiB
+- `--log-workers 8`, maximum 64
+
+Once the total log budget is exhausted, remaining streams are skipped and
+recorded as collection issues. The metadata budget is shared across every
+selected namespace. Records are truncated only at complete JSONL line
+boundaries; once exhausted, remaining metadata namespaces are not queried.
+Truncation and skipped namespaces are reported as non-secret partial-collection
+issues. Values matching the bundled redaction rules and multiline private keys
+are removed before files are staged.
+
+Exit code `0` means collection completed. Exit code `3` means a usable partial
+bundle was created; inspect `collection-issues.jsonl`. Fatal setup, cancellation,
+or archive failures return `1`; invalid CLI usage returns `2`.
+
+## Optional Zitadel connectivity probe
+
+The probe runs only when explicitly requested:
+
+```bash
+qodo-support-bundle collect \
+  --namespace qodo-onprem \
+  --check-zitadel \
+  --platform-pod platform-0 \
+  --platform-container platform
+```
+
+With exactly one explicit collection namespace, `--platform-namespace` is
+inferred. It is required for multi-namespace, automatic, or all-namespace
+collection:
 
 ```bash
 qodo-support-bundle collect \
   --all-namespaces \
-  ~/Downloads/qodo-login.har
+  --check-zitadel \
+  --platform-namespace qodo-onprem \
+  --platform-pod platform-0 \
+  --platform-container platform \
+  --probe-timeout 15s
 ```
 
-This discovers every namespace and collects every pod container in the cluster.
-Do not use it on a shared cluster unless the customer has approved including
-non-Qodo workload metadata and logs. It requires cluster-wide permission to
-list namespaces plus the documented pod, log, and event permissions in each
-namespace. Automatic discovery excludes `kube-system`, `kube-public`,
-`kube-node-lease`, the GKE `gke-managed-*` namespaces, Google Managed
-Prometheus system namespaces, and Config Connector system namespaces.
-Application dependencies such as `rabbitmq-system` remain included. Other
-non-Qodo application namespaces may still be collected on a shared cluster.
-Container logs use eight concurrent readers by default; tune this with
-`--log-workers` (maximum 64) for unusually small or large API servers. Each
-stream retains at most 10 MiB by default (`--max-log-bytes`, maximum 100 MiB)
-after scanning at most 32 MiB of raw output (`--max-log-scan-bytes`, maximum
-256 MiB). Concurrent raw scans are capped at 256 MiB. Current plus previous logs
-share a 1 GiB retained-data budget
-(`--max-total-log-bytes`, maximum 8 GiB). Once that aggregate budget is
-exhausted, remaining streams are skipped and reported as non-fatal collection
-issues. HAR input has a 256 MiB hard limit; `--max-har-bytes` can lower it for
-smaller expected captures. Each Kubernetes command defaults to a two-minute
-timeout and `--command-timeout` cannot exceed 30 minutes.
+All target values are required with `--check-zitadel`, and target/probe flags
+are rejected without it. Names are validated as DNS-compatible Kubernetes
+names. Before exec, the CLI performs a bounded exact-pod query and verifies
+that the selected pod and container are running. The pod preflight has its own
+2 MiB bound so ordinary Pod metadata does not consume the probe's stricter
+output allowance.
 
-Add the customer's context directly to the auditable manifest and summary:
+The probe source is embedded in the Go binary. The CLI passes it to the
+container as one `kubectl exec` argument and invokes `python -B -c` without a
+shell, TTY, upload, installed helper, or workload change. The container must
+already provide Python, Platform's `simple_settings`, and HTTPX.
 
-```bash
-qodo-support-bundle collect \
-  --activity "Signing in through the corporate identity provider" \
-  --problem "Login returned to the portal and showed Not authenticated" \
-  ~/Downloads/qodo-login.har
-```
+Inside the container, the probe:
 
-The collector recognizes `request-id`, `x-request-id`, `x-correlation-id`, and
-`traceparent` request or response headers. It computes the median
-browser-to-cluster clock offset from HTTP `Date` headers, applies that offset to
-the HAR window, and retains three lines before and after each matching log line.
-At most 256 unique correlation values are used; overflow is reported as a
-non-fatal collection issue. Use `--correlation-context-lines` and
-`--correlation-window-padding` to tune those bounds. When the HAR contains no
-usable correlation IDs, the adjusted time window still limits the logs, but all
-lines in that window are retained.
+- accepts Platform `zitadel` and `oidc` client types and validates the configured
+  issuer;
+- honors HTTPX's normal proxy and CA environment behavior;
+- sends no authorization or cookie and uses a fresh client for each request;
+- requests only `/.well-known/openid-configuration` and `/oauth/v2/keys`;
+- never follows redirects and requests identity encoding;
+- rejects compressed, oversized (over 256 KiB), malformed, or schema-invalid
+  responses;
+- requires the exact configured issuer, fixed JWKS URI, and nonempty valid
+  RSA, EC, or OKP public-key shapes;
+- has an in-pod real-time deadline in addition to the local kubectl deadline;
+- suppresses settings/import stdout and stderr and emits only bounded
+  schema-v1 JSON with fixed status and reason constants.
 
-Exit code `0` means collection completed. Exit code `3` means a usable partial
-bundle was created; inspect `collection-issues.jsonl` for unavailable resources
-or truncated inputs.
+Probe stdout is capped at 32 KiB. Response bodies, exception strings, kubectl
+stderr, tokens, cookies, and settings dumps are never retained. Valid
+configuration or connectivity failures are diagnostic findings and do not make
+an otherwise complete bundle partial. Failure to execute, read, or strictly
+validate the report makes the bundle partial. A valid report is stored at
+`connectivity/zitadel.json`; the summary and manifest record concise probe
+metadata. The probe does not test login, browser redirects, token issuance, or
+end-user authentication.
 
-## Local viewer
-
-Open a bundle in the offline viewer:
-
-```bash
-qodo-support-bundle serve ./qodo-support-bundle.tar.gz
-```
-
-The command checks every embedded checksum, safely extracts bounded files into
-an owner-only temporary directory, starts a read-only server on a random
-`127.0.0.1` port, and opens the system browser. The default timeline correlates
-browser requests, backend logs, Kubernetes events, and pod lifecycle records in
-horizontal swimlanes. Dense logs are clustered into clickable time slices, and
-fair sampling across container groups prevents one noisy source from hiding the
-other lanes. Lanes expand into namespace, pod/container, host, or resource
-groups. Time-window selection, zoom, horizontal navigation, text search, error
-and authentication-flow filters, record details, and the original paginated
-file explorer are also available.
-
-Use `--no-open` when the tool cannot launch a browser. Open the printed
-owner-only launcher file, which hands the one-time credential to the viewer
-without placing it in terminal output, browser history, or process arguments:
-
-```bash
-qodo-support-bundle serve --no-open ./qodo-support-bundle.tar.gz
-```
-
-Compressed bundle input is capped at 4 GiB by default. Lower that bound for
-smaller expected bundles with `--max-archive-bytes`.
-
-Press `Ctrl+C` to stop the server and delete the extracted temporary data. The
-viewer rejects non-loopback clients, unexpected host headers, modified
-checksums, unsafe archive paths, non-regular archive entries, oversized files,
-and mutation requests. It has no upload API or external web dependencies.
-
-## Bundle contents
+## Archive contents and integrity
 
 ```text
 manifest.json
 summary.md
 checksums.sha256
-browser/network.jsonl
 kubernetes/pods.jsonl
 kubernetes/events.jsonl
 kubernetes/container_events.jsonl
 kubernetes/logs/<pod>/<container>.log
-# Multi-namespace bundles use:
-kubernetes/pods/<namespace>.jsonl
-kubernetes/events/<namespace>.jsonl
-kubernetes/container_events/<namespace>.jsonl
-kubernetes/logs/<namespace>/<pod>/<container>.log
-kubernetes/logs/<namespace>/<pod>/<container>-previous.log
-collection-issues.jsonl
+connectivity/zitadel.json                 # optional
+collection-issues.jsonl                   # partial collection only
 ```
 
-HAR records and Kubernetes metadata are newline-delimited JSON with a
-`schema_version`, `source.type`, and `@timestamp` when available. These files
-can be ingested by Elastic Agent/Filebeat, Logstash, OpenSearch, Splunk, or a
-custom JSONL pipeline. Container logs retain their original line structure
-after redaction.
+Multi-namespace paths include the namespace below `kubernetes/`. The
+schema-version 3 manifest identifies the Kubernetes-only archive format and
+records collector version, timestamp, redaction rules, scope, limits,
+Kubernetes statistics, connectivity metadata, and each artifact's size and
+SHA-256. `checksums.sha256` includes every artifact and the manifest.
 
-The versioned manifest records the tool and schema versions, capture timestamp,
-customer context, redaction ruleset version and hash, browser clock offset,
-collection statistics, and the SHA-256 and byte size of every collected
-artifact. `summary.md` provides the request failure, correlation, restart,
-OOMKill, truncation, and collection-issue counts without requiring the viewer.
-
-Verify integrity after extracting:
+After safe extraction, verify embedded integrity:
 
 ```bash
-mkdir -p ./qodo-support-bundle
-tar -xzf qodo-support-bundle.tar.gz -C ./qodo-support-bundle
-cd ./qodo-support-bundle
 shasum -a 256 -c checksums.sha256
 ```
 
-The embedded checksums detect accidental corruption within a bundle, but they
-do not authenticate who created it or where it originated. Transfer bundles
-only through an approved authenticated channel.
+Checksums detect corruption but do not authenticate provenance. Treat bundles
+as sensitive, review them before sharing, and use an approved authenticated
+channel.
 
-Verify the build provenance of an official release binary after downloading it
-from GitHub:
+Official release binaries include five targets (Linux amd64/arm64, macOS
+amd64/arm64, and Windows amd64), distribution checksums, and GitHub build
+provenance. Verify a downloaded binary with:
 
 ```bash
 gh attestation verify ./qodo-support-bundle-linux-amd64 \
   --repo Codium-ai/qodo-platform
 ```
 
-## Security boundaries
+## Customer delivery
 
-- Authorization, cookie, token, credential, password, private-key, email, and
-  common provider-token patterns are replaced with `[REDACTED]`.
-- Sensitive HAR headers remain visible by name so missing authentication can be
-  diagnosed, but their values are removed.
-- HAR cookies and request/response bodies are omitted.
-- Every input and per-container log is bounded; truncated files are reported in
-  the manifest.
-- Temporary files, bundle members, and the resulting archive use owner-only
-  permissions.
-- Collection uses argument-based process execution, not a shell.
-
-Redaction cannot recognize every customer-specific identifier embedded in
-free-form application text. Customers must treat both the original HAR and the
-generated bundle as sensitive, inspect the bundle before sharing it, transfer
-it through an approved secure channel, and delete local copies according to
-their retention policy.
-
-## Build and test
+For a customer workstation that can reach GitHub, provide the matching binary,
+`checksums.sha256`, and the release URL. The customer verifies the binary after
+download, makes it executable on Linux or macOS, and runs it from any directory:
 
 ```bash
+grep ' qodo-support-bundle-darwin-arm64$' checksums.sha256 | shasum -a 256 -c -
+chmod 700 qodo-support-bundle-darwin-arm64
+./qodo-support-bundle-darwin-arm64 collect --context customer-production
+```
+
+For a customer environment that cannot reach Qodo or GitHub, Support downloads
+the same release binary and checksum on an approved connected workstation,
+verifies them, and places them together in the existing case-specific customer
+handoff ZIP. Deliver that ZIP through the channel already approved for the
+customer, such as a private support-case attachment or authenticated,
+time-limited download. The customer transfers it to the operator workstation
+and verifies the checksum again before running it. No cluster image, Helm
+upgrade, sidecar, or permanent installation is required.
+
+## Build, test, and release
+
+The integration tests execute the embedded probe against local HTTP, TLS, and
+proxy fixtures. They require Python 3.12 and the hash-locked HTTPX environment:
+
+```bash
+make test-python-deps
 make test
 make build VERSION=dev
-```
-
-Cross-compile release binaries and generate distribution checksums:
-
-```bash
 make release VERSION=1.0.0
 ```
+
+`make test-python-deps` creates the ignored `.test-venv` and installs only
+`test-requirements.txt` with pip `--require-hashes --only-binary=:all:`.
+`make test` fails with a prerequisite message when that environment is absent;
+the network tests never silently skip. The release workflow creates the same
+environment in both validation and release jobs before testing.
+
+The release workflow tests the module, cross-compiles all five platforms,
+generates `dist/checksums.sha256`, attests all assets, stores the workflow
+artifact, and uploads assets to an existing matching GitHub release. Manual
+dispatch must run from the same release tag ref and provide that tag.

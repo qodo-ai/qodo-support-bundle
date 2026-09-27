@@ -32,13 +32,9 @@ type Config struct {
 	Context                 string
 	Kubeconfig              string
 	Since                   time.Duration
-	SinceTime               time.Time
-	UntilTime               time.Time
-	CorrelationIDs          []string
-	CorrelationContextLines int
 	Timeout                 time.Duration
+	MaxMetadataBytes        int64
 	MaxLogBytes             int64
-	MaxLogScanBytes         int64
 	MaxTotalLogBytes        int64
 	LogWorkers              int
 	Progress                func(Progress)
@@ -62,22 +58,23 @@ type Issue struct {
 
 // Report summarizes Kubernetes data added to the bundle.
 type Report struct {
-	AllNamespaces       bool     `json:"all_namespaces"`
-	ExcludedNamespaces  []string `json:"excluded_namespaces,omitempty"`
-	Namespaces          []string `json:"namespaces"`
-	NamespacesRequested int      `json:"namespaces_requested"`
-	Pods                int      `json:"pods"`
-	Containers          int      `json:"containers"`
-	InitContainers      int      `json:"init_containers"`
-	ContainerRestarts   int      `json:"container_restarts"`
-	OOMKills            int      `json:"oom_kills"`
-	LogFiles            int      `json:"log_files"`
-	LogStreamsScanned   int      `json:"log_streams_scanned"`
-	MatchedLogFiles     int      `json:"matched_log_files"`
-	MatchedLogLines     int      `json:"matched_log_lines"`
-	TruncatedLogFiles   int      `json:"truncated_log_files"`
-	TruncatedLogScans   int      `json:"truncated_log_scans"`
-	Issues              []Issue  `json:"issues,omitempty"`
+	AllNamespaces             bool     `json:"all_namespaces"`
+	ExcludedNamespaces        []string `json:"excluded_namespaces,omitempty"`
+	Namespaces                []string `json:"namespaces"`
+	NamespacesRequested       int      `json:"namespaces_requested"`
+	Pods                      int      `json:"pods"`
+	Containers                int      `json:"containers"`
+	InitContainers            int      `json:"init_containers"`
+	ContainerRestarts         int      `json:"container_restarts"`
+	OOMKills                  int      `json:"oom_kills"`
+	MetadataBytes             int64    `json:"metadata_bytes"`
+	MetadataLimitBytes        int64    `json:"metadata_limit_bytes"`
+	TruncatedMetadataFiles    int      `json:"truncated_metadata_files"`
+	MetadataNamespacesSkipped int      `json:"metadata_namespaces_skipped"`
+	LogFiles                  int      `json:"log_files"`
+	LogStreamsCollected       int      `json:"log_streams_collected"`
+	TruncatedLogFiles         int      `json:"truncated_log_files"`
+	Issues                    []Issue  `json:"issues,omitempty"`
 }
 
 type namespaceList struct {
@@ -98,9 +95,7 @@ type logRequest struct {
 type collectedLog struct {
 	path              string
 	data              []byte
-	scanTruncated     bool
 	retainedTruncated bool
-	matchedLines      int
 	issue             *Issue
 	reserved          int64
 }

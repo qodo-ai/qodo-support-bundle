@@ -16,13 +16,12 @@ import (
 )
 
 const (
-	metadataOutputLimit           int64 = 64 << 20
-	defaultLogWorkers                   = 8
-	MaximumLogBytes               int64 = 100 << 20
-	MaximumLogScanBytes           int64 = 256 << 20
-	MaximumConcurrentLogScanBytes int64 = 256 << 20
-	MaximumTotalLogBytes          int64 = 8 << 30
-	MaximumLogWorkers                   = 64
+	metadataOutputLimit  int64 = 64 << 20
+	defaultLogWorkers          = 8
+	MaximumMetadataBytes int64 = 1 << 30
+	MaximumLogBytes      int64 = 100 << 20
+	MaximumTotalLogBytes int64 = 8 << 30
+	MaximumLogWorkers          = 64
 )
 
 var (
@@ -39,8 +38,23 @@ func Collect(
 	sink Sink,
 	redactor *redact.Redactor,
 ) (Report, error) {
+	if err := ctx.Err(); err != nil {
+		return Report{}, err
+	}
 	if config.Timeout <= 0 {
 		return Report{}, errors.New("command timeout must be positive")
+	}
+	if config.Since <= 0 {
+		return Report{}, errors.New("log lookback must be positive")
+	}
+	if config.MaxMetadataBytes <= 0 {
+		return Report{}, errors.New("max metadata bytes must be positive")
+	}
+	if config.MaxMetadataBytes > MaximumMetadataBytes {
+		return Report{}, fmt.Errorf(
+			"max metadata bytes must not exceed %d",
+			MaximumMetadataBytes,
+		)
 	}
 	if config.MaxLogBytes <= 0 {
 		return Report{}, errors.New("max log bytes must be positive")
@@ -60,28 +74,8 @@ func Collect(
 	if config.MaxLogBytes > config.MaxTotalLogBytes {
 		return Report{}, errors.New("max log bytes must not exceed max total log bytes")
 	}
-	if config.MaxLogScanBytes > MaximumLogScanBytes {
-		return Report{}, fmt.Errorf(
-			"max log scan bytes must not exceed %d",
-			MaximumLogScanBytes,
-		)
-	}
-	if config.MaxLogScanBytes > 0 && config.MaxLogScanBytes < config.MaxLogBytes {
-		return Report{}, errors.New("max log scan bytes must not be less than max log bytes")
-	}
 	if config.LogWorkers > MaximumLogWorkers {
 		return Report{}, fmt.Errorf("log workers must not exceed %d", MaximumLogWorkers)
-	}
-	effectiveWorkers := config.LogWorkers
-	if effectiveWorkers <= 0 {
-		effectiveWorkers = defaultLogWorkers
-	}
-	if config.MaxLogScanBytes > 0 &&
-		config.MaxLogScanBytes*int64(effectiveWorkers) > MaximumConcurrentLogScanBytes {
-		return Report{}, fmt.Errorf(
-			"concurrent log scan bytes must not exceed %d",
-			MaximumConcurrentLogScanBytes,
-		)
 	}
 	if config.ExcludeSystemNamespaces && !config.AllNamespaces {
 		return Report{}, errors.New(
@@ -124,11 +118,25 @@ func Collect(
 		ExcludedNamespaces:  excludedNamespaces,
 		Namespaces:          make([]string, 0, len(namespaces)),
 		NamespacesRequested: len(namespaces),
+		MetadataLimitBytes:  config.MaxMetadataBytes,
 	}
+	metadata := metadataBudget{remaining: config.MaxMetadataBytes}
 	logRequests := make([]logRequest, 0)
 	for namespaceIndex, namespace := range namespaces {
 		if err := ctx.Err(); err != nil {
 			return report, err
+		}
+		if metadata.remaining == 0 {
+			skipped := len(namespaces) - namespaceIndex
+			report.MetadataNamespacesSkipped += skipped
+			report.Issues = append(report.Issues, Issue{
+				Operation: "collect Kubernetes metadata",
+				Message: fmt.Sprintf(
+					"aggregate metadata limit reached; skipped %d namespaces",
+					skipped,
+				),
+			})
+			break
 		}
 		reportProgress(config, Progress{
 			Stage:     "scan_namespace",
@@ -204,9 +212,13 @@ func Collect(
 		if err != nil {
 			return report, err
 		}
-		if err := sink.Add(
+		if err := metadata.add(
+			sink,
 			podMetadataPath(namespace, len(namespaces)),
 			podRecords,
+			"pod metadata",
+			redactor.Text(namespace),
+			&report,
 		); err != nil {
 			return report, fmt.Errorf("add pod metadata: %w", err)
 		}
@@ -219,26 +231,33 @@ func Collect(
 		}
 		report.ContainerRestarts += restarts
 		report.OOMKills += oomKills
-		if len(containerEvents) > 0 {
-			if err := sink.Add(
+		if len(containerEvents) > 0 && metadata.remaining > 0 {
+			if err := metadata.add(
+				sink,
 				containerEventPath(namespace, len(namespaces)),
 				containerEvents,
+				"container-event metadata",
+				redactor.Text(namespace),
+				&report,
 			); err != nil {
 				return report, fmt.Errorf("add container events: %w", err)
 			}
 		}
 
-		if err := collectEvents(
-			ctx,
-			config,
-			namespace,
-			len(namespaces),
-			runner,
-			sink,
-			redactor,
-			&report,
-		); err != nil {
-			return report, err
+		if metadata.remaining > 0 {
+			if err := collectEvents(
+				ctx,
+				config,
+				namespace,
+				len(namespaces),
+				runner,
+				sink,
+				redactor,
+				&metadata,
+				&report,
+			); err != nil {
+				return report, err
+			}
 		}
 		for _, currentPod := range pods.Items {
 			containers := append(
@@ -292,6 +311,59 @@ func Collect(
 	return report, nil
 }
 
+type metadataBudget struct {
+	remaining int64
+}
+
+func (budget *metadataBudget) add(
+	sink Sink,
+	path string,
+	data []byte,
+	kind string,
+	namespace string,
+	report *Report,
+) error {
+	if int64(len(data)) <= budget.remaining {
+		if err := sink.Add(path, data); err != nil {
+			return err
+		}
+		budget.remaining -= int64(len(data))
+		report.MetadataBytes += int64(len(data))
+		return nil
+	}
+
+	retained := completeJSONLLines(data, budget.remaining)
+	if len(retained) > 0 {
+		if err := sink.Add(path, retained); err != nil {
+			return err
+		}
+		report.MetadataBytes += int64(len(retained))
+	}
+	budget.remaining = 0
+	report.TruncatedMetadataFiles++
+	report.Issues = append(report.Issues, Issue{
+		Operation: "collect Kubernetes metadata",
+		Resource:  namespace,
+		Message: fmt.Sprintf(
+			"aggregate metadata limit reached while staging %s; output was truncated",
+			kind,
+		),
+	})
+	return nil
+}
+
+func completeJSONLLines(data []byte, limit int64) []byte {
+	if limit <= 0 || len(data) == 0 {
+		return nil
+	}
+	end := min(int64(len(data)), limit)
+	lastNewline := bytes.LastIndexByte(data[:int(end)], '\n')
+	if lastNewline < 0 {
+		return nil
+	}
+	return data[:lastNewline+1]
+}
+
 func collectEvents(
 	ctx context.Context,
 	config Config,
@@ -300,6 +372,7 @@ func collectEvents(
 	runner Runner,
 	sink Sink,
 	redactor *redact.Redactor,
+	metadata *metadataBudget,
 	report *Report,
 ) error {
 	arguments := append(
@@ -349,7 +422,14 @@ func collectEvents(
 		})
 		return nil
 	}
-	if err := sink.Add(eventMetadataPath(namespace, namespaceCount), records); err != nil {
+	if err := metadata.add(
+		sink,
+		eventMetadataPath(namespace, namespaceCount),
+		records,
+		"event metadata",
+		redactor.Text(namespace),
+		report,
+	); err != nil {
 		report.Issues = append(report.Issues, Issue{
 			Operation: "add events",
 			Resource:  redactor.Text(namespace),
@@ -431,23 +511,17 @@ func collectLogs(
 		if result.issue != nil {
 			report.Issues = append(report.Issues, *result.issue)
 		} else {
-			report.LogStreamsScanned++
-			if result.scanTruncated {
-				report.TruncatedLogScans++
-				report.Issues = append(report.Issues, Issue{
-					Operation: "scan container log",
-					Resource:  redactor.Text(result.path),
-					Message:   "raw log scan limit reached; correlation matches may be incomplete",
-				})
-			}
-			if result.scanTruncated || result.retainedTruncated {
+			report.LogStreamsCollected++
+			if result.retainedTruncated {
 				report.TruncatedLogFiles++
-			}
-			if result.retainedTruncated && result.reserved < config.MaxLogBytes {
+				message := "container log exceeded the per-stream byte limit"
+				if result.reserved < config.MaxLogBytes {
+					message = "total log collection limit truncated this stream"
+				}
 				report.Issues = append(report.Issues, Issue{
 					Operation: "collect container log",
 					Resource:  redactor.Text(result.path),
-					Message:   "total log collection limit truncated this stream",
+					Message:   message,
 				})
 			}
 			if len(result.data) > 0 {
@@ -460,10 +534,6 @@ func collectLogs(
 				} else {
 					retained = int64(len(result.data))
 					report.LogFiles++
-					if len(config.CorrelationIDs) > 0 {
-						report.MatchedLogFiles++
-						report.MatchedLogLines += result.matchedLines
-					}
 				}
 			}
 		}
@@ -495,15 +565,7 @@ func readLog(
 		"--container", request.containerName,
 		"--timestamps=true",
 	)
-	if config.SinceTime.IsZero() {
-		arguments = append(arguments, "--since", durationArgument(config.Since))
-	} else {
-		arguments = append(
-			arguments,
-			"--since-time",
-			config.SinceTime.Format(time.RFC3339Nano),
-		)
-	}
+	arguments = append(arguments, "--since", durationArgument(config.Since))
 	suffix := ""
 	operation := "collect current log"
 	if request.previous {
@@ -511,15 +573,11 @@ func readLog(
 		suffix = "-previous"
 		operation = "collect previous log"
 	}
-	scanLimit := config.MaxLogScanBytes
-	if scanLimit <= 0 {
-		scanLimit = request.maxBytes
-	}
 	result, err := runWithTimeout(
 		ctx,
 		config.Timeout,
 		runner,
-		scanLimit,
+		request.maxBytes,
 		arguments...,
 	)
 	resource := request.namespace + "/" + request.podName + "/" + request.containerName
@@ -538,25 +596,15 @@ func readLog(
 		safePathSegment(request.containerName)+suffix+".log",
 	)
 	path := filepath.ToSlash(filepath.Join(pathParts...))
-	filtered, matchedLines := filterLog(
-		result.Stdout,
-		config.CorrelationIDs,
-		config.SinceTime,
-		config.UntilTime,
-		config.CorrelationContextLines,
-	)
-	data := sanitizeLog(filtered, redactor)
-	retainedTruncated := false
+	data := sanitizeLog(result.Stdout, redactor)
+	retainedTruncated := result.Truncated || int64(len(data)) > request.maxBytes
 	if int64(len(data)) > request.maxBytes {
 		data = data[:int(request.maxBytes)]
-		retainedTruncated = true
 	}
 	return collectedLog{
 		path:              path,
 		data:              data,
-		scanTruncated:     result.Truncated,
 		retainedTruncated: retainedTruncated,
-		matchedLines:      matchedLines,
 		reserved:          request.maxBytes,
 	}
 }
@@ -763,6 +811,20 @@ func sanitizeLog(input []byte, redactor *redact.Redactor) []byte {
 		}
 	})
 	return output.Bytes()
+}
+
+func forEachLogLine(input []byte, visit func(index int, line []byte)) {
+	index := 0
+	for len(input) > 0 {
+		lineEnd := bytes.IndexByte(input, '\n')
+		if lineEnd < 0 {
+			visit(index, input)
+			return
+		}
+		visit(index, input[:lineEnd])
+		index++
+		input = input[lineEnd+1:]
+	}
 }
 
 func sanitizeStringMap(values map[string]string, redactor *redact.Redactor) map[string]string {

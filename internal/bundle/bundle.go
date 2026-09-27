@@ -28,15 +28,14 @@ var ErrCleanup = errors.New("clean up temporary bundle data")
 
 // Manifest describes the collector and sanitized sources in a bundle.
 type Manifest struct {
-	SchemaVersion         string            `json:"schema_version"`
-	CollectorVersion      string            `json:"collector_version"`
-	GeneratedAt           time.Time         `json:"generated_at"`
-	ClockSkewMilliseconds int64             `json:"clock_skew_milliseconds"`
-	Redaction             map[string]string `json:"redaction"`
-	CustomerContext       map[string]string `json:"customer_context,omitempty"`
-	Collection            map[string]any    `json:"collection"`
-	Artifacts             []ManifestFile    `json:"artifacts"`
-	Files                 int               `json:"files"`
+	SchemaVersion    string            `json:"schema_version"`
+	CollectorVersion string            `json:"collector_version"`
+	GeneratedAt      time.Time         `json:"generated_at"`
+	Redaction        map[string]string `json:"redaction"`
+	CustomerContext  map[string]string `json:"customer_context,omitempty"`
+	Collection       map[string]any    `json:"collection"`
+	Artifacts        []ManifestFile    `json:"artifacts"`
+	Files            int               `json:"files"`
 }
 
 // ManifestFile records the integrity metadata for a collected artifact.
@@ -144,7 +143,7 @@ func (builder *Builder) FinalizeContext(
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	manifest.SchemaVersion = "2"
+	manifest.SchemaVersion = "3"
 	artifacts, err := builder.manifestFiles(ctx)
 	if err != nil {
 		return "", err

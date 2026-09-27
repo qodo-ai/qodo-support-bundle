@@ -33,6 +33,17 @@ jobs:
           go-version-file: tools/qodo-support-bundle/go.mod
           cache: false
 
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/qodo-support-bundle/test-requirements.txt
+
+      - name: Install Python test dependencies
+        working-directory: tools/qodo-support-bundle
+        run: make test-python-deps
+
       - name: Test
         working-directory: tools/qodo-support-bundle
         run: make test
@@ -74,6 +85,13 @@ jobs:
           go-version-file: tools/qodo-support-bundle/go.mod
           cache: false
 
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/qodo-support-bundle/test-requirements.txt
+
       - name: Validate release source
         id: version
         shell: bash
@@ -103,6 +121,10 @@ jobs:
             exit 1
           fi
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install Python test dependencies
+        working-directory: tools/qodo-support-bundle
+        run: make test-python-deps
 
       - name: Test
         working-directory: tools/qodo-support-bundle

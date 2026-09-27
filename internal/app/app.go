@@ -11,41 +11,42 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/bundle"
-	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/har"
 	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/kubernetes"
 	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/redact"
-	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/viewer"
+	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/zitadel"
 )
 
 const (
-	defaultHARLimit                 int64 = 256 << 20
-	maxHARLimit                           = har.MaximumInputBytes
-	defaultLogLimit                 int64 = 10 << 20
-	maxLogLimit                           = kubernetes.MaximumLogBytes
-	defaultLogScanLimit             int64 = 32 << 20
-	maxLogScanLimit                       = kubernetes.MaximumLogScanBytes
-	maxConcurrentLogScanLimit             = kubernetes.MaximumConcurrentLogScanBytes
-	defaultTotalLogLimit            int64 = 1 << 30
-	maxTotalLogLimit                      = kubernetes.MaximumTotalLogBytes
-	defaultLogWorkers                     = 8
-	maxLogWorkers                         = kubernetes.MaximumLogWorkers
-	defaultMaxHAREntries                  = 100_000
-	maxHAREntryLimit                      = 1_000_000
-	defaultCorrelationContextLines        = 3
-	maxCorrelationContextLines            = 100
-	defaultCorrelationWindowPadding       = 2 * time.Minute
-	maxCustomerContextLength              = 4096
-	maxCommandTimeout                     = 30 * time.Minute
-	collectionStatusComplete              = "complete"
-	collectionStatusPartial               = "partial"
+	defaultLogLimit          int64 = 10 << 20
+	maxLogLimit                    = kubernetes.MaximumLogBytes
+	defaultTotalLogLimit     int64 = 1 << 30
+	maxTotalLogLimit               = kubernetes.MaximumTotalLogBytes
+	defaultMetadataLimit     int64 = 128 << 20
+	maxMetadataLimit               = kubernetes.MaximumMetadataBytes
+	defaultLogWorkers              = 8
+	maxLogWorkers                  = kubernetes.MaximumLogWorkers
+	maxCustomerContextLength       = 4096
+	maxCommandTimeout              = 30 * time.Minute
+	defaultProbeTimeout            = 15 * time.Second
+	collectionStatusComplete       = "complete"
+	collectionStatusPartial        = "partial"
+	defaultOutputDirectory         = "qodo-support-bundles"
 )
 
-// Version is replaced during release builds.
-var Version = "dev"
+var (
+	Version         = "dev"
+	homeDirectory   = os.UserHomeDir
+	currentTime     = time.Now
+	dnsLabelPattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
+	dnsNamePattern  = regexp.MustCompile(
+		`^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$`,
+	)
+)
 
 // Run executes the support-bundle CLI and returns its process exit code.
 func Run(ctx context.Context, arguments []string, stdout io.Writer, stderr io.Writer) int {
@@ -56,8 +57,6 @@ func Run(ctx context.Context, arguments []string, stdout io.Writer, stderr io.Wr
 	switch arguments[0] {
 	case "collect":
 		return runCollect(ctx, arguments[1:], stdout, stderr)
-	case "serve":
-		return runServe(ctx, arguments[1:], stdout, stderr)
 	case "version":
 		_, _ = fmt.Fprintln(stdout, Version)
 		return 0
@@ -71,58 +70,6 @@ func Run(ctx context.Context, arguments []string, stdout io.Writer, stderr io.Wr
 	}
 }
 
-func runServe(
-	ctx context.Context,
-	arguments []string,
-	stdout io.Writer,
-	stderr io.Writer,
-) int {
-	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	listenAddress := flags.String(
-		"listen",
-		"127.0.0.1:0",
-		"Loopback address for the local viewer",
-	)
-	noOpen := flags.Bool("no-open", false, "Do not open the system browser")
-	maxArchiveBytes := flags.Int64(
-		"max-archive-bytes",
-		viewer.DefaultMaxArchiveBytes,
-		"Maximum accepted compressed bundle size",
-	)
-	if err := flags.Parse(arguments); err != nil {
-		return 2
-	}
-	if flags.NArg() != 1 {
-		_, _ = fmt.Fprintln(stderr, "serve requires exactly one bundle path")
-		return 2
-	}
-	if *maxArchiveBytes <= 0 {
-		_, _ = fmt.Fprintln(stderr, "max-archive-bytes must be positive")
-		return 2
-	}
-	if *maxArchiveBytes > viewer.MaxSupportedArchiveBytes {
-		_, _ = fmt.Fprintln(stderr, "max-archive-bytes is too large")
-		return 2
-	}
-
-	err := viewer.Serve(ctx, viewer.Config{
-		BundlePath:    flags.Arg(0),
-		ListenAddress: *listenAddress,
-		OpenBrowser:   !*noOpen,
-		Output:        stdout,
-		ErrorOutput:   stderr,
-		Limits: viewer.ExtractionLimits{
-			MaxArchiveBytes: *maxArchiveBytes,
-		},
-	})
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, terminalText(redact.New(), err.Error()))
-		return 1
-	}
-	return 0
-}
-
 func runCollect(
 	ctx context.Context,
 	arguments []string,
@@ -132,106 +79,79 @@ func runCollect(
 	flags := flag.NewFlagSet("collect", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	namespace := flags.String("namespace", "", "Specific Kubernetes namespace to collect")
-	namespaces := flags.String(
-		"namespaces",
-		"",
-		"Comma-separated Kubernetes namespaces; overrides --namespace",
-	)
-	allNamespaces := flags.Bool(
-		"all-namespaces",
-		false,
-		"Collect every namespace in the current cluster",
-	)
+	namespaces := flags.String("namespaces", "", "Comma-separated Kubernetes namespaces")
+	allNamespaces := flags.Bool("all-namespaces", false, "Collect every namespace")
 	excludeSystemNamespaces := flags.Bool(
 		"exclude-system-namespaces",
 		false,
-		"Exclude Kubernetes and managed GKE control-plane namespaces",
+		"Exclude Kubernetes and managed GKE system namespaces",
 	)
 	selector := flags.String("selector", "", "Optional Kubernetes label selector")
 	kubeContext := flags.String("context", "", "Optional kubeconfig context")
 	kubeconfig := flags.String("kubeconfig", "", "Optional kubeconfig path")
 	kubectl := flags.String("kubectl", "kubectl", "Path to kubectl-compatible binary")
-	harPath := flags.String("har", "", "Path to a browser-exported HAR file")
-	output := flags.String("output", defaultOutputPath(), "Output .tar.gz path")
+	output := flags.String("output", "", "Exact output .tar.gz archive path")
 	since := flags.Duration("since", 30*time.Minute, "Container log lookback")
 	timeout := flags.Duration("command-timeout", 2*time.Minute, "Timeout per kubectl command")
 	maxLogBytes := flags.Int64(
 		"max-log-bytes",
 		defaultLogLimit,
-		"Maximum bytes collected from each container log (up to 100 MiB)",
+		"Maximum bytes collected from each container log",
 	)
 	maxTotalLogBytes := flags.Int64(
 		"max-total-log-bytes",
 		defaultTotalLogLimit,
-		"Maximum bytes retained across all container logs (up to 8 GiB)",
+		"Maximum bytes retained across all container logs",
 	)
-	maxLogScanBytes := flags.Int64(
-		"max-log-scan-bytes",
-		defaultLogScanLimit,
-		"Maximum raw bytes scanned from each container log (up to 256 MiB)",
+	maxMetadataBytes := flags.Int64(
+		"max-metadata-bytes",
+		defaultMetadataLimit,
+		"Maximum bytes retained across Kubernetes metadata records",
 	)
-	logWorkers := flags.Int(
-		"log-workers",
-		defaultLogWorkers,
-		"Concurrent container log reads (up to 64)",
+	logWorkers := flags.Int("log-workers", defaultLogWorkers, "Concurrent log readers")
+	activity := flags.String("activity", "", "Customer description of current activity")
+	problem := flags.String("problem", "", "Customer description of the failure")
+	checkZitadel := flags.Bool(
+		"check-zitadel",
+		false,
+		"Probe Platform-to-Zitadel connectivity in an existing container",
 	)
-	maxHARBytes := flags.Int64(
-		"max-har-bytes",
-		defaultHARLimit,
-		"Maximum accepted HAR file size (up to 256 MiB)",
-	)
-	maxHAREntries := flags.Int(
-		"max-har-entries",
-		defaultMaxHAREntries,
-		"Maximum HAR requests included",
-	)
-	correlationContextLines := flags.Int(
-		"correlation-context-lines",
-		defaultCorrelationContextLines,
-		"Log lines retained before and after a correlation-ID match",
-	)
-	correlationWindowPadding := flags.Duration(
-		"correlation-window-padding",
-		defaultCorrelationWindowPadding,
-		"Time added before and after the HAR capture window",
-	)
-	activity := flags.String(
-		"activity",
+	platformNamespace := flags.String(
+		"platform-namespace",
 		"",
-		"Customer description of what they were doing",
+		"Namespace of the selected Platform pod",
 	)
-	problem := flags.String(
-		"problem",
+	platformPod := flags.String("platform-pod", "", "Selected Platform pod")
+	platformContainer := flags.String(
+		"platform-container",
 		"",
-		"Customer description of what failed",
+		"Selected Platform application container",
+	)
+	probeTimeout := flags.Duration(
+		"probe-timeout",
+		defaultProbeTimeout,
+		"Maximum Zitadel probe execution time",
 	)
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
-	if flags.NArg() > 1 {
-		_, _ = fmt.Fprintln(stderr, "collect accepts one positional HAR path")
+	if flags.NArg() != 0 {
+		_, _ = fmt.Fprintln(stderr, "collect does not accept positional arguments")
 		return 2
 	}
+
 	visited := make(map[string]bool)
-	flags.Visit(func(current *flag.Flag) {
-		visited[current.Name] = true
-	})
-	if flags.NArg() == 1 {
-		if visited["har"] {
-			_, _ = fmt.Fprintln(
-				stderr,
-				"provide the HAR path either positionally or with --har, not both",
-			)
-			return 2
-		}
-		*harPath = flags.Arg(0)
+	flags.Visit(func(current *flag.Flag) { visited[current.Name] = true })
+	if visited["namespace"] && visited["namespaces"] {
+		_, _ = fmt.Fprintln(
+			stderr,
+			"--namespace and --namespaces cannot be combined",
+		)
+		return 2
 	}
 	explicitNamespaces := visited["namespace"] || visited["namespaces"]
 	if *excludeSystemNamespaces && !visited["all-namespaces"] {
-		_, _ = fmt.Fprintln(
-			stderr,
-			"--exclude-system-namespaces requires --all-namespaces",
-		)
+		_, _ = fmt.Fprintln(stderr, "--exclude-system-namespaces requires --all-namespaces")
 		return 2
 	}
 	if !explicitNamespaces && !visited["all-namespaces"] {
@@ -249,13 +169,6 @@ func runCollect(
 			return 2
 		}
 	} else {
-		if *excludeSystemNamespaces {
-			_, _ = fmt.Fprintln(
-				stderr,
-				"--exclude-system-namespaces requires --all-namespaces",
-			)
-			return 2
-		}
 		selectedNamespaces, err = parseNamespaces(*namespace, *namespaces)
 		if err != nil {
 			_, _ = fmt.Fprintln(stderr, err)
@@ -265,49 +178,44 @@ func runCollect(
 	if err := validateCollectFlags(
 		selectedNamespaces,
 		*allNamespaces,
-		*harPath,
 		*since,
 		*timeout,
+		*maxMetadataBytes,
 		*maxLogBytes,
-		*maxLogScanBytes,
 		*maxTotalLogBytes,
 		*logWorkers,
-		*maxHARBytes,
-		*maxHAREntries,
+		*activity,
+		*problem,
 	); err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
-	if *correlationContextLines < 0 ||
-		*correlationContextLines > maxCorrelationContextLines {
-		_, _ = fmt.Fprintf(
-			stderr,
-			"correlation-context-lines must be between 0 and %d\n",
-			maxCorrelationContextLines,
-		)
+	if err := validateProbeFlags(
+		*checkZitadel,
+		visited,
+		selectedNamespaces,
+		*allNamespaces,
+		platformNamespace,
+		*platformPod,
+		*platformContainer,
+		*probeTimeout,
+	); err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
-	if *correlationWindowPadding < 0 || *correlationWindowPadding > 24*time.Hour {
-		_, _ = fmt.Fprintln(
-			stderr,
-			"correlation-window-padding must be between 0 and 24h",
-		)
-		return 2
-	}
-	if len(*activity) > maxCustomerContextLength || len(*problem) > maxCustomerContextLength {
-		_, _ = fmt.Fprintf(
-			stderr,
-			"activity and problem must not exceed %d characters\n",
-			maxCustomerContextLength,
-		)
-		return 2
+	if *output == "" {
+		*output, err = defaultOutputPath()
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, err)
+			return 1
+		}
 	}
 
 	redactor := redact.New()
 	if *allNamespaces {
-		message := "Warning: collecting all namespaces includes non-Qodo workloads in shared clusters."
+		message := "Warning: collecting all namespaces includes non-Qodo workloads."
 		if *excludeSystemNamespaces {
-			message = "Scope: all application namespaces; Kubernetes and managed GKE system namespaces are excluded."
+			message = "Scope: all application namespaces; Kubernetes system namespaces are excluded."
 		}
 		_, _ = fmt.Fprintln(stderr, message)
 	}
@@ -318,40 +226,10 @@ func runCollect(
 	}
 	cleanupPending := true
 	defer func() {
-		if !cleanupPending {
-			return
+		if cleanupPending {
+			closeBundle(builder, stderr, &exitCode)
 		}
-		closeBundle(builder, stderr, &exitCode)
 	}()
-
-	_, _ = fmt.Fprintf(
-		stderr,
-		"Importing HAR: %s\n",
-		terminalText(redactor, filepath.Base(*harPath)),
-	)
-	var harStats har.Stats
-	if err := builder.AddStream("browser/network.jsonl", func(writer io.Writer) error {
-		var importErr error
-		harStats, importErr = har.ImportContext(
-			ctx,
-			*harPath,
-			writer,
-			*maxHARBytes,
-			*maxHAREntries,
-			redactor,
-		)
-		return importErr
-	}); err != nil {
-		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
-		return 1
-	}
-	_, _ = fmt.Fprintf(
-		stderr,
-		"Imported %d browser requests with %d correlation values.\n",
-		harStats.EntriesWritten,
-		harStats.CorrelationIDCount,
-	)
-	sinceTime, untilTime := correlationWindow(harStats, *correlationWindowPadding)
 
 	resolvedKubectl, err := resolveKubectl(*kubectl)
 	if err != nil {
@@ -359,6 +237,7 @@ func runCollect(
 		return 1
 	}
 	_, _ = fmt.Fprintf(stderr, "Using kubectl: %q\n", resolvedKubectl)
+	runner := kubernetes.ExecRunner{Binary: resolvedKubectl}
 	kubernetesReport, kubernetesErr := kubernetes.Collect(
 		ctx,
 		kubernetes.Config{
@@ -369,20 +248,16 @@ func runCollect(
 			Context:                 *kubeContext,
 			Kubeconfig:              *kubeconfig,
 			Since:                   *since,
-			SinceTime:               sinceTime,
-			UntilTime:               untilTime,
-			CorrelationIDs:          harStats.CorrelationIDs,
-			CorrelationContextLines: *correlationContextLines,
 			Timeout:                 *timeout,
+			MaxMetadataBytes:        *maxMetadataBytes,
 			MaxLogBytes:             *maxLogBytes,
-			MaxLogScanBytes:         *maxLogScanBytes,
 			MaxTotalLogBytes:        *maxTotalLogBytes,
 			LogWorkers:              *logWorkers,
 			Progress: func(progress kubernetes.Progress) {
 				writeCollectionProgress(stderr, redactor, progress)
 			},
 		},
-		kubernetes.ExecRunner{Binary: resolvedKubectl},
+		runner,
 		builder,
 		redactor,
 	)
@@ -390,33 +265,56 @@ func runCollect(
 		_, _ = fmt.Fprintln(stderr, "Collection canceled; no bundle was published.")
 		return 1
 	}
-	if harStats.Truncated {
-		kubernetesReport.Issues = append(kubernetesReport.Issues, kubernetes.Issue{
-			Operation: "import HAR",
-			Resource:  redactor.Text(filepath.Base(*harPath)),
-			Message:   "browser requests exceeded --max-har-entries",
-		})
-	}
-	if harStats.CorrelationIDsTruncated {
-		kubernetesReport.Issues = append(kubernetesReport.Issues, kubernetes.Issue{
-			Operation: "import HAR",
-			Resource:  redactor.Text(filepath.Base(*harPath)),
-			Message: fmt.Sprintf(
-				"correlation IDs exceeded the %d-value collection limit",
-				har.MaximumCorrelationIDs,
-			),
-		})
-	}
-
-	collectionStatus := collectionStatusComplete
-	if kubernetesErr != nil || len(kubernetesReport.Issues) > 0 || harStats.Truncated {
-		collectionStatus = collectionStatusPartial
-	}
 	if kubernetesErr != nil {
 		kubernetesReport.Issues = append(kubernetesReport.Issues, kubernetes.Issue{
 			Operation: "collect Kubernetes diagnostics",
 			Message:   redactor.Text(kubernetesErr.Error()),
 		})
+	}
+
+	var connectivityReport *zitadel.Report
+	var connectivityFailure string
+	if *checkZitadel {
+		_, _ = fmt.Fprintln(stderr, "Checking Platform-to-Zitadel connectivity...")
+		outcome := zitadel.Collect(ctx, zitadel.Config{
+			Namespace:    *platformNamespace,
+			Pod:          *platformPod,
+			Container:    *platformContainer,
+			Context:      *kubeContext,
+			Kubeconfig:   *kubeconfig,
+			QueryTimeout: *timeout,
+			ProbeTimeout: *probeTimeout,
+		}, runner)
+		connectivityReport = outcome.Report
+		connectivityFailure = outcome.Reason
+		switch {
+		case outcome.Reason != "":
+			kubernetesReport.Issues = append(kubernetesReport.Issues, kubernetes.Issue{
+				Operation: "collect Zitadel connectivity probe",
+				Resource: redactor.Text(
+					*platformNamespace + "/" + *platformPod + "/" + *platformContainer,
+				),
+				Message: outcome.Reason,
+			})
+			_, _ = fmt.Fprintf(stderr, "Zitadel connectivity probe unavailable: %s\n", outcome.Reason)
+		case outcome.Report.FailedChecks() > 0:
+			if err := builder.Add("connectivity/zitadel.json", outcome.Data); err != nil {
+				_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
+				return 1
+			}
+			_, _ = fmt.Fprintln(stderr, "Zitadel connectivity: diagnostic failure recorded.")
+		default:
+			if err := builder.Add("connectivity/zitadel.json", outcome.Data); err != nil {
+				_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
+				return 1
+			}
+			_, _ = fmt.Fprintln(stderr, "Zitadel connectivity: passed.")
+		}
+	}
+
+	collectionStatus := collectionStatusComplete
+	if kubernetesErr != nil || len(kubernetesReport.Issues) > 0 || connectivityFailure != "" {
+		collectionStatus = collectionStatusPartial
 	}
 	issuesData, err := marshalIssues(kubernetesReport.Issues)
 	if err != nil {
@@ -436,30 +334,45 @@ func runCollect(
 		manifestNamespaces = kubernetesReport.Namespaces
 		namespaceValue = "*"
 	}
-	generatedAt := time.Now().UTC()
+	generatedAt := currentTime().UTC()
 	customerContext := map[string]string{}
-	if sanitizedActivity := strings.TrimSpace(redactor.Text(*activity)); sanitizedActivity != "" {
-		customerContext["activity"] = sanitizedActivity
+	if value := strings.TrimSpace(redactor.Text(*activity)); value != "" {
+		customerContext["activity"] = value
 	}
-	if sanitizedProblem := strings.TrimSpace(redactor.Text(*problem)); sanitizedProblem != "" {
-		customerContext["problem"] = sanitizedProblem
+	if value := strings.TrimSpace(redactor.Text(*problem)); value != "" {
+		customerContext["problem"] = value
 	}
 	summary := buildSummary(
 		generatedAt,
 		collectionStatus,
-		harStats,
 		kubernetesReport,
 		customerContext,
+		*checkZitadel,
+		connectivityReport,
+		connectivityFailure,
 	)
 	if err := builder.Add("summary.md", []byte(summary)); err != nil {
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
+	connectivityMetadata := map[string]any{"enabled": *checkZitadel}
+	if *checkZitadel {
+		connectivityMetadata["namespace"] = redactor.Text(*platformNamespace)
+		connectivityMetadata["pod"] = redactor.Text(*platformPod)
+		connectivityMetadata["container"] = redactor.Text(*platformContainer)
+		connectivityMetadata["probe_timeout"] = probeTimeout.String()
+		if connectivityFailure != "" {
+			connectivityMetadata["collection_status"] = collectionStatusPartial
+			connectivityMetadata["reason"] = connectivityFailure
+		} else {
+			connectivityMetadata["collection_status"] = collectionStatusComplete
+			connectivityMetadata["failed_checks"] = connectivityReport.FailedChecks()
+		}
+	}
 	ruleset := redactor.Ruleset()
 	archivePath, err := builder.FinalizeContext(ctx, bundle.Manifest{
-		CollectorVersion:      Version,
-		GeneratedAt:           generatedAt,
-		ClockSkewMilliseconds: harStats.ClockSkewMilliseconds,
+		CollectorVersion: Version,
+		GeneratedAt:      generatedAt,
 		Redaction: map[string]string{
 			"version": ruleset.Version,
 			"sha256":  ruleset.SHA256,
@@ -473,30 +386,15 @@ func runCollect(
 			"exclude_system_namespaces": *excludeSystemNamespaces,
 			"selector":                  redactor.Text(*selector),
 			"since":                     since.String(),
-			"correlation": map[string]any{
-				"id_count":              harStats.CorrelationIDCount,
-				"context_lines":         *correlationContextLines,
-				"window_start":          formatOptionalTime(sinceTime),
-				"window_end":            formatOptionalTime(untilTime),
-				"window_padding":        correlationWindowPadding.String(),
-				"scan_bytes_per_stream": *maxLogScanBytes,
-			},
-			"browser": map[string]any{
-				"source_file": filepath.Base(redactor.Text(*harPath)),
-				"stats":       harStats,
-				"bodies":      "omitted",
-				"cookies":     "redacted",
-			},
-			"kubernetes": kubernetesReport,
+			"max_metadata_bytes":        *maxMetadataBytes,
+			"kubernetes":                kubernetesReport,
+			"connectivity":              connectivityMetadata,
 		},
 	})
 	if err != nil {
 		if errors.Is(err, bundle.ErrCleanup) {
 			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", archivePath)
-			_, _ = fmt.Fprintln(
-				stderr,
-				"Support bundle was created, but temporary data cleanup failed.",
-			)
+			_, _ = fmt.Fprintln(stderr, "Bundle created, but temporary data cleanup failed.")
 			return 1
 		}
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
@@ -517,11 +415,137 @@ func runCollect(
 	if collectionStatus == collectionStatusPartial {
 		_, _ = fmt.Fprintln(
 			stderr,
-			"Warning: collection was partial; inspect collection-issues.jsonl in the bundle.",
+			"Warning: collection was partial; inspect collection-issues.jsonl.",
 		)
 		return 3
 	}
 	return 0
+}
+
+func validateProbeFlags(
+	enabled bool,
+	visited map[string]bool,
+	namespaces []string,
+	allNamespaces bool,
+	platformNamespace *string,
+	pod string,
+	container string,
+	timeout time.Duration,
+) error {
+	targetVisited := visited["platform-namespace"] ||
+		visited["platform-pod"] ||
+		visited["platform-container"] ||
+		visited["probe-timeout"]
+	if !enabled {
+		if targetVisited {
+			return errors.New("Zitadel target flags require --check-zitadel")
+		}
+		return nil
+	}
+	if *platformNamespace == "" && !allNamespaces && len(namespaces) == 1 {
+		*platformNamespace = namespaces[0]
+	}
+	if *platformNamespace == "" || pod == "" || container == "" {
+		return errors.New(
+			"--check-zitadel requires --platform-namespace, --platform-pod, and --platform-container; platform namespace is inferred only from one explicit namespace",
+		)
+	}
+	if !validDNSLabel(*platformNamespace) {
+		return errors.New("--platform-namespace must be a Kubernetes DNS label")
+	}
+	if !validDNSName(pod, 253) {
+		return errors.New("--platform-pod must be a DNS-compatible Kubernetes name")
+	}
+	if !validDNSLabel(container) {
+		return errors.New("--platform-container must be a Kubernetes DNS label")
+	}
+	if timeout <= time.Second || timeout > maxCommandTimeout {
+		return fmt.Errorf("--probe-timeout must be greater than 1s and not exceed %s", maxCommandTimeout)
+	}
+	if !allNamespaces && !containsString(namespaces, *platformNamespace) {
+		return errors.New("--platform-namespace must be included in the collection scope")
+	}
+	return nil
+}
+
+func validateCollectFlags(
+	namespaces []string,
+	allNamespaces bool,
+	since time.Duration,
+	timeout time.Duration,
+	maxMetadataBytes int64,
+	maxLogBytes int64,
+	maxTotalLogBytes int64,
+	logWorkers int,
+	activity string,
+	problem string,
+) error {
+	switch {
+	case !allNamespaces && len(namespaces) == 0:
+		return errors.New("at least one namespace is required")
+	case since <= 0:
+		return errors.New("--since must be positive")
+	case timeout <= 0:
+		return errors.New("--command-timeout must be positive")
+	case timeout > maxCommandTimeout:
+		return fmt.Errorf("--command-timeout must not exceed %s", maxCommandTimeout)
+	case maxMetadataBytes <= 0:
+		return errors.New("--max-metadata-bytes must be positive")
+	case maxMetadataBytes > maxMetadataLimit:
+		return fmt.Errorf(
+			"--max-metadata-bytes must not exceed %d bytes",
+			maxMetadataLimit,
+		)
+	case maxLogBytes <= 0:
+		return errors.New("--max-log-bytes must be positive")
+	case maxLogBytes > maxLogLimit:
+		return fmt.Errorf("--max-log-bytes must not exceed %d bytes", maxLogLimit)
+	case maxTotalLogBytes <= 0:
+		return errors.New("--max-total-log-bytes must be positive")
+	case maxTotalLogBytes > maxTotalLogLimit:
+		return fmt.Errorf("--max-total-log-bytes must not exceed %d bytes", maxTotalLogLimit)
+	case maxLogBytes > maxTotalLogBytes:
+		return errors.New("--max-log-bytes must not exceed --max-total-log-bytes")
+	case logWorkers <= 0:
+		return errors.New("--log-workers must be positive")
+	case logWorkers > maxLogWorkers:
+		return fmt.Errorf("--log-workers must not exceed %d", maxLogWorkers)
+	case len(activity) > maxCustomerContextLength || len(problem) > maxCustomerContextLength:
+		return fmt.Errorf("activity and problem must not exceed %d characters", maxCustomerContextLength)
+	}
+	for _, namespace := range namespaces {
+		if !validDNSLabel(namespace) {
+			return fmt.Errorf("namespace %q must be a Kubernetes DNS label", namespace)
+		}
+	}
+	return nil
+}
+
+func defaultOutputPath() (string, error) {
+	home, err := homeDirectory()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	home = strings.TrimSpace(home)
+	if home == "" || !filepath.IsAbs(home) {
+		return "", errors.New("resolve home directory: absolute home path is required")
+	}
+	directory := filepath.Join(home, defaultOutputDirectory)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return "", fmt.Errorf("create default output directory: %w", err)
+	}
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return "", fmt.Errorf("inspect default output directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("default output directory must be a real directory")
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return "", fmt.Errorf("secure default output directory: %w", err)
+	}
+	timestamp := currentTime().UTC().Format("20060102T150405Z")
+	return filepath.Join(directory, "qodo-support-bundle-"+timestamp+".tar.gz"), nil
 }
 
 func resolveKubectl(binary string) (string, error) {
@@ -547,179 +571,6 @@ func resolveKubectl(binary string) (string, error) {
 	return canonical, nil
 }
 
-func closeBundle(closer io.Closer, stderr io.Writer, exitCode *int) {
-	if err := closer.Close(); err != nil {
-		_, _ = fmt.Fprintln(stderr, "Failed to clean up temporary bundle data.")
-		*exitCode = 1
-	}
-}
-
-func correlationWindow(stats har.Stats, padding time.Duration) (time.Time, time.Time) {
-	startedAt, startErr := time.Parse(time.RFC3339Nano, stats.AdjustedStartedAt)
-	endedAt, endErr := time.Parse(time.RFC3339Nano, stats.AdjustedEndedAt)
-	if startErr != nil || endErr != nil {
-		return time.Time{}, time.Time{}
-	}
-	return startedAt.Add(-padding), endedAt.Add(padding)
-}
-
-func formatOptionalTime(value time.Time) string {
-	if value.IsZero() {
-		return ""
-	}
-	return value.Format(time.RFC3339Nano)
-}
-
-func buildSummary(
-	generatedAt time.Time,
-	status string,
-	harStats har.Stats,
-	kubernetesReport kubernetes.Report,
-	customerContext map[string]string,
-) string {
-	var summary strings.Builder
-	fmt.Fprintln(&summary, "# Qodo support bundle summary")
-	fmt.Fprintf(&summary, "\n- Captured: %s\n", generatedAt.Format(time.RFC3339Nano))
-	fmt.Fprintf(&summary, "- Collection status: %s\n", status)
-	if activity := summaryValue(customerContext["activity"]); activity != "" {
-		fmt.Fprintf(&summary, "- Customer activity: %s\n", activity)
-	}
-	if problem := summaryValue(customerContext["problem"]); problem != "" {
-		fmt.Fprintf(&summary, "- Reported problem: %s\n", problem)
-	}
-	fmt.Fprintln(&summary, "\n## Browser and correlation")
-	fmt.Fprintf(&summary, "\n- HTTP requests: %d\n", harStats.EntriesWritten)
-	fmt.Fprintf(&summary, "- HTTP failures (4xx/5xx): %d\n", harStats.HTTPFailures)
-	fmt.Fprintf(&summary, "- HAR entry truncation: %t\n", harStats.Truncated)
-	fmt.Fprintf(&summary, "- Unique correlation values: %d\n", harStats.CorrelationIDCount)
-	fmt.Fprintf(
-		&summary,
-		"- Correlation ID truncation: %t\n",
-		harStats.CorrelationIDsTruncated,
-	)
-	fmt.Fprintf(
-		&summary,
-		"- Browser-to-cluster clock offset: %d ms (%d Date-header samples)\n",
-		harStats.ClockSkewMilliseconds,
-		harStats.ClockSkewSamples,
-	)
-	if harStats.CaptureStartedAt != "" {
-		fmt.Fprintf(
-			&summary,
-			"- HAR capture window: %s to %s\n",
-			harStats.CaptureStartedAt,
-			harStats.CaptureEndedAt,
-		)
-	}
-	fmt.Fprintln(&summary, "\n## Kubernetes")
-	fmt.Fprintf(
-		&summary,
-		"\n- Scope: %d/%d namespaces, %d pods, %d containers\n",
-		len(kubernetesReport.Namespaces),
-		kubernetesReport.NamespacesRequested,
-		kubernetesReport.Pods,
-		kubernetesReport.Containers,
-	)
-	fmt.Fprintf(&summary, "- Container restarts: %d\n", kubernetesReport.ContainerRestarts)
-	fmt.Fprintf(&summary, "- OOMKills: %d\n", kubernetesReport.OOMKills)
-	fmt.Fprintf(
-		&summary,
-		"- Correlated logs: %d lines across %d files (%d streams scanned)\n",
-		kubernetesReport.MatchedLogLines,
-		kubernetesReport.MatchedLogFiles,
-		kubernetesReport.LogStreamsScanned,
-	)
-	fmt.Fprintf(&summary, "- Truncated log files: %d\n", kubernetesReport.TruncatedLogFiles)
-	fmt.Fprintf(&summary, "- Truncated raw log scans: %d\n", kubernetesReport.TruncatedLogScans)
-	fmt.Fprintf(&summary, "- Collection issues: %d\n", len(kubernetesReport.Issues))
-	fmt.Fprintln(
-		&summary,
-		"\nOpen this bundle with `qodo-support-bundle serve` for the merged timeline.",
-	)
-	return summary.String()
-}
-
-func summaryValue(value string) string {
-	return strings.Join(strings.Fields(value), " ")
-}
-
-func terminalText(redactor *redact.Redactor, value string) string {
-	return strings.Map(func(character rune) rune {
-		if character < 0x20 || character == 0x7f {
-			return ' '
-		}
-		return character
-	}, redactor.Text(value))
-}
-
-func validateCollectFlags(
-	namespaces []string,
-	allNamespaces bool,
-	harPath string,
-	since time.Duration,
-	timeout time.Duration,
-	maxLogBytes int64,
-	maxLogScanBytes int64,
-	maxTotalLogBytes int64,
-	logWorkers int,
-	maxHARBytes int64,
-	maxHAREntries int,
-) error {
-	switch {
-	case !allNamespaces && len(namespaces) == 0:
-		return errors.New("at least one namespace is required")
-	case harPath == "":
-		return errors.New("--har is required")
-	case since <= 0:
-		return errors.New("--since must be positive")
-	case timeout <= 0:
-		return errors.New("--command-timeout must be positive")
-	case timeout > maxCommandTimeout:
-		return fmt.Errorf("--command-timeout must not exceed %s", maxCommandTimeout)
-	case maxLogBytes <= 0:
-		return errors.New("--max-log-bytes must be positive")
-	case maxLogBytes > maxLogLimit:
-		return fmt.Errorf("--max-log-bytes must not exceed %d bytes", maxLogLimit)
-	case maxLogScanBytes <= 0:
-		return errors.New("--max-log-scan-bytes must be positive")
-	case maxLogScanBytes > maxLogScanLimit:
-		return fmt.Errorf(
-			"--max-log-scan-bytes must not exceed %d bytes",
-			maxLogScanLimit,
-		)
-	case maxLogScanBytes < maxLogBytes:
-		return errors.New("--max-log-scan-bytes must not be less than --max-log-bytes")
-	case maxTotalLogBytes <= 0:
-		return errors.New("--max-total-log-bytes must be positive")
-	case maxTotalLogBytes > maxTotalLogLimit:
-		return fmt.Errorf(
-			"--max-total-log-bytes must not exceed %d bytes",
-			maxTotalLogLimit,
-		)
-	case maxLogBytes > maxTotalLogBytes:
-		return errors.New("--max-log-bytes must not exceed --max-total-log-bytes")
-	case logWorkers <= 0:
-		return errors.New("--log-workers must be positive")
-	case logWorkers > maxLogWorkers:
-		return fmt.Errorf("--log-workers must not exceed %d", maxLogWorkers)
-	case maxLogScanBytes*int64(logWorkers) > maxConcurrentLogScanLimit:
-		return fmt.Errorf(
-			"--max-log-scan-bytes times --log-workers must not exceed %d bytes",
-			maxConcurrentLogScanLimit,
-		)
-	case maxHARBytes <= 0:
-		return errors.New("--max-har-bytes must be positive")
-	case maxHARBytes > maxHARLimit:
-		return fmt.Errorf("--max-har-bytes must not exceed %d bytes", maxHARLimit)
-	case maxHAREntries <= 0:
-		return errors.New("--max-har-entries must be positive")
-	case maxHAREntries > maxHAREntryLimit:
-		return fmt.Errorf("--max-har-entries must not exceed %d", maxHAREntryLimit)
-	default:
-		return nil
-	}
-}
-
 func parseNamespaces(namespace string, namespaces string) ([]string, error) {
 	value := namespace
 	if namespaces != "" {
@@ -740,6 +591,113 @@ func parseNamespaces(namespace string, namespaces string) ([]string, error) {
 		result = append(result, trimmed)
 	}
 	return result, nil
+}
+
+func buildSummary(
+	generatedAt time.Time,
+	status string,
+	report kubernetes.Report,
+	customerContext map[string]string,
+	probeEnabled bool,
+	connectivity *zitadel.Report,
+	probeFailure string,
+) string {
+	var summary strings.Builder
+	fmt.Fprintln(&summary, "# Qodo support bundle summary")
+	fmt.Fprintf(&summary, "\n- Captured: %s\n", generatedAt.Format(time.RFC3339Nano))
+	fmt.Fprintf(&summary, "- Collection status: %s\n", status)
+	if value := summaryValue(customerContext["activity"]); value != "" {
+		fmt.Fprintf(&summary, "- Customer activity: %s\n", value)
+	}
+	if value := summaryValue(customerContext["problem"]); value != "" {
+		fmt.Fprintf(&summary, "- Reported problem: %s\n", value)
+	}
+	fmt.Fprintln(&summary, "\n## Kubernetes")
+	fmt.Fprintf(
+		&summary,
+		"\n- Scope: %d/%d namespaces, %d pods, %d containers\n",
+		len(report.Namespaces),
+		report.NamespacesRequested,
+		report.Pods,
+		report.Containers,
+	)
+	fmt.Fprintf(&summary, "- Container restarts: %d\n", report.ContainerRestarts)
+	fmt.Fprintf(&summary, "- OOMKills: %d\n", report.OOMKills)
+	fmt.Fprintf(
+		&summary,
+		"- Metadata bytes: %d/%d\n",
+		report.MetadataBytes,
+		report.MetadataLimitBytes,
+	)
+	fmt.Fprintf(
+		&summary,
+		"- Truncated metadata files: %d\n",
+		report.TruncatedMetadataFiles,
+	)
+	fmt.Fprintf(
+		&summary,
+		"- Namespaces skipped by metadata limit: %d\n",
+		report.MetadataNamespacesSkipped,
+	)
+	fmt.Fprintf(&summary, "- Log files: %d\n", report.LogFiles)
+	fmt.Fprintf(&summary, "- Truncated log files: %d\n", report.TruncatedLogFiles)
+	fmt.Fprintf(&summary, "- Collection issues: %d\n", len(report.Issues))
+	if probeEnabled {
+		fmt.Fprintln(&summary, "\n## Platform to Zitadel")
+		switch {
+		case probeFailure != "":
+			fmt.Fprintf(&summary, "\n- Probe collection: unavailable (%s)\n", probeFailure)
+		case connectivity != nil:
+			fmt.Fprintln(&summary, "\n- Probe collection: complete")
+			for _, check := range connectivity.Checks {
+				fmt.Fprintf(&summary, "- %s: %s", check.Name, check.Status)
+				if check.Reason != "" {
+					fmt.Fprintf(&summary, " (%s)", check.Reason)
+				}
+				fmt.Fprintln(&summary)
+			}
+			fmt.Fprintln(&summary, "- Login and token issuance were not tested.")
+		}
+	}
+	fmt.Fprintln(&summary, "\nReview every file before sharing.")
+	return summary.String()
+}
+
+func validDNSLabel(value string) bool {
+	return len(value) <= 63 && dnsLabelPattern.MatchString(value)
+}
+
+func validDNSName(value string, maxLength int) bool {
+	return len(value) <= maxLength && dnsNamePattern.MatchString(value)
+}
+
+func containsString(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+
+func closeBundle(closer io.Closer, stderr io.Writer, exitCode *int) {
+	if err := closer.Close(); err != nil {
+		_, _ = fmt.Fprintln(stderr, "Failed to clean up temporary bundle data.")
+		*exitCode = 1
+	}
+}
+
+func summaryValue(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func terminalText(redactor *redact.Redactor, value string) string {
+	return strings.Map(func(character rune) rune {
+		if character < 0x20 || character == 0x7f {
+			return ' '
+		}
+		return character
+	}, redactor.Text(value))
 }
 
 func redactStrings(values []string, redactor *redact.Redactor) []string {
@@ -804,19 +762,12 @@ func marshalIssues(issues []kubernetes.Issue) ([]byte, error) {
 	return output.Bytes(), nil
 }
 
-func defaultOutputPath() string {
-	timestamp := time.Now().UTC().Format("20060102T150405Z")
-	return "qodo-support-bundle-" + timestamp + ".tar.gz"
-}
-
 func printUsage(writer io.Writer) {
 	_, _ = fmt.Fprintln(writer, `Usage:
-  qodo-support-bundle collect [options] capture.har
-  qodo-support-bundle serve [--no-open] bundle.tar.gz
+  qodo-support-bundle collect [options]
   qodo-support-bundle version
+  qodo-support-bundle help
 
-The collect command imports sanitized browser request metadata and gathers
-Kubernetes metadata, events, and bounded container logs from automatically
-discovered application namespaces. Explicit namespace flags override discovery.
-The serve command opens a private, read-only viewer on the local machine.`)
+Collect bounded, redacted Kubernetes metadata, events, and container logs.
+The optional --check-zitadel probe runs inside one selected Platform container.`)
 }
