@@ -555,36 +555,33 @@ func (skipper *JSONValueSkipper) completeRemainder(line string, offset int) int 
 }
 
 func jsonContinuationValid(remainder string) bool {
-	index := 0
-	for index < len(remainder) && jsonSpace(remainder[index]) {
-		index++
-	}
+	index := skipJSONSpace(remainder, 0)
 	if index == len(remainder) {
 		return true
 	}
-	switch remainder[index] {
-	case '}', ']':
-		return true
-	case ',':
-		index++
-		for index < len(remainder) && jsonSpace(remainder[index]) {
-			index++
-		}
+	for index < len(remainder) && (remainder[index] == '}' || remainder[index] == ']') {
+		index = skipJSONSpace(remainder, index+1)
 		if index == len(remainder) {
 			return true
 		}
-		if remainder[index] != '"' {
-			return false
-		}
-		_, next, closed, invalid := parseJSONQuotedString(remainder, index)
-		if !closed || invalid {
-			return false
-		}
-		index = skipJSONSpace(remainder, next)
-		return index < len(remainder) && remainder[index] == ':'
-	default:
+	}
+	if remainder[index] != ',' {
 		return false
 	}
+	index++
+	index = skipJSONSpace(remainder, index)
+	if index == len(remainder) {
+		return true
+	}
+	if remainder[index] != '"' {
+		return false
+	}
+	_, next, closed, invalid := parseJSONQuotedString(remainder, index)
+	if !closed || invalid {
+		return false
+	}
+	index = skipJSONSpace(remainder, next)
+	return index < len(remainder) && remainder[index] == ':'
 }
 
 func jsonSpace(character byte) bool {

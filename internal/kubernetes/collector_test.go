@@ -1086,6 +1086,59 @@ func TestSanitizeLogMalformedEscapedKeyFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogRescansSuffixIncompleteTokenKey(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\"password\":1, \"token\":\n\"later-secret\"\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "later-secret") {
+		t.Fatalf("incomplete token sibling leaked later-secret: %s", output)
+	}
+}
+
+func TestSanitizeLogRescansSuffixEscapedPIIKey(t *testing.T) {
+	t.Parallel()
+	input := []byte(`{"password":"x","full\u004eame":"Alice"}` + "\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "Alice") {
+		t.Fatalf("escaped PII sibling leaked: %s", output)
+	}
+	if !strings.Contains(output, redact.Replacement) {
+		t.Fatalf("redaction replacement missing: %s", output)
+	}
+}
+
+func TestSanitizeLogRescansSuffixNestedTokenOpener(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\"password\":{\"note\":\"first\"},\"token\":{\n  \"note\": \"second-secret\"\n}\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "first") || strings.Contains(output, "second-secret") {
+		t.Fatalf("nested token opener leaked secrets: %s", output)
+	}
+}
+
+func TestSanitizeLogRescansMultipleSensitiveSiblings(t *testing.T) {
+	t.Parallel()
+	input := []byte(`{"password":1,"token":"t","secret":{"k":1},"api_key":["a"],"request_id":"req-123"}` + "\n")
+	output := string(mustSanitizeLog(t, input))
+	for _, leak := range []string{`"t"`, `"a"`} {
+		if strings.Contains(output, leak) {
+			t.Fatalf("sensitive sibling leaked %s: %s", leak, output)
+		}
+	}
+	if !strings.Contains(output, "request_id") || !strings.Contains(output, "req-123") {
+		t.Fatalf("safe request_id was not preserved: %s", output)
+	}
+}
+
+func TestSanitizeLogNonAdvancingSuffixFailsClosed(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\"password\":\"x\"} later-secret\nstill-secret\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "later-secret") || strings.Contains(output, "still-secret") {
+		t.Fatalf("non-advancing suffix resumed canaries: %s", output)
+	}
+}
+
 func mustSanitizeLog(t *testing.T, input []byte) []byte {
 	t.Helper()
 	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
@@ -1269,6 +1322,30 @@ func TestCollectMalformedContinuationSuppressesLaterSecret(t *testing.T) {
 	output := collectCurrentLog(t, "{\n  \"password\":\n  \"first\",}\n  \"later-secret\"\n}\n")
 	if strings.Contains(output, "later-secret") {
 		t.Fatalf("collector leaked later-secret after malformed continuation: %s", output)
+	}
+}
+
+func TestCollectRescansSuffixIncompleteTokenKey(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\"password\":1, \"token\":\n\"later-secret\"\n")
+	if strings.Contains(output, "later-secret") {
+		t.Fatalf("collector leaked later-secret after token key: %s", output)
+	}
+}
+
+func TestCollectRescansSuffixEscapedPIIKey(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, `{"password":"x","full\u004eame":"Alice"}`+"\n")
+	if strings.Contains(output, "Alice") {
+		t.Fatalf("collector leaked escaped PII sibling: %s", output)
+	}
+}
+
+func TestCollectRescansSuffixNestedTokenOpener(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\"password\":{\"note\":\"first\"},\"token\":{\n  \"note\": \"second-secret\"\n}\n")
+	if strings.Contains(output, "first") || strings.Contains(output, "second-secret") {
+		t.Fatalf("collector leaked nested token secrets: %s", output)
 	}
 }
 

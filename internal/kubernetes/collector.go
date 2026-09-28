@@ -788,8 +788,11 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 	forEachLogLine(input, func(_ int, line []byte) {
 		if jsonSkipper.Pending() {
 			consumed := jsonSkipper.Consume(string(line))
-			if !jsonSkipper.Pending() && consumed < len(line) {
-				_, _ = output.WriteString(redactor.JSONLine(string(line[consumed:])))
+			if jsonSkipper.Pending() {
+				return
+			}
+			if consumed < len(line) {
+				writeSensitiveJSONLogLine(output, string(line[consumed:]), redactor, &jsonSkipper)
 				_, _ = output.WriteString("\n")
 			}
 			return
@@ -842,29 +845,42 @@ func writeSensitiveJSONLogLine(
 	redactor *redact.Redactor,
 	jsonSkipper *redact.JSONValueSkipper,
 ) {
-	assignment, ok := redact.SensitiveJSONAssignment(line)
-	if !ok {
-		_, _ = output.WriteString(redactor.JSONLine(line))
-		return
-	}
-	prefix := line[:assignment.ValueOffset]
-	sanitized := redactor.JSONLine(prefix)
-	if !strings.HasSuffix(strings.TrimSpace(sanitized), redact.Replacement) {
-		sanitized += redact.Replacement
-	}
-	_, _ = output.WriteString(sanitized)
-	jsonSkipper.Start()
-	if assignment.Invalid {
-		jsonSkipper.FailClosed()
-		return
-	}
-	if assignment.ValueOffset >= len(line) {
-		return
-	}
-	fragment := line[assignment.ValueOffset:]
-	consumed := jsonSkipper.Consume(fragment)
-	if !jsonSkipper.Pending() && consumed < len(fragment) {
-		_, _ = output.WriteString(redactor.JSONLine(fragment[consumed:]))
+	remaining := line
+	for remaining != "" {
+		assignment, ok := redact.SensitiveJSONAssignment(remaining)
+		if !ok {
+			_, _ = output.WriteString(redactor.JSONLine(remaining))
+			return
+		}
+		prefix := remaining[:assignment.ValueOffset]
+		sanitized := redactor.JSONLine(prefix)
+		if !strings.HasSuffix(strings.TrimSpace(sanitized), redact.Replacement) {
+			sanitized += redact.Replacement
+		}
+		_, _ = output.WriteString(sanitized)
+		jsonSkipper.Start()
+		if assignment.Invalid {
+			jsonSkipper.FailClosed()
+			return
+		}
+		if assignment.ValueOffset >= len(remaining) {
+			return
+		}
+		fragment := remaining[assignment.ValueOffset:]
+		consumed := jsonSkipper.Consume(fragment)
+		if jsonSkipper.Pending() {
+			return
+		}
+		if consumed <= 0 || consumed > len(fragment) {
+			jsonSkipper.FailClosed()
+			return
+		}
+		next := fragment[consumed:]
+		if len(next) >= len(remaining) {
+			jsonSkipper.FailClosed()
+			return
+		}
+		remaining = next
 	}
 }
 

@@ -731,6 +731,20 @@ func TestJSONValueSkipperGarbageAfterValueStaysPending(t *testing.T) {
 	}
 }
 
+func TestJSONValueSkipperGarbageAfterCloserStaysPending(t *testing.T) {
+	t.Parallel()
+	var skipper JSONValueSkipper
+	skipper.Start()
+	skipper.Consume(`"first"} later-secret`)
+	if !skipper.Pending() {
+		t.Fatal("garbage after a closer resumed the skipper")
+	}
+	skipper.Consume(`still-secret`)
+	if !skipper.Pending() {
+		t.Fatal("later canary was not suppressed after closer garbage")
+	}
+}
+
 func TestJSONValueSkipperReturnsSuffixAfterContainerClose(t *testing.T) {
 	t.Parallel()
 	var skipper JSONValueSkipper
