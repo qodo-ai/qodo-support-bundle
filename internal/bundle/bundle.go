@@ -57,6 +57,12 @@ type Builder struct {
 	publish              func(oldpath, newpath string) error
 	temporaryArchivePath string
 	retractPublishedPath string
+	hideAbsolutePaths    bool
+}
+
+// HideAbsolutePaths omits filesystem locations from retract and cleanup errors.
+func (builder *Builder) HideAbsolutePaths() {
+	builder.hideAbsolutePaths = true
 }
 
 // New creates a bundle staging directory beside the output archive.
@@ -412,6 +418,13 @@ func (builder *Builder) createArchive(ctx context.Context, generatedAt time.Time
 		return builder.retractPublishedArchive(err)
 	}
 	if err := builder.remove(temporaryPath); err != nil {
+		if builder.hideAbsolutePaths {
+			cause := pathFreeCause(err)
+			if cause == "" {
+				return fmt.Errorf("%w: remove temporary archive", ErrCleanup)
+			}
+			return fmt.Errorf("%w: remove temporary archive: %s", ErrCleanup, cause)
+		}
 		return fmt.Errorf(
 			"%w: remove temporary archive %q: %v",
 			ErrCleanup,
@@ -437,7 +450,7 @@ func (builder *Builder) cleanupFailedArchive(file *os.File, cause error) error {
 	return errors.Join(
 		cause,
 		wrapArchiveCloseError(closeErr),
-		wrapArchiveRemoveError(temporaryPath, removeErr),
+		wrapArchiveRemoveError(temporaryPath, removeErr, builder.hideAbsolutePaths),
 	)
 }
 
@@ -461,8 +474,8 @@ func (builder *Builder) retractPublishedArchive(cause error) error {
 	}
 	return errors.Join(
 		cause,
-		wrapPublishedArchiveRemoveError(outputPath, outputErr),
-		wrapArchiveRemoveError(temporaryPath, temporaryErr),
+		wrapPublishedArchiveRemoveError(outputPath, outputErr, builder.hideAbsolutePaths),
+		wrapArchiveRemoveError(temporaryPath, temporaryErr, builder.hideAbsolutePaths),
 	)
 }
 
@@ -480,18 +493,57 @@ func wrapArchiveCloseError(err error) error {
 	return fmt.Errorf("close temporary archive during cleanup: %w", err)
 }
 
-func wrapPublishedArchiveRemoveError(path string, err error) error {
+func wrapPublishedArchiveRemoveError(path string, err error, hidePath bool) error {
 	if err == nil {
 		return nil
+	}
+	if hidePath {
+		cause := pathFreeCause(err)
+		if cause == "" {
+			return errors.New("remove published archive during cleanup")
+		}
+		return fmt.Errorf("remove published archive during cleanup: %s", cause)
 	}
 	return fmt.Errorf("remove published archive %q during cleanup: %w", path, err)
 }
 
-func wrapArchiveRemoveError(path string, err error) error {
+func wrapArchiveRemoveError(path string, err error, hidePath bool) error {
 	if err == nil {
 		return nil
 	}
+	if hidePath {
+		cause := pathFreeCause(err)
+		if cause == "" {
+			return errors.New("remove temporary archive during cleanup")
+		}
+		return fmt.Errorf("remove temporary archive during cleanup: %s", cause)
+	}
 	return fmt.Errorf("remove temporary archive %q during cleanup: %w", path, err)
+}
+
+func pathFreeCause(err error) string {
+	if err == nil {
+		return ""
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		parts := make([]string, 0, 2)
+		if pathErr.Op != "" && !strings.ContainsAny(pathErr.Op, `/\`) {
+			parts = append(parts, pathErr.Op)
+		}
+		if pathErr.Err != nil {
+			inner := pathErr.Err.Error()
+			if inner != "" && !strings.ContainsAny(inner, `/\`) {
+				parts = append(parts, inner)
+			}
+		}
+		return strings.Join(parts, ": ")
+	}
+	message := err.Error()
+	if message == "" || strings.ContainsAny(message, `/\`) {
+		return ""
+	}
+	return message
 }
 
 type contextReader struct {

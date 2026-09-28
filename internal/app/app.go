@@ -218,7 +218,9 @@ func runCollect(
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
+	usedDefaultOutput := false
 	if *output == "" {
+		usedDefaultOutput = true
 		*output, err = defaultOutputPath()
 		if err != nil {
 			_, _ = fmt.Fprintln(stderr, err)
@@ -238,6 +240,9 @@ func runCollect(
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
+	}
+	if usedDefaultOutput {
+		builder.HideAbsolutePaths()
 	}
 	cleanupPending := true
 	defer func() {

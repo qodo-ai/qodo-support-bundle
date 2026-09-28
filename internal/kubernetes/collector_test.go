@@ -936,6 +936,91 @@ func TestCollectRedactsPrettyPrintedJSONPasswordAcrossLines(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogMalformedJSONValueDoesNotResumeSecret(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\n  \"password\":\n  {]\n  \"request_id\": \"later-secret\"\n}\n")
+
+	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
+	if truncated {
+		t.Fatal("malformed JSON log was unexpectedly truncated")
+	}
+	output := string(sanitized)
+	if strings.Contains(output, "later-secret") {
+		t.Fatalf("malformed structure resumed emission of a later secret: %s", output)
+	}
+}
+
+func TestCollectMalformedJSONValueDoesNotResumeSecret(t *testing.T) {
+	t.Parallel()
+	sink := &memorySink{}
+	_, err := Collect(
+		context.Background(),
+		Config{
+			Namespace:        "qodo",
+			Since:            time.Minute,
+			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
+			MaxLogBytes:      1 << 20,
+			MaxTotalLogBytes: 10 << 20,
+		},
+		&fakeRunner{
+			run: func(arguments string) (CommandResult, error) {
+				switch {
+				case strings.Contains(arguments, "get pods"):
+					return CommandResult{Stdout: []byte(prettyJSONLogPodJSON)}, nil
+				case strings.Contains(arguments, "get events"):
+					return CommandResult{Stdout: []byte(`{"items":[]}`)}, nil
+				case strings.HasPrefix(arguments, "logs ") && !strings.Contains(arguments, "--previous"):
+					return CommandResult{Stdout: []byte(
+						"{\n  \"password\":\n  {]\n  \"request_id\": \"later-secret\"\n}\n",
+					)}, nil
+				case strings.Contains(arguments, "--previous"):
+					return CommandResult{Stdout: []byte("previous-ok\n")}, nil
+				default:
+					return CommandResult{}, errors.New("unexpected command")
+				}
+			},
+		},
+		sink,
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logOutput string
+	for path, data := range sink.files {
+		if strings.Contains(path, "/platform.log") {
+			logOutput = string(data)
+			break
+		}
+	}
+	if logOutput == "" {
+		t.Fatalf("current container log was not collected: %+v", sink.files)
+	}
+	if strings.Contains(logOutput, "later-secret") {
+		t.Fatalf("collector resumed a later secret after malformed JSON: %s", logOutput)
+	}
+}
+
+func TestSanitizeLogUnclosedSensitiveValueSuppressesRemainder(t *testing.T) {
+	t.Parallel()
+	input := []byte(
+		"{\n  \"password\":\n  {\n    \"nested\": \"secret-value\"\n" +
+			"unrelated-future-line request_id=req-999\n",
+	)
+
+	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
+	if truncated {
+		t.Fatal("unclosed sensitive object was unexpectedly truncated by the output bound")
+	}
+	output := string(sanitized)
+	for _, fragment := range []string{"secret-value", "unrelated-future-line", "req-999"} {
+		if strings.Contains(output, fragment) {
+			t.Fatalf("unclosed sensitive value leaked %q: %s", fragment, output)
+		}
+	}
+}
+
 func TestSanitizeLogFailsClosedForTruncatedQuotedPassword(t *testing.T) {
 	t.Parallel()
 	input := []byte("request_id=req-123 password=\"first second\n")

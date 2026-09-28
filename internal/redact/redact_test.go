@@ -434,3 +434,132 @@ func TestValueRedactsPersonalDataInDynamicObjectKeys(t *testing.T) {
 		t.Fatalf("unexpected redacted object: %+v", output)
 	}
 }
+
+func TestJSONValueSkipperTable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		lines        []string
+		wantPending  bool
+		reuse        []string
+		reusePending bool
+	}{
+		{
+			name:        "string primitive",
+			lines:       []string{`  "super-secret"`},
+			wantPending: false,
+		},
+		{
+			name:        "escaped string",
+			lines:       []string{`"say \"hi\"\n\u0021"`},
+			wantPending: false,
+		},
+		{
+			name:        "number primitive",
+			lines:       []string{"  -12.50e+3"},
+			wantPending: false,
+		},
+		{
+			name:         "true false null",
+			lines:        []string{"true"},
+			wantPending:  false,
+			reuse:        []string{"false", "null"},
+			reusePending: false,
+		},
+		{
+			name: "nested mixed containers",
+			lines: []string{
+				`{`,
+				`  "a": [true, {"b": null, "c": [1, 2]}]`,
+				`}`,
+			},
+			wantPending: false,
+		},
+		{
+			name:        "truncated string",
+			lines:       []string{`"unterminated-secret`},
+			wantPending: true,
+		},
+		{
+			name: "truncated object",
+			lines: []string{
+				`{`,
+				`  "nested": "secret-value"`,
+			},
+			wantPending: true,
+		},
+		{
+			name:        "malformed leading token",
+			lines:       []string{"x-not-json"},
+			wantPending: true,
+		},
+		{
+			name:        "malformed leading terminator",
+			lines:       []string{"]"},
+			wantPending: true,
+		},
+		{
+			name:        "mismatched object closer",
+			lines:       []string{"{]", `"later":"secret"`},
+			wantPending: true,
+		},
+		{
+			name:        "mismatched array closer",
+			lines:       []string{"[}"},
+			wantPending: true,
+		},
+		{
+			name:        "valid completion after whitespace",
+			lines:       []string{"   ", `"ok"`},
+			wantPending: false,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var skipper JSONValueSkipper
+			skipper.Start()
+			if !skipper.Pending() {
+				t.Fatal("skipper was not pending after Start")
+			}
+			for _, line := range test.lines {
+				skipper.Consume(line)
+			}
+			if skipper.Pending() != test.wantPending {
+				t.Fatalf("pending=%v want=%v after %q", skipper.Pending(), test.wantPending, test.lines)
+			}
+			if test.reuse == nil {
+				return
+			}
+			skipper.Start()
+			for _, line := range test.reuse {
+				skipper.Consume(line)
+			}
+			if skipper.Pending() != test.reusePending {
+				t.Fatalf("reuse pending=%v want=%v", skipper.Pending(), test.reusePending)
+			}
+		})
+	}
+}
+
+func TestJSONValueSkipperResetBetweenValues(t *testing.T) {
+	t.Parallel()
+	var skipper JSONValueSkipper
+	skipper.Start()
+	skipper.Consume(`"first"`)
+	if skipper.Pending() {
+		t.Fatal("first value did not complete")
+	}
+	skipper.Start()
+	skipper.Consume(`{"ok":true}`)
+	if skipper.Pending() {
+		t.Fatal("reused skipper did not complete a valid object")
+	}
+	skipper.Start()
+	skipper.Consume("{")
+	if !skipper.Pending() {
+		t.Fatal("truncated object after reset completed early")
+	}
+}

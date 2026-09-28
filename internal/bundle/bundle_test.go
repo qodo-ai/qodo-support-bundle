@@ -149,6 +149,53 @@ func TestFinalizeContextRetainsCleanupWhenPublishedArchiveRemovalFails(t *testin
 	}
 }
 
+func TestRetractDefaultArchiveErrorsOmitAbsolutePath(t *testing.T) {
+	t.Parallel()
+	const username = "review-retract-canary"
+	outputPath := filepath.Join(t.TempDir(), "Users", username, "qodo-support-bundles", "bundle.tar.gz")
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	builder, err := New(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder.HideAbsolutePaths()
+	if err := builder.Add("data.jsonl", []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	builder.publish = func(oldpath, newpath string) error {
+		linkErr := os.Link(oldpath, newpath)
+		cancel()
+		return linkErr
+	}
+	builder.remove = func(path string) error {
+		if path == outputPath {
+			return &os.PathError{Op: "remove", Path: path, Err: errors.New("permission denied")}
+		}
+		return os.Remove(path)
+	}
+
+	_, err = builder.FinalizeContext(ctx, Manifest{GeneratedAt: time.Now()})
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	logged := err.Error()
+	if strings.Contains(logged, username) || strings.Contains(logged, outputPath) {
+		t.Fatalf("default retract error leaked output path: %s", logged)
+	}
+	if !strings.Contains(logged, "remove published archive") ||
+		!strings.Contains(logged, "remove") ||
+		!strings.Contains(logged, "permission denied") {
+		t.Fatalf("missing path-free retract cause: %s", logged)
+	}
+	builder.remove = os.Remove
+	_ = builder.Close()
+}
+
 func TestFinalizeContextDoesNotPublishAfterCancellation(t *testing.T) {
 	t.Parallel()
 	outputPath := filepath.Join(t.TempDir(), "bundle.tar.gz")

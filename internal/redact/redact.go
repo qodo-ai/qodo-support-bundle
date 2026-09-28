@@ -444,15 +444,57 @@ func (redactor *Redactor) JSONLine(line string) string {
 	return string(sanitized)
 }
 
+const maxJSONSkipperDepth = 64
+
+const (
+	jsonSkipNone byte = iota
+	jsonSkipString
+	jsonSkipNumber
+	jsonSkipKeyword
+	jsonSkipContainer
+)
+
+const (
+	jsonExpectKeyOrEmpty byte = iota
+	jsonExpectColon
+	jsonExpectValue
+	jsonExpectCommaOrClose
+	jsonExpectValueOrEmpty
+)
+
+const (
+	jsonNumNone byte = iota
+	jsonNumMinus
+	jsonNumZero
+	jsonNumInt
+	jsonNumDot
+	jsonNumFrac
+	jsonNumExp
+	jsonNumExpSign
+	jsonNumExpDigits
+)
+
+type jsonSkipFrame struct {
+	array bool
+	state byte
+}
+
 // JSONValueSkipper tracks an in-progress sensitive JSON value across log lines
 // using constant-size state.
 type JSONValueSkipper struct {
-	pending  bool
-	started  bool
-	inString bool
-	escaped  bool
-	depth    int
-	literal  bool
+	pending     bool
+	invalid     bool
+	kind        byte
+	inString    bool
+	escaped     bool
+	unicodeLeft int
+	stringIsKey bool
+	keyword     string
+	keywordPos  int
+	numState    byte
+	numValid    bool
+	depth       int
+	stack       [maxJSONSkipperDepth]jsonSkipFrame
 }
 
 // Pending reports whether later lines belong to a sensitive JSON value.
@@ -467,69 +509,401 @@ func (skipper *JSONValueSkipper) Start() {
 
 // Consume advances skipper state over one log line without retaining it.
 func (skipper *JSONValueSkipper) Consume(line string) {
-	if !skipper.pending {
+	if !skipper.pending || skipper.invalid {
 		return
 	}
 	for i := 0; i < len(line); i++ {
-		character := line[i]
-		if skipper.inString {
-			if skipper.escaped {
-				skipper.escaped = false
-				continue
-			}
-			if character == '\\' {
-				skipper.escaped = true
-				continue
-			}
-			if character == '"' {
-				skipper.inString = false
-				if skipper.depth == 0 {
-					skipper.pending = false
-					return
-				}
-			}
-			continue
+		if !skipper.pending || skipper.invalid {
+			return
 		}
-		if !skipper.started {
-			if character == ' ' || character == '\t' || character == '\r' {
-				continue
-			}
-			skipper.started = true
-			switch character {
-			case '"':
-				skipper.inString = true
-			case '{', '[':
-				skipper.depth = 1
-			default:
-				skipper.literal = true
-			}
-			continue
+		skipper.feed(line[i])
+	}
+	skipper.finishLine()
+}
+
+func (skipper *JSONValueSkipper) fail() {
+	skipper.invalid = true
+	skipper.pending = true
+}
+
+func (skipper *JSONValueSkipper) complete() {
+	if skipper.invalid {
+		return
+	}
+	skipper.pending = false
+}
+
+func (skipper *JSONValueSkipper) feed(character byte) {
+	if skipper.invalid {
+		return
+	}
+	if skipper.inString {
+		skipper.feedString(character)
+		return
+	}
+	if skipper.kind == jsonSkipNumber {
+		skipper.feedNumber(character)
+		return
+	}
+	if skipper.kind == jsonSkipKeyword {
+		skipper.feedKeyword(character)
+		return
+	}
+	if character == ' ' || character == '\t' || character == '\r' {
+		return
+	}
+	if skipper.depth > 0 {
+		skipper.feedContainer(character)
+		return
+	}
+	skipper.startValue(character)
+}
+
+func (skipper *JSONValueSkipper) startValue(character byte) {
+	switch character {
+	case '"':
+		skipper.kind = jsonSkipString
+		skipper.inString = true
+		skipper.stringIsKey = false
+	case '{':
+		skipper.push(false)
+	case '[':
+		skipper.push(true)
+	case 't':
+		skipper.startKeyword("true")
+	case 'f':
+		skipper.startKeyword("false")
+	case 'n':
+		skipper.startKeyword("null")
+	case '-':
+		skipper.kind = jsonSkipNumber
+		skipper.numState = jsonNumMinus
+		skipper.numValid = false
+	case '0':
+		skipper.kind = jsonSkipNumber
+		skipper.numState = jsonNumZero
+		skipper.numValid = true
+	case '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		skipper.kind = jsonSkipNumber
+		skipper.numState = jsonNumInt
+		skipper.numValid = true
+	default:
+		skipper.fail()
+	}
+}
+
+func (skipper *JSONValueSkipper) startKeyword(word string) {
+	skipper.kind = jsonSkipKeyword
+	skipper.keyword = word
+	skipper.keywordPos = 1
+}
+
+func (skipper *JSONValueSkipper) push(array bool) {
+	if skipper.depth >= maxJSONSkipperDepth {
+		skipper.fail()
+		return
+	}
+	state := jsonExpectKeyOrEmpty
+	if array {
+		state = jsonExpectValueOrEmpty
+	}
+	skipper.stack[skipper.depth] = jsonSkipFrame{array: array, state: state}
+	skipper.depth++
+	skipper.kind = jsonSkipContainer
+}
+
+func (skipper *JSONValueSkipper) pop() {
+	if skipper.depth == 0 {
+		skipper.fail()
+		return
+	}
+	skipper.depth--
+	if skipper.depth == 0 {
+		skipper.complete()
+		return
+	}
+	skipper.afterValue()
+}
+
+func (skipper *JSONValueSkipper) afterValue() {
+	if skipper.depth == 0 {
+		skipper.complete()
+		return
+	}
+	skipper.kind = jsonSkipContainer
+	skipper.stack[skipper.depth-1].state = jsonExpectCommaOrClose
+}
+
+func (skipper *JSONValueSkipper) feedString(character byte) {
+	if skipper.unicodeLeft > 0 {
+		if !isJSONHex(character) {
+			skipper.fail()
+			return
 		}
-		if skipper.depth > 0 {
-			if character == '"' {
-				skipper.inString = true
-				continue
-			}
-			if character == '{' || character == '[' {
-				skipper.depth++
-			} else if character == '}' || character == ']' {
-				skipper.depth--
-				if skipper.depth == 0 {
-					skipper.pending = false
-					return
-				}
-			}
-			continue
-		}
-		if skipper.literal &&
-			(character == ',' || character == '}' || character == ']' ||
-				character == ' ' || character == '\t') {
-			skipper.pending = false
+		skipper.unicodeLeft--
+		return
+	}
+	if skipper.escaped {
+		skipper.escaped = false
+		switch character {
+		case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+			return
+		case 'u':
+			skipper.unicodeLeft = 4
+			return
+		default:
+			skipper.fail()
 			return
 		}
 	}
-	if skipper.pending && skipper.started && skipper.literal && !skipper.inString && skipper.depth == 0 {
-		skipper.pending = false
+	if character == '\\' {
+		skipper.escaped = true
+		return
+	}
+	if character == '"' {
+		skipper.inString = false
+		if skipper.depth == 0 {
+			skipper.complete()
+			return
+		}
+		if skipper.stringIsKey {
+			skipper.kind = jsonSkipContainer
+			skipper.stack[skipper.depth-1].state = jsonExpectColon
+			return
+		}
+		skipper.afterValue()
+		return
+	}
+	if character < 0x20 {
+		skipper.fail()
+	}
+}
+
+func (skipper *JSONValueSkipper) feedKeyword(character byte) {
+	if skipper.keywordPos < len(skipper.keyword) {
+		if character != skipper.keyword[skipper.keywordPos] {
+			skipper.fail()
+			return
+		}
+		skipper.keywordPos++
+		if skipper.keywordPos == len(skipper.keyword) && skipper.depth == 0 {
+			return
+		}
+		if skipper.keywordPos == len(skipper.keyword) {
+			skipper.afterValue()
+		}
+		return
+	}
+	if jsonValueDelimiter(character) {
+		if skipper.depth == 0 {
+			skipper.complete()
+			return
+		}
+		skipper.afterValue()
+		skipper.feed(character)
+		return
+	}
+	skipper.fail()
+}
+
+func (skipper *JSONValueSkipper) feedNumber(character byte) {
+	if skipper.advanceNumber(character) {
+		return
+	}
+	if jsonValueDelimiter(character) {
+		if !skipper.numValid {
+			skipper.fail()
+			return
+		}
+		if skipper.depth == 0 {
+			skipper.complete()
+			return
+		}
+		skipper.afterValue()
+		skipper.feed(character)
+		return
+	}
+	skipper.fail()
+}
+
+func (skipper *JSONValueSkipper) advanceNumber(character byte) bool {
+	switch skipper.numState {
+	case jsonNumMinus:
+		switch character {
+		case '0':
+			skipper.numState = jsonNumZero
+			skipper.numValid = true
+			return true
+		case '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			skipper.numState = jsonNumInt
+			skipper.numValid = true
+			return true
+		}
+	case jsonNumZero:
+		switch character {
+		case '.':
+			skipper.numState = jsonNumDot
+			skipper.numValid = false
+			return true
+		case 'e', 'E':
+			skipper.numState = jsonNumExp
+			skipper.numValid = false
+			return true
+		}
+	case jsonNumInt:
+		switch character {
+		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			return true
+		case '.':
+			skipper.numState = jsonNumDot
+			skipper.numValid = false
+			return true
+		case 'e', 'E':
+			skipper.numState = jsonNumExp
+			skipper.numValid = false
+			return true
+		}
+	case jsonNumDot:
+		if character >= '0' && character <= '9' {
+			skipper.numState = jsonNumFrac
+			skipper.numValid = true
+			return true
+		}
+	case jsonNumFrac:
+		switch character {
+		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			return true
+		case 'e', 'E':
+			skipper.numState = jsonNumExp
+			skipper.numValid = false
+			return true
+		}
+	case jsonNumExp:
+		switch character {
+		case '+', '-':
+			skipper.numState = jsonNumExpSign
+			return true
+		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			skipper.numState = jsonNumExpDigits
+			skipper.numValid = true
+			return true
+		}
+	case jsonNumExpSign:
+		if character >= '0' && character <= '9' {
+			skipper.numState = jsonNumExpDigits
+			skipper.numValid = true
+			return true
+		}
+	case jsonNumExpDigits:
+		if character >= '0' && character <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+func (skipper *JSONValueSkipper) feedContainer(character byte) {
+	frame := &skipper.stack[skipper.depth-1]
+	switch frame.state {
+	case jsonExpectKeyOrEmpty:
+		if character == '}' && !frame.array {
+			skipper.pop()
+			return
+		}
+		if character == '"' {
+			skipper.kind = jsonSkipString
+			skipper.inString = true
+			skipper.stringIsKey = true
+			return
+		}
+		skipper.fail()
+	case jsonExpectValueOrEmpty:
+		if character == ']' && frame.array {
+			skipper.pop()
+			return
+		}
+		skipper.startValue(character)
+	case jsonExpectColon:
+		if character == ':' {
+			frame.state = jsonExpectValue
+			return
+		}
+		skipper.fail()
+	case jsonExpectValue:
+		skipper.startValue(character)
+	case jsonExpectCommaOrClose:
+		if character == ',' {
+			if frame.array {
+				frame.state = jsonExpectValue
+			} else {
+				frame.state = jsonExpectKeyOrEmpty
+			}
+			return
+		}
+		if character == '}' && !frame.array {
+			skipper.pop()
+			return
+		}
+		if character == ']' && frame.array {
+			skipper.pop()
+			return
+		}
+		skipper.fail()
+	default:
+		skipper.fail()
+	}
+}
+
+func (skipper *JSONValueSkipper) finishLine() {
+	if skipper.invalid || !skipper.pending {
+		return
+	}
+	if skipper.inString || skipper.escaped || skipper.unicodeLeft > 0 {
+		return
+	}
+	switch skipper.kind {
+	case jsonSkipNumber:
+		if skipper.numValid && skipper.depth == 0 {
+			skipper.complete()
+			return
+		}
+		if skipper.numValid {
+			skipper.afterValue()
+			return
+		}
+		skipper.fail()
+	case jsonSkipKeyword:
+		if skipper.keywordPos == len(skipper.keyword) && skipper.depth == 0 {
+			skipper.complete()
+			return
+		}
+		if skipper.keywordPos == len(skipper.keyword) {
+			skipper.afterValue()
+			return
+		}
+		skipper.fail()
+	}
+}
+
+func jsonValueDelimiter(character byte) bool {
+	switch character {
+	case ' ', '\t', '\r', ',', '}', ']':
+		return true
+	default:
+		return false
+	}
+}
+
+func isJSONHex(character byte) bool {
+	switch {
+	case character >= '0' && character <= '9':
+		return true
+	case character >= 'a' && character <= 'f':
+		return true
+	case character >= 'A' && character <= 'F':
+		return true
+	default:
+		return false
 	}
 }
 
