@@ -1158,6 +1158,28 @@ func TestSanitizeLogEscapedPasswordTextDoesNotSuppressLaterLine(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogProseQuotedPasswordDoesNotSuppressLaterLine(t *testing.T) {
+	t.Parallel()
+	output := string(mustSanitizeLog(t, []byte("INFO note: \"password\":\nkeep-next\n")))
+	if !strings.Contains(output, "keep-next") {
+		t.Fatalf("prose password assignment suppressed the next line: %s", output)
+	}
+
+	prefixed := string(mustSanitizeLog(t, []byte("2026-09-28T00:00:00Z {\"data\":{\"password\":\"nested-secret\"}}\n")))
+	if strings.Contains(prefixed, "nested-secret") {
+		t.Fatalf("prefixed nested password leaked: %s", prefixed)
+	}
+}
+
+func TestSanitizeLogMalformedSeparatorEscapedKeyFailsClosed(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\"ok\":1 \"pass\\u0077ord\":\"secret-value\"}\nlater-secret\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "secret-value") || strings.Contains(output, "later-secret") {
+		t.Fatalf("malformed separator leaked canary: %s", output)
+	}
+}
+
 func mustSanitizeLog(t *testing.T, input []byte) []byte {
 	t.Helper()
 	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
@@ -1377,6 +1399,26 @@ func TestCollectEscapedPasswordTextDoesNotSuppressLaterLine(t *testing.T) {
 	output = collectCurrentLog(t, "{\"data\":{\"password\":\"real-secret\"}}\n")
 	if strings.Contains(output, "real-secret") {
 		t.Fatalf("collector leaked nested password: %s", output)
+	}
+}
+
+func TestCollectProseQuotedPasswordDoesNotSuppressLaterLine(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "INFO note: \"password\":\nkeep-next\n")
+	if !strings.Contains(output, "keep-next") {
+		t.Fatalf("collector suppressed later line after prose password: %s", output)
+	}
+	output = collectCurrentLog(t, "2026-09-28T00:00:00Z {\"data\":{\"password\":\"nested-secret\"}}\n")
+	if strings.Contains(output, "nested-secret") {
+		t.Fatalf("collector leaked prefixed nested password: %s", output)
+	}
+}
+
+func TestCollectMalformedSeparatorEscapedKeyFailsClosed(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\"ok\":1 \"pass\\u0077ord\":\"secret-value\"}\nlater-secret\n")
+	if strings.Contains(output, "secret-value") || strings.Contains(output, "later-secret") {
+		t.Fatalf("collector leaked canary after malformed separator: %s", output)
 	}
 }
 

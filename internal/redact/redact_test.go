@@ -607,7 +607,7 @@ func TestJSONValueSkipperMaxArrayDepth(t *testing.T) {
 
 func TestSensitiveJSONAssignmentDetectsUnicodeKey(t *testing.T) {
 	t.Parallel()
-	assignment, ok := SensitiveJSONAssignment(`  "pass\u0077ord":`)
+	assignment, ok := SensitiveJSONObjectAssignment(`  "pass\u0077ord":`)
 	if !ok {
 		t.Fatal("escaped password key was not detected")
 	}
@@ -618,7 +618,7 @@ func TestSensitiveJSONAssignmentDetectsUnicodeKey(t *testing.T) {
 		t.Fatalf("value offset=%d", assignment.ValueOffset)
 	}
 
-	opening, ok := SensitiveJSONAssignment(`  "password": {`)
+	opening, ok := SensitiveJSONObjectAssignment(`  "password": {`)
 	if !ok || opening.ValueOffset >= len(`  "password": {`) {
 		t.Fatalf("same-line object opener was not detected: ok=%v offset=%d", ok, opening.ValueOffset)
 	}
@@ -698,13 +698,13 @@ func TestJSONValueSkipperMalformedContinuationStaysPending(t *testing.T) {
 
 func TestSensitiveJSONAssignmentRejectsOverlongAndMalformedKeys(t *testing.T) {
 	t.Parallel()
-	overlong := `"` + strings.Repeat("a", maxJSONKeyBytes+8) + `": "secret-value"`
+	overlong := `{"` + strings.Repeat("a", maxJSONKeyBytes+8) + `": "secret-value"}`
 	assignment, ok := SensitiveJSONAssignment(overlong)
 	if !ok || !assignment.Invalid {
 		t.Fatalf("overlong key should be fail-closed: ok=%v invalid=%v", ok, assignment.Invalid)
 	}
 
-	malformed := `"pass\zword": "secret-value"`
+	malformed := `{"pass\zword": "secret-value"}`
 	assignment, ok = SensitiveJSONAssignment(malformed)
 	if !ok || !assignment.Invalid {
 		t.Fatalf("malformed escaped key should be fail-closed: ok=%v invalid=%v", ok, assignment.Invalid)
@@ -743,8 +743,22 @@ func TestSensitiveJSONAssignmentIgnoresEscapedKeyTextInValues(t *testing.T) {
 	}
 
 	suffix, ok := SensitiveJSONAssignment(`, "token":`)
+	if ok {
+		t.Fatalf("raw scanner classified an object fragment: %+v", suffix)
+	}
+	suffix, ok = SensitiveJSONObjectAssignment(`, "token":`)
 	if !ok || suffix.Key != "token" {
 		t.Fatalf("suffix fragment token key was not detected: ok=%v assignment=%+v", ok, suffix)
+	}
+
+	prose, ok := SensitiveJSONAssignment(`INFO note: "password":`)
+	if ok {
+		t.Fatalf("prose quoted password was classified as a JSON key: %+v", prose)
+	}
+
+	malformedSeparator, ok := SensitiveJSONAssignment(`{"ok":1 "pass\u0077ord":"secret-value"}`)
+	if !ok || !malformedSeparator.Invalid {
+		t.Fatalf("malformed separator should be fail-closed: ok=%v assignment=%+v", ok, malformedSeparator)
 	}
 
 	prefixed, ok := SensitiveJSONAssignment(`2026-09-28T00:00:00Z {"password":`)

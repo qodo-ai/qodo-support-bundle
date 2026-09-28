@@ -1009,11 +1009,30 @@ type JSONAssignment struct {
 	Invalid     bool
 }
 
-// SensitiveJSONAssignment locates a sensitive JSON field whose value may continue
-// on later lines or as a same-line fragment.
+type JSONAssignmentMode int
+
+const (
+	JSONAssignmentModeRaw JSONAssignmentMode = iota
+	JSONAssignmentModeObjectFragment
+)
+
+// SensitiveJSONAssignment locates a sensitive JSON field on a raw log line.
 func SensitiveJSONAssignment(line string) (JSONAssignment, bool) {
-	if assignment, ok := scanStructuredJSONAssignment(line); ok {
+	return ScanSensitiveJSONAssignment(line, JSONAssignmentModeRaw)
+}
+
+// SensitiveJSONObjectAssignment locates a sensitive JSON field in a parent-object fragment.
+func SensitiveJSONObjectAssignment(line string) (JSONAssignment, bool) {
+	return ScanSensitiveJSONAssignment(line, JSONAssignmentModeObjectFragment)
+}
+
+// ScanSensitiveJSONAssignment locates a sensitive JSON field using an explicit scan mode.
+func ScanSensitiveJSONAssignment(line string, mode JSONAssignmentMode) (JSONAssignment, bool) {
+	if assignment, ok := scanStructuredJSONAssignment(line, mode); ok {
 		return assignment, true
+	}
+	if mode == JSONAssignmentModeRaw {
+		return JSONAssignment{}, false
 	}
 	trimmed := strings.TrimRight(line, " \t\r")
 	assignment := jsonAssignmentPrefixPattern.FindStringSubmatch(trimmed)
@@ -1031,9 +1050,10 @@ func SensitiveJSONAssignment(line string) (JSONAssignment, bool) {
 	return JSONAssignment{Key: key, ValueOffset: len(trimmed)}, true
 }
 
-func scanStructuredJSONAssignment(line string) (JSONAssignment, bool) {
+func scanStructuredJSONAssignment(line string, mode JSONAssignmentMode) (JSONAssignment, bool) {
 	var stack [maxJSONSkipperDepth]jsonSkipFrame
 	depth := 0
+	fragment := mode == JSONAssignmentModeObjectFragment
 	root := jsonSkipFrame{state: jsonExpectKey}
 
 	current := func() *jsonSkipFrame {
@@ -1061,12 +1081,22 @@ func scanStructuredJSONAssignment(line string) (JSONAssignment, bool) {
 		if jsonSpace(character) {
 			continue
 		}
-		frame := current()
-		if depth == 0 && character != '{' && character != '[' && character != '"' &&
-			character != ',' && character != '}' && character != ']' &&
-			frame.state != jsonExpectValue {
+		if !fragment && depth == 0 {
+			if character == '{' {
+				if !pushJSONAssignmentFrame(&stack, &depth, false) {
+					return JSONAssignment{Invalid: true, ValueOffset: index}, true
+				}
+				continue
+			}
+			if character == '[' {
+				if !pushJSONAssignmentFrame(&stack, &depth, true) {
+					return JSONAssignment{Invalid: true, ValueOffset: index}, true
+				}
+				continue
+			}
 			continue
 		}
+		frame := current()
 		switch frame.state {
 		case jsonExpectKeyOrEmpty:
 			if character == '}' && !frame.array {
@@ -1154,7 +1184,9 @@ func scanStructuredJSONAssignment(line string) (JSONAssignment, bool) {
 			}
 			if (character == '}' && !frame.array) || (character == ']' && frame.array) {
 				pop()
+				continue
 			}
+			return JSONAssignment{Invalid: true, ValueOffset: index}, true
 		}
 	}
 	return JSONAssignment{}, false
@@ -1298,9 +1330,43 @@ func skipJSONSpace(line string, index int) int {
 // LineEndsWithSensitiveJSONAssignment reports a pretty-printed sensitive key
 // whose value continues on a later line.
 func LineEndsWithSensitiveJSONAssignment(line string) bool {
-	assignment, ok := SensitiveJSONAssignment(line)
+	assignment, ok := SensitiveJSONObjectAssignment(line)
 	if !ok {
 		return false
 	}
 	return assignment.ValueOffset >= len(strings.TrimRight(line, " \t\r"))
+}
+
+// JSONContainerDepthDelta reports net JSON object/array nesting in a fragment,
+// ignoring quoted strings.
+func JSONContainerDepthDelta(line string) int {
+	depth := 0
+	inString := false
+	escaped := false
+	for index := 0; index < len(line); index++ {
+		character := line[index]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if character == '\\' {
+				escaped = true
+				continue
+			}
+			if character == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch character {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+		}
+	}
+	return depth
 }

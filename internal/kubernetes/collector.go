@@ -785,6 +785,7 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 	output := newBoundedBuffer(maxBytes)
 	inPrivateKey := false
 	var jsonSkipper redact.JSONValueSkipper
+	objectDepth := 0
 	forEachLogLine(input, func(_ int, line []byte) {
 		if jsonSkipper.Pending() {
 			consumed := jsonSkipper.Consume(string(line))
@@ -792,7 +793,14 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 				return
 			}
 			if consumed < len(line) {
-				writeSensitiveJSONLogLine(output, string(line[consumed:]), redactor, &jsonSkipper)
+				writeSensitiveJSONLogLine(
+					output,
+					string(line[consumed:]),
+					redactor,
+					&jsonSkipper,
+					redact.JSONAssignmentModeObjectFragment,
+					&objectDepth,
+				)
 				_, _ = output.WriteString("\n")
 			}
 			return
@@ -819,7 +827,11 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 
 			begin := privateKeyBeginLine.FindStringIndex(remaining)
 			if begin == nil {
-				writeSensitiveJSONLogLine(output, remaining, redactor, &jsonSkipper)
+				mode := redact.JSONAssignmentModeRaw
+				if objectDepth > 0 {
+					mode = redact.JSONAssignmentModeObjectFragment
+				}
+				writeSensitiveJSONLogLine(output, remaining, redactor, &jsonSkipper, mode, &objectDepth)
 				writeLine = true
 				break
 			}
@@ -844,14 +856,23 @@ func writeSensitiveJSONLogLine(
 	line string,
 	redactor *redact.Redactor,
 	jsonSkipper *redact.JSONValueSkipper,
+	mode redact.JSONAssignmentMode,
+	objectDepth *int,
 ) {
 	remaining := line
+	first := true
 	for remaining != "" {
-		assignment, ok := redact.SensitiveJSONAssignment(remaining)
+		scanMode := mode
+		if !first {
+			scanMode = redact.JSONAssignmentModeObjectFragment
+		}
+		assignment, ok := redact.ScanSensitiveJSONAssignment(remaining, scanMode)
 		if !ok {
+			adjustJSONObjectDepth(objectDepth, remaining)
 			_, _ = output.WriteString(redactor.JSONLine(remaining))
 			return
 		}
+		adjustJSONObjectDepth(objectDepth, remaining[:assignment.ValueOffset])
 		prefix := remaining[:assignment.ValueOffset]
 		sanitized := redactor.JSONLine(prefix)
 		if !strings.HasSuffix(strings.TrimSpace(sanitized), redact.Replacement) {
@@ -881,6 +902,17 @@ func writeSensitiveJSONLogLine(
 			return
 		}
 		remaining = next
+		first = false
+	}
+}
+
+func adjustJSONObjectDepth(objectDepth *int, fragment string) {
+	if objectDepth == nil {
+		return
+	}
+	*objectDepth += redact.JSONContainerDepthDelta(fragment)
+	if *objectDepth < 0 {
+		*objectDepth = 0
 	}
 }
 
