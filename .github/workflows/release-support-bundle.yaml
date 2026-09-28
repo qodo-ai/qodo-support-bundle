@@ -4,9 +4,6 @@ on:
   release:
     types: [published]
   pull_request:
-    paths:
-      - .github/workflows/release-support-bundle.yaml
-      - tools/qodo-support-bundle/**
   workflow_dispatch:
     inputs:
       tag:
@@ -30,7 +27,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: tools/qodo-support-bundle/go.mod
+          go-version-file: go.mod
           cache: false
 
       - name: Set up Python
@@ -38,18 +35,15 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: tools/qodo-support-bundle/test-requirements.txt
+          cache-dependency-path: test-requirements.txt
 
       - name: Install Python test dependencies
-        working-directory: tools/qodo-support-bundle
         run: make test-python-deps
 
       - name: Test
-        working-directory: tools/qodo-support-bundle
         run: make test
 
       - name: Validate release build
-        working-directory: tools/qodo-support-bundle
         run: |
           set -euo pipefail
           make release VERSION=0.0.0-ci
@@ -82,7 +76,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: tools/qodo-support-bundle/go.mod
+          go-version-file: go.mod
           cache: false
 
       - name: Set up Python
@@ -90,7 +84,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: tools/qodo-support-bundle/test-requirements.txt
+          cache-dependency-path: test-requirements.txt
 
       - name: Validate release source
         id: version
@@ -123,15 +117,12 @@ jobs:
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install Python test dependencies
-        working-directory: tools/qodo-support-bundle
         run: make test-python-deps
 
       - name: Test
-        working-directory: tools/qodo-support-bundle
         run: make test
 
       - name: Build release binaries
-        working-directory: tools/qodo-support-bundle
         env:
           VERSION: ${{ steps.version.outputs.value }}
         run: make release VERSION="$VERSION"
@@ -139,16 +130,16 @@ jobs:
       - name: Attest release assets
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
-          subject-path: tools/qodo-support-bundle/dist/*
+          subject-path: dist/*
 
       - name: Store workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: qodo-support-bundle-${{ env.RELEASE_TAG }}
-          path: tools/qodo-support-bundle/dist/
+          path: dist/
           if-no-files-found: error
 
       - name: Upload GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$RELEASE_TAG" tools/qodo-support-bundle/dist/* --clobber
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
