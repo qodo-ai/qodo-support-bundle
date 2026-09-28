@@ -844,8 +844,9 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 			}
 			prefix := remaining[:begin[0]]
 			if prefix != "" {
+				mode := jsonContext.AssignmentMode()
 				jsonContext.Observe(prefix)
-				_, _ = output.WriteString(redactor.JSONLine(prefix))
+				_, _ = output.WriteString(sanitizeJSONLogText(redactor, prefix, mode))
 			}
 			_, _ = output.WriteString(redact.Replacement)
 			writeLine = true
@@ -885,7 +886,7 @@ func writeSensitiveJSONLogLine(
 			if jsonContext != nil && jsonContext.Invalid() {
 				return
 			}
-			_, _ = output.WriteString(redactor.JSONLine(remaining))
+			_, _ = output.WriteString(sanitizeJSONLogText(redactor, remaining, scanMode))
 			return
 		}
 		observeJSONStructure(jsonContext, jsonSkipper, remaining[:assignment.ValueOffset])
@@ -893,7 +894,7 @@ func writeSensitiveJSONLogLine(
 			return
 		}
 		prefix := remaining[:assignment.ValueOffset]
-		sanitized := redactor.JSONLine(prefix)
+		sanitized := sanitizeJSONLogText(redactor, prefix, scanMode)
 		if !strings.HasSuffix(strings.TrimSpace(sanitized), redact.Replacement) {
 			sanitized += redact.Replacement
 		}
@@ -932,6 +933,13 @@ func writeSensitiveJSONLogLine(
 		remaining = next
 		first = false
 	}
+}
+
+func sanitizeJSONLogText(redactor *redact.Redactor, text string, mode redact.JSONAssignmentMode) string {
+	if mode == redact.JSONAssignmentModeObjectFragment {
+		return redactor.JSONObjectFragment(text)
+	}
+	return redactor.JSONLine(text)
 }
 
 func observeJSONStructure(

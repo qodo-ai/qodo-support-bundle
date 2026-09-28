@@ -1492,6 +1492,54 @@ func TestSanitizeLogRetainsLogsAfterClosedJSONObject(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogPreservesProsePunctuationAndFollowingLines(t *testing.T) {
+	t.Parallel()
+	input := []byte("INFO unexpected }\nINFO still-running request_id=req-123\n")
+	output := string(mustSanitizeLog(t, input))
+	for _, expected := range []string{"INFO unexpected }", "INFO still-running", "req-123"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("plain log punctuation suppressed %q: %s", expected, output)
+		}
+	}
+}
+
+func TestCollectPreservesProsePunctuationAndFollowingLines(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "INFO unexpected }\nINFO still-running request_id=req-123\n")
+	for _, expected := range []string{"INFO unexpected }", "INFO still-running", "req-123"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("collector suppressed plain punctuation log %q: %s", expected, output)
+		}
+	}
+}
+
+func TestSanitizeLogRedactsPrettyPrintedURLFragment(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\n  \"url\": \"https://example.test/#opaque-value\",\n  \"request_id\": \"req-123\"\n}\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "opaque-value") {
+		t.Fatalf("pretty-printed URL fragment leaked: %s", output)
+	}
+	for _, expected := range []string{"https://example.test/", "request_id", "req-123"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("pretty-printed URL sanitization dropped %q: %s", expected, output)
+		}
+	}
+}
+
+func TestCollectRedactsPrettyPrintedURLFragment(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\n  \"url\": \"https://example.test/#opaque-value\",\n  \"request_id\": \"req-123\"\n}\n")
+	if strings.Contains(output, "opaque-value") {
+		t.Fatalf("collector leaked pretty-printed URL fragment: %s", output)
+	}
+	for _, expected := range []string{"https://example.test/", "request_id", "req-123"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("collector URL sanitization dropped %q: %s", expected, output)
+		}
+	}
+}
+
 func TestCollectUnterminatedStringDoesNotResumePassword(t *testing.T) {
 	t.Parallel()
 	output := collectCurrentLog(t, "{\"message\": \"hello {\n}\n, \"password\":\n\"multiline-secret\"\nlater-canary\n")

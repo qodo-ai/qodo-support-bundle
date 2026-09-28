@@ -464,6 +464,36 @@ func (redactor *Redactor) JSONLine(line string) string {
 	return string(sanitized)
 }
 
+// JSONObjectFragment sanitizes one or more fields from a pretty-printed JSON object.
+func (redactor *Redactor) JSONObjectFragment(line string) string {
+	trimmed := strings.TrimRight(line, " \t\r")
+	trailingSpace := line[len(trimmed):]
+	hasComma := strings.HasSuffix(trimmed, ",")
+	if hasComma {
+		trimmed = strings.TrimSuffix(trimmed, ",")
+	}
+	leadingLength := len(trimmed) - len(strings.TrimLeft(trimmed, " \t"))
+	leadingSpace := trimmed[:leadingLength]
+	fragment := strings.TrimSpace(trimmed)
+	if fragment == "" {
+		return redactor.Text(line)
+	}
+
+	var value map[string]any
+	if err := json.Unmarshal([]byte("{"+fragment+"}"), &value); err != nil {
+		return redactor.Text(line)
+	}
+	sanitized, err := json.Marshal(redactor.Value("", value))
+	if err != nil || len(sanitized) < 2 {
+		return redactor.Text(line)
+	}
+	result := leadingSpace + string(sanitized[1:len(sanitized)-1])
+	if hasComma {
+		result += ","
+	}
+	return result + trailingSpace
+}
+
 const maxJSONSkipperDepth = 64
 
 const (
@@ -1344,11 +1374,12 @@ func LineEndsWithSensitiveJSONAssignment(line string) bool {
 
 // JSONStructureTracker tracks bounded JSON object/array context across log lines.
 type JSONStructureTracker struct {
-	depth    int
-	stack    [maxJSONSkipperDepth]bool
-	inString bool
-	escaped  bool
-	invalid  bool
+	depth       int
+	stack       [maxJSONSkipperDepth]bool
+	inString    bool
+	escaped     bool
+	established bool
+	invalid     bool
 }
 
 // Invalid reports whether structured context has latched fail-closed.
@@ -1370,6 +1401,12 @@ func (tracker *JSONStructureTracker) Observe(fragment string) {
 		return
 	}
 	for index := 0; index < len(fragment); index++ {
+		if !tracker.established {
+			if !plausibleJSONOpener(fragment, index) {
+				continue
+			}
+			tracker.established = true
+		}
 		tracker.feed(fragment[index])
 		if tracker.invalid {
 			return
@@ -1384,6 +1421,10 @@ func (tracker *JSONStructureTracker) EndLine() {
 	}
 	if tracker.inString || tracker.escaped {
 		tracker.FailClosed()
+		return
+	}
+	if tracker.depth == 0 {
+		tracker.established = false
 	}
 }
 
@@ -1421,6 +1462,28 @@ func (tracker *JSONStructureTracker) feed(character byte) {
 		tracker.pop(false)
 	case ']':
 		tracker.pop(true)
+	}
+}
+
+func plausibleJSONOpener(fragment string, index int) bool {
+	if fragment[index] != '{' && fragment[index] != '[' {
+		return false
+	}
+	next := index + 1
+	for next < len(fragment) && jsonSpace(fragment[next]) {
+		next++
+	}
+	if next == len(fragment) {
+		return strings.TrimSpace(fragment[:index]) == ""
+	}
+	if fragment[index] == '{' {
+		return fragment[next] == '"' || fragment[next] == '}'
+	}
+	switch fragment[next] {
+	case '{', '[', '"', ']', '-', 't', 'f', 'n':
+		return true
+	default:
+		return fragment[next] >= '0' && fragment[next] <= '9'
 	}
 }
 
