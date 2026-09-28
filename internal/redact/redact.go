@@ -1342,36 +1342,101 @@ func LineEndsWithSensitiveJSONAssignment(line string) bool {
 	return assignment.ValueOffset >= len(strings.TrimRight(line, " \t\r"))
 }
 
-// JSONContainerDepthDelta reports net JSON object/array nesting in a fragment,
-// ignoring quoted strings.
-func JSONContainerDepthDelta(line string) int {
-	depth := 0
-	inString := false
-	escaped := false
-	for index := 0; index < len(line); index++ {
-		character := line[index]
-		if inString {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if character == '\\' {
-				escaped = true
-				continue
-			}
-			if character == '"' {
-				inString = false
-			}
-			continue
-		}
-		switch character {
-		case '"':
-			inString = true
-		case '{', '[':
-			depth++
-		case '}', ']':
-			depth--
+// JSONStructureTracker tracks bounded JSON object/array context across log lines.
+type JSONStructureTracker struct {
+	depth    int
+	stack    [maxJSONSkipperDepth]bool
+	inString bool
+	escaped  bool
+	invalid  bool
+}
+
+// Invalid reports whether structured context has latched fail-closed.
+func (tracker *JSONStructureTracker) Invalid() bool {
+	return tracker.invalid
+}
+
+// AssignmentMode is the scan mode implied by current nesting.
+func (tracker *JSONStructureTracker) AssignmentMode() JSONAssignmentMode {
+	if tracker.invalid || tracker.depth > 0 {
+		return JSONAssignmentModeObjectFragment
+	}
+	return JSONAssignmentModeRaw
+}
+
+// Observe advances tracker state over a fragment without retaining it.
+func (tracker *JSONStructureTracker) Observe(fragment string) {
+	if tracker.invalid {
+		return
+	}
+	for index := 0; index < len(fragment); index++ {
+		tracker.feed(fragment[index])
+		if tracker.invalid {
+			return
 		}
 	}
-	return depth
+}
+
+// EndLine records a raw newline. Newlines inside JSON strings fail closed.
+func (tracker *JSONStructureTracker) EndLine() {
+	if tracker.invalid {
+		return
+	}
+	if tracker.inString || tracker.escaped {
+		tracker.FailClosed()
+	}
+}
+
+// FailClosed latches invalid structured context.
+func (tracker *JSONStructureTracker) FailClosed() {
+	tracker.invalid = true
+}
+
+func (tracker *JSONStructureTracker) feed(character byte) {
+	if tracker.inString {
+		if tracker.escaped {
+			tracker.escaped = false
+			return
+		}
+		if character == '\\' {
+			tracker.escaped = true
+			return
+		}
+		if character == '"' {
+			tracker.inString = false
+		}
+		return
+	}
+	if jsonSpace(character) {
+		return
+	}
+	switch character {
+	case '"':
+		tracker.inString = true
+	case '{':
+		tracker.push(false)
+	case '[':
+		tracker.push(true)
+	case '}':
+		tracker.pop(false)
+	case ']':
+		tracker.pop(true)
+	}
+}
+
+func (tracker *JSONStructureTracker) push(array bool) {
+	if tracker.depth >= maxJSONSkipperDepth {
+		tracker.FailClosed()
+		return
+	}
+	tracker.stack[tracker.depth] = array
+	tracker.depth++
+}
+
+func (tracker *JSONStructureTracker) pop(array bool) {
+	if tracker.depth == 0 || tracker.stack[tracker.depth-1] != array {
+		tracker.FailClosed()
+		return
+	}
+	tracker.depth--
 }

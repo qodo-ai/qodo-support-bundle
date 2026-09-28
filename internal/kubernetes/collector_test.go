@@ -1456,6 +1456,58 @@ func TestCollectIndentedPasswordKeyRedactsFollowingValue(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogUnterminatedStringDoesNotResumePassword(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\"message\": \"hello {\n}\n, \"password\":\n\"multiline-secret\"\nlater-canary\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "multiline-secret") || strings.Contains(output, "later-canary") {
+		t.Fatalf("unterminated JSON string resumed password assignment: %s", output)
+	}
+}
+
+func TestSanitizeLogClosedStringBracesPreserveSafeFields(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\n  \"note\": \"has { and } braces\",\n  \"request_id\": \"req-123\"\n}\n")
+	output := string(mustSanitizeLog(t, input))
+	if !strings.Contains(output, "request_id") || !strings.Contains(output, "req-123") {
+		t.Fatalf("safe field dropped after braces in a closed string: %s", output)
+	}
+}
+
+func TestSanitizeLogMismatchedCloserFailsClosed(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\n]\nlater-secret\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "later-secret") {
+		t.Fatalf("mismatched closer leaked later-secret: %s", output)
+	}
+}
+
+func TestSanitizeLogRetainsLogsAfterClosedJSONObject(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\"ok\":true}\nplain-later\n")
+	output := string(mustSanitizeLog(t, input))
+	if !strings.Contains(output, "plain-later") {
+		t.Fatalf("plain log after closed JSON was suppressed: %s", output)
+	}
+}
+
+func TestCollectUnterminatedStringDoesNotResumePassword(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\"message\": \"hello {\n}\n, \"password\":\n\"multiline-secret\"\nlater-canary\n")
+	if strings.Contains(output, "multiline-secret") || strings.Contains(output, "later-canary") {
+		t.Fatalf("collector resumed password after unterminated string: %s", output)
+	}
+}
+
+func TestCollectRetainsLogsAfterClosedJSONObject(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\"ok\":true}\nplain-later\n")
+	if !strings.Contains(output, "plain-later") {
+		t.Fatalf("collector dropped plain log after closed JSON: %s", output)
+	}
+}
+
 func TestSanitizeLogMalformedJSONValueDoesNotResumeSecret(t *testing.T) {
 	t.Parallel()
 	input := []byte("{\n  \"password\":\n  {]\n  \"request_id\": \"later-secret\"\n}\n")

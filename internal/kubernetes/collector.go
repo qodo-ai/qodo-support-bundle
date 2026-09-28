@@ -785,7 +785,7 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 	output := newBoundedBuffer(maxBytes)
 	inPrivateKey := false
 	var jsonSkipper redact.JSONValueSkipper
-	objectDepth := 0
+	var jsonContext redact.JSONStructureTracker
 	forEachLogLine(input, func(_ int, line []byte) {
 		if jsonSkipper.Pending() {
 			consumed := jsonSkipper.Consume(string(line))
@@ -799,14 +799,24 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 					redactor,
 					&jsonSkipper,
 					redact.JSONAssignmentModeObjectFragment,
-					&objectDepth,
+					&jsonContext,
 				)
 				_, _ = output.WriteString("\n")
 			}
+			finishJSONStructureLine(&jsonSkipper, &jsonContext)
+			return
+		}
+		if jsonContext.Invalid() {
+			jsonSkipper.FailClosed()
 			return
 		}
 		if len(line) == 0 {
 			if !inPrivateKey {
+				jsonContext.EndLine()
+				if jsonContext.Invalid() {
+					jsonSkipper.FailClosed()
+					return
+				}
 				_, _ = output.WriteString("\n")
 			}
 			return
@@ -827,16 +837,14 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 
 			begin := privateKeyBeginLine.FindStringIndex(remaining)
 			if begin == nil {
-				mode := redact.JSONAssignmentModeRaw
-				if objectDepth > 0 {
-					mode = redact.JSONAssignmentModeObjectFragment
-				}
-				writeSensitiveJSONLogLine(output, remaining, redactor, &jsonSkipper, mode, &objectDepth)
+				mode := jsonContext.AssignmentMode()
+				writeSensitiveJSONLogLine(output, remaining, redactor, &jsonSkipper, mode, &jsonContext)
 				writeLine = true
 				break
 			}
 			prefix := remaining[:begin[0]]
 			if prefix != "" {
+				jsonContext.Observe(prefix)
 				_, _ = output.WriteString(redactor.JSONLine(prefix))
 			}
 			_, _ = output.WriteString(redact.Replacement)
@@ -847,6 +855,7 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 		if writeLine {
 			_, _ = output.WriteString("\n")
 		}
+		finishJSONStructureLine(&jsonSkipper, &jsonContext)
 	})
 	return output.Bytes(), output.Truncated()
 }
@@ -857,8 +866,12 @@ func writeSensitiveJSONLogLine(
 	redactor *redact.Redactor,
 	jsonSkipper *redact.JSONValueSkipper,
 	mode redact.JSONAssignmentMode,
-	objectDepth *int,
+	jsonContext *redact.JSONStructureTracker,
 ) {
+	if jsonContext != nil && jsonContext.Invalid() {
+		jsonSkipper.FailClosed()
+		return
+	}
 	remaining := line
 	first := true
 	for remaining != "" {
@@ -868,11 +881,17 @@ func writeSensitiveJSONLogLine(
 		}
 		assignment, ok := redact.ScanSensitiveJSONAssignment(remaining, scanMode)
 		if !ok {
-			adjustJSONObjectDepth(objectDepth, remaining)
+			observeJSONStructure(jsonContext, jsonSkipper, remaining)
+			if jsonContext != nil && jsonContext.Invalid() {
+				return
+			}
 			_, _ = output.WriteString(redactor.JSONLine(remaining))
 			return
 		}
-		adjustJSONObjectDepth(objectDepth, remaining[:assignment.ValueOffset])
+		observeJSONStructure(jsonContext, jsonSkipper, remaining[:assignment.ValueOffset])
+		if jsonContext != nil && jsonContext.Invalid() {
+			return
+		}
 		prefix := remaining[:assignment.ValueOffset]
 		sanitized := redactor.JSONLine(prefix)
 		if !strings.HasSuffix(strings.TrimSpace(sanitized), redact.Replacement) {
@@ -882,6 +901,9 @@ func writeSensitiveJSONLogLine(
 		jsonSkipper.Start()
 		if assignment.Invalid {
 			jsonSkipper.FailClosed()
+			if jsonContext != nil {
+				jsonContext.FailClosed()
+			}
 			return
 		}
 		if assignment.ValueOffset >= len(remaining) {
@@ -894,11 +916,17 @@ func writeSensitiveJSONLogLine(
 		}
 		if consumed <= 0 || consumed > len(fragment) {
 			jsonSkipper.FailClosed()
+			if jsonContext != nil {
+				jsonContext.FailClosed()
+			}
 			return
 		}
 		next := fragment[consumed:]
 		if len(next) >= len(remaining) {
 			jsonSkipper.FailClosed()
+			if jsonContext != nil {
+				jsonContext.FailClosed()
+			}
 			return
 		}
 		remaining = next
@@ -906,13 +934,27 @@ func writeSensitiveJSONLogLine(
 	}
 }
 
-func adjustJSONObjectDepth(objectDepth *int, fragment string) {
-	if objectDepth == nil {
+func observeJSONStructure(
+	jsonContext *redact.JSONStructureTracker,
+	jsonSkipper *redact.JSONValueSkipper,
+	fragment string,
+) {
+	if jsonContext == nil {
 		return
 	}
-	*objectDepth += redact.JSONContainerDepthDelta(fragment)
-	if *objectDepth < 0 {
-		*objectDepth = 0
+	jsonContext.Observe(fragment)
+	if jsonContext.Invalid() {
+		jsonSkipper.FailClosed()
+	}
+}
+
+func finishJSONStructureLine(jsonSkipper *redact.JSONValueSkipper, jsonContext *redact.JSONStructureTracker) {
+	if jsonSkipper.Pending() || jsonContext.Invalid() {
+		return
+	}
+	jsonContext.EndLine()
+	if jsonContext.Invalid() {
+		jsonSkipper.FailClosed()
 	}
 }
 

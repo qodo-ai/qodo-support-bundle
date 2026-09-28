@@ -898,3 +898,62 @@ func concatPolicyStrings(groups ...[]string) []string {
 	}
 	return items
 }
+
+func TestJSONStructureTrackerNewlineInStringFailsClosed(t *testing.T) {
+	t.Parallel()
+	var tracker JSONStructureTracker
+	tracker.Observe(`{"message": "hello {`)
+	tracker.EndLine()
+	if !tracker.Invalid() {
+		t.Fatal("newline inside a JSON string did not fail closed")
+	}
+	if tracker.AssignmentMode() == JSONAssignmentModeRaw {
+		t.Fatal("invalid tracker reset to raw mode")
+	}
+}
+
+func TestJSONStructureTrackerIgnoresBracesInsideClosedString(t *testing.T) {
+	t.Parallel()
+	var tracker JSONStructureTracker
+	tracker.Observe(`{`)
+	tracker.EndLine()
+	tracker.Observe(`  "note": "has { and } braces",`)
+	tracker.EndLine()
+	tracker.Observe(`  "request_id": "req-123"`)
+	tracker.EndLine()
+	tracker.Observe(`}`)
+	tracker.EndLine()
+	if tracker.Invalid() {
+		t.Fatal("valid nested pretty JSON was marked invalid")
+	}
+	if tracker.AssignmentMode() != JSONAssignmentModeRaw {
+		t.Fatal("closed JSON object did not return to raw mode")
+	}
+}
+
+func TestJSONStructureTrackerMismatchedCloserFailsClosed(t *testing.T) {
+	t.Parallel()
+	var tracker JSONStructureTracker
+	tracker.Observe(`{`)
+	tracker.EndLine()
+	tracker.Observe(`]`)
+	tracker.EndLine()
+	if !tracker.Invalid() {
+		t.Fatal("mismatched closer did not fail closed")
+	}
+}
+
+func TestJSONStructureTrackerDepthOverflowFailsClosed(t *testing.T) {
+	t.Parallel()
+	var tracker JSONStructureTracker
+	for index := 0; index < maxJSONSkipperDepth; index++ {
+		tracker.Observe(`{`)
+		if tracker.Invalid() {
+			t.Fatalf("valid depth %d failed closed", index+1)
+		}
+	}
+	tracker.Observe(`{`)
+	if !tracker.Invalid() {
+		t.Fatal("depth overflow did not fail closed")
+	}
+}
