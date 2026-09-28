@@ -393,6 +393,42 @@ func TestDefaultOutputPathRejectsUnusableHome(t *testing.T) {
 	}
 }
 
+func TestCollectDefaultOutputErrorsOmitHomePath(t *testing.T) {
+	const username = "review-home-canary"
+	root := t.TempDir()
+	home := filepath.Join(root, "Users", username)
+	if err := os.MkdirAll(filepath.Dir(home), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(home, []byte("not-a-directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldHome := homeDirectory
+	t.Cleanup(func() { homeDirectory = oldHome })
+	homeDirectory = func() (string, error) { return home, nil }
+
+	var stderr bytes.Buffer
+	code := Run(
+		context.Background(),
+		[]string{"collect", "--namespace", "qodo"},
+		&bytes.Buffer{},
+		&stderr,
+	)
+	logged := stderr.String()
+	if code != 1 {
+		t.Fatalf("exit=%d stderr=%q", code, logged)
+	}
+	if strings.Contains(logged, username) || strings.Contains(logged, home) {
+		t.Fatalf("stderr leaked default output home path: %s", logged)
+	}
+	if !strings.Contains(logged, defaultOutputCreateDirectory) {
+		t.Fatalf("missing default-output operation category: %s", logged)
+	}
+	if !strings.Contains(logged, "mkdir") && !strings.Contains(logged, "not a directory") {
+		t.Fatalf("missing path-free filesystem cause: %s", logged)
+	}
+}
+
 func TestParseNamespacesUsesExplicitDeploymentScope(t *testing.T) {
 	t.Parallel()
 	namespaces, err := parseNamespaces(

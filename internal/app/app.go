@@ -24,20 +24,27 @@ import (
 )
 
 const (
-	defaultLogLimit          int64 = 10 << 20
-	maxLogLimit                    = kubernetes.MaximumLogBytes
-	defaultTotalLogLimit     int64 = 1 << 30
-	maxTotalLogLimit               = kubernetes.MaximumTotalLogBytes
-	defaultMetadataLimit     int64 = 128 << 20
-	maxMetadataLimit               = kubernetes.MaximumMetadataBytes
-	defaultLogWorkers              = 8
-	maxLogWorkers                  = kubernetes.MaximumLogWorkers
-	maxCustomerContextLength       = 4096
-	maxCommandTimeout              = 30 * time.Minute
-	defaultProbeTimeout            = 15 * time.Second
-	collectionStatusComplete       = "complete"
-	collectionStatusPartial        = "partial"
-	defaultOutputDirectory         = "qodo-support-bundles"
+	defaultLogLimit               int64 = 10 << 20
+	maxLogLimit                         = kubernetes.MaximumLogBytes
+	defaultTotalLogLimit          int64 = 1 << 30
+	maxTotalLogLimit                    = kubernetes.MaximumTotalLogBytes
+	defaultMetadataLimit          int64 = 128 << 20
+	maxMetadataLimit                    = kubernetes.MaximumMetadataBytes
+	defaultLogWorkers                   = 8
+	maxLogWorkers                       = kubernetes.MaximumLogWorkers
+	maxCustomerContextLength            = 4096
+	maxCommandTimeout                   = 30 * time.Minute
+	defaultProbeTimeout                 = 15 * time.Second
+	collectionStatusComplete            = "complete"
+	collectionStatusPartial             = "partial"
+	defaultOutputDirectory              = "qodo-support-bundles"
+	defaultOutputResolveHome            = "resolve home directory"
+	defaultOutputCreateDirectory        = "create default output directory"
+	defaultOutputInspectDirectory       = "inspect default output directory"
+	defaultOutputSecureDirectory        = "secure default output directory"
+	defaultOutputGenerateFilename       = "generate output filename"
+	defaultOutputMustBeDirectory        = "default output directory must be a real directory"
+	defaultOutputAbsoluteHome           = "absolute home path is required"
 )
 
 var (
@@ -533,35 +540,67 @@ func validateCollectFlags(
 func defaultOutputPath() (string, error) {
 	home, err := homeDirectory()
 	if err != nil {
-		return "", fmt.Errorf("resolve home directory: %w", err)
+		return "", defaultOutputError(defaultOutputResolveHome, err)
 	}
 	home = strings.TrimSpace(home)
 	if home == "" || !filepath.IsAbs(home) {
-		return "", errors.New("resolve home directory: absolute home path is required")
+		return "", fmt.Errorf("%s: %s", defaultOutputResolveHome, defaultOutputAbsoluteHome)
 	}
 	directory := filepath.Join(home, defaultOutputDirectory)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return "", fmt.Errorf("create default output directory: %w", err)
+		return "", defaultOutputError(defaultOutputCreateDirectory, err)
 	}
 	info, err := os.Lstat(directory)
 	if err != nil {
-		return "", fmt.Errorf("inspect default output directory: %w", err)
+		return "", defaultOutputError(defaultOutputInspectDirectory, err)
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("default output directory must be a real directory")
+		return "", errors.New(defaultOutputMustBeDirectory)
 	}
 	if err := os.Chmod(directory, 0o700); err != nil {
-		return "", fmt.Errorf("secure default output directory: %w", err)
+		return "", defaultOutputError(defaultOutputSecureDirectory, err)
 	}
 	timestamp := currentTime().UTC().Format("20060102T150405Z")
 	suffix, err := randomOutputSuffix()
 	if err != nil {
-		return "", fmt.Errorf("generate output filename: %w", err)
+		return "", defaultOutputError(defaultOutputGenerateFilename, err)
 	}
 	return filepath.Join(
 		directory,
 		"qodo-support-bundle-"+timestamp+"-"+suffix+".tar.gz",
 	), nil
+}
+
+func defaultOutputError(operation string, err error) error {
+	if cause := pathFreeCause(err); cause != "" {
+		return fmt.Errorf("%s: %s", operation, cause)
+	}
+	return errors.New(operation)
+}
+
+func pathFreeCause(err error) string {
+	if err == nil {
+		return ""
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		parts := make([]string, 0, 2)
+		if pathErr.Op != "" && !strings.ContainsAny(pathErr.Op, `/\`) {
+			parts = append(parts, pathErr.Op)
+		}
+		if pathErr.Err != nil {
+			inner := pathErr.Err.Error()
+			if inner != "" && !strings.ContainsAny(inner, `/\`) {
+				parts = append(parts, inner)
+			}
+		}
+		return strings.Join(parts, ": ")
+	}
+	message := err.Error()
+	if message == "" || strings.ContainsAny(message, `/\`) {
+		return ""
+	}
+	return message
 }
 
 func resolveKubectl(binary string) (string, error) {

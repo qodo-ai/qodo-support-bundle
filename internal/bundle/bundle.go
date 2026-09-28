@@ -54,7 +54,9 @@ type Builder struct {
 	removeAll            func(string) error
 	remove               func(string) error
 	closeArchive         func(*os.File) error
+	publish              func(oldpath, newpath string) error
 	temporaryArchivePath string
+	retractPublishedPath string
 }
 
 // New creates a bundle staging directory beside the output archive.
@@ -92,6 +94,7 @@ func New(outputPath string) (*Builder, error) {
 		closeArchive: func(file *os.File) error {
 			return file.Close()
 		},
+		publish: os.Link,
 	}, nil
 }
 
@@ -229,6 +232,14 @@ func (builder *Builder) Close() error {
 		return nil
 	}
 	cleanupFailed := false
+	if builder.retractPublishedPath != "" {
+		if err := builder.remove(builder.retractPublishedPath); err != nil &&
+			!errors.Is(err, os.ErrNotExist) {
+			cleanupFailed = true
+		} else {
+			builder.retractPublishedPath = ""
+		}
+	}
 	if builder.temporaryArchivePath != "" {
 		if err := builder.remove(builder.temporaryArchivePath); err != nil &&
 			!errors.Is(err, os.ErrNotExist) {
@@ -391,11 +402,14 @@ func (builder *Builder) createArchive(ctx context.Context, generatedAt time.Time
 	if err := ctx.Err(); err != nil {
 		return builder.cleanupFailedArchive(temporaryFile, err)
 	}
-	if err := os.Link(temporaryPath, builder.outputPath); err != nil {
+	if err := builder.publish(temporaryPath, builder.outputPath); err != nil {
 		return builder.cleanupFailedArchive(
 			temporaryFile,
 			fmt.Errorf("publish archive: %w", err),
 		)
+	}
+	if err := ctx.Err(); err != nil {
+		return builder.retractPublishedArchive(err)
 	}
 	if err := builder.remove(temporaryPath); err != nil {
 		return fmt.Errorf(
@@ -427,6 +441,31 @@ func (builder *Builder) cleanupFailedArchive(file *os.File, cause error) error {
 	)
 }
 
+func (builder *Builder) retractPublishedArchive(cause error) error {
+	outputPath := builder.outputPath
+	outputErr := builder.remove(outputPath)
+	if outputErr == nil || errors.Is(outputErr, os.ErrNotExist) {
+		builder.retractPublishedPath = ""
+		outputErr = nil
+	} else {
+		builder.retractPublishedPath = outputPath
+	}
+	temporaryPath := builder.temporaryArchivePath
+	var temporaryErr error
+	if temporaryPath != "" {
+		temporaryErr = builder.remove(temporaryPath)
+		if temporaryErr == nil || errors.Is(temporaryErr, os.ErrNotExist) {
+			builder.temporaryArchivePath = ""
+			temporaryErr = nil
+		}
+	}
+	return errors.Join(
+		cause,
+		wrapPublishedArchiveRemoveError(outputPath, outputErr),
+		wrapArchiveRemoveError(temporaryPath, temporaryErr),
+	)
+}
+
 func wrapCloseError(path string, err error) error {
 	if err == nil {
 		return nil
@@ -439,6 +478,13 @@ func wrapArchiveCloseError(err error) error {
 		return nil
 	}
 	return fmt.Errorf("close temporary archive during cleanup: %w", err)
+}
+
+func wrapPublishedArchiveRemoveError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("remove published archive %q during cleanup: %w", path, err)
 }
 
 func wrapArchiveRemoveError(path string, err error) error {

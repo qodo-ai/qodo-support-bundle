@@ -112,6 +112,28 @@ func TestTextRedactsCommaBearingPasswordAndPreservesNextField(t *testing.T) {
 	}
 }
 
+func TestTextFailsClosedForUnterminatedQuotedSensitiveAssignment(t *testing.T) {
+	t.Parallel()
+	output := New().Text(`password="first second`)
+
+	for _, fragment := range []string{"first", "second"} {
+		if strings.Contains(output, fragment) {
+			t.Fatalf("unterminated quoted password leaked %q: %s", fragment, output)
+		}
+	}
+	if !strings.Contains(output, Replacement) {
+		t.Fatalf("unterminated quoted password was not redacted: %s", output)
+	}
+
+	separated := New().Text(`password="complete-secret" request_id=req-123`)
+	if strings.Contains(separated, "complete-secret") {
+		t.Fatalf("complete quoted password leaked: %s", separated)
+	}
+	if !strings.Contains(separated, "request_id=req-123") {
+		t.Fatalf("complete neighboring field was not preserved: %s", separated)
+	}
+}
+
 func TestTextFailsClosedForFieldLikePasswordTail(t *testing.T) {
 	t.Parallel()
 	input := "password=first,request_id=credential-tail"

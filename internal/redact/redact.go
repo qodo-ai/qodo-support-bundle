@@ -127,6 +127,18 @@ func New() *Redactor {
 			},
 			{
 				expression: regexp.MustCompile(
+					`(?i)((?:` + sensitiveAssignmentKeyPattern + `)[ \t]*["']?[ \t]*[:=][ \t]*)"[^"\r\n]*$`,
+				),
+				replacement: `${1}"` + Replacement,
+			},
+			{
+				expression: regexp.MustCompile(
+					`(?i)((?:` + sensitiveAssignmentKeyPattern + `)[ \t]*["']?[ \t]*[:=][ \t]*)'[^'\r\n]*$`,
+				),
+				replacement: `${1}'` + Replacement,
+			},
+			{
+				expression: regexp.MustCompile(
 					`(?i)((?:` + sensitiveAssignmentKeyPattern + `)[ \t]*["']?[ \t]*[:=][ \t]*["']?)[^"',;&\s]+`,
 				),
 				replacement: `${1}` + Replacement,
@@ -430,4 +442,101 @@ func (redactor *Redactor) JSONLine(line string) string {
 		return redactor.Text(line)
 	}
 	return string(sanitized)
+}
+
+// JSONValueSkipper tracks an in-progress sensitive JSON value across log lines
+// using constant-size state.
+type JSONValueSkipper struct {
+	pending  bool
+	started  bool
+	inString bool
+	escaped  bool
+	depth    int
+	literal  bool
+}
+
+// Pending reports whether later lines belong to a sensitive JSON value.
+func (skipper *JSONValueSkipper) Pending() bool {
+	return skipper.pending
+}
+
+// Start begins fail-closed skipping of a sensitive JSON value.
+func (skipper *JSONValueSkipper) Start() {
+	*skipper = JSONValueSkipper{pending: true}
+}
+
+// Consume advances skipper state over one log line without retaining it.
+func (skipper *JSONValueSkipper) Consume(line string) {
+	if !skipper.pending {
+		return
+	}
+	for i := 0; i < len(line); i++ {
+		character := line[i]
+		if skipper.inString {
+			if skipper.escaped {
+				skipper.escaped = false
+				continue
+			}
+			if character == '\\' {
+				skipper.escaped = true
+				continue
+			}
+			if character == '"' {
+				skipper.inString = false
+				if skipper.depth == 0 {
+					skipper.pending = false
+					return
+				}
+			}
+			continue
+		}
+		if !skipper.started {
+			if character == ' ' || character == '\t' || character == '\r' {
+				continue
+			}
+			skipper.started = true
+			switch character {
+			case '"':
+				skipper.inString = true
+			case '{', '[':
+				skipper.depth = 1
+			default:
+				skipper.literal = true
+			}
+			continue
+		}
+		if skipper.depth > 0 {
+			if character == '"' {
+				skipper.inString = true
+				continue
+			}
+			if character == '{' || character == '[' {
+				skipper.depth++
+			} else if character == '}' || character == ']' {
+				skipper.depth--
+				if skipper.depth == 0 {
+					skipper.pending = false
+					return
+				}
+			}
+			continue
+		}
+		if skipper.literal &&
+			(character == ',' || character == '}' || character == ']' ||
+				character == ' ' || character == '\t') {
+			skipper.pending = false
+			return
+		}
+	}
+	if skipper.pending && skipper.started && skipper.literal && !skipper.inString && skipper.depth == 0 {
+		skipper.pending = false
+	}
+}
+
+// LineEndsWithSensitiveJSONAssignment reports a pretty-printed sensitive key
+// whose value continues on a later line.
+func LineEndsWithSensitiveJSONAssignment(line string) bool {
+	trimmed := strings.TrimRight(line, " \t\r")
+	assignment := jsonAssignmentPrefixPattern.FindStringSubmatch(trimmed)
+	return assignment != nil && IsSensitiveKey(assignment[1])
 }

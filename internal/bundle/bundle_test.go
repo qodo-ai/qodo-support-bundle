@@ -74,6 +74,81 @@ func TestFinalizeCreatesRestrictedChecksummedArchive(t *testing.T) {
 	}
 }
 
+func TestFinalizeContextRetractsArchiveCanceledAfterPublish(t *testing.T) {
+	t.Parallel()
+	outputPath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	builder, err := New(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer builder.Close()
+	if err := builder.Add("data.jsonl", []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	builder.publish = func(oldpath, newpath string) error {
+		if err := os.Link(oldpath, newpath); err != nil {
+			return err
+		}
+		cancel()
+		return nil
+	}
+
+	_, err = builder.FinalizeContext(ctx, Manifest{GeneratedAt: time.Now()})
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation after publish, got %v", err)
+	}
+	if _, statErr := os.Stat(outputPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("canceled finalization left published archive: %v", statErr)
+	}
+}
+
+func TestFinalizeContextRetainsCleanupWhenPublishedArchiveRemovalFails(t *testing.T) {
+	t.Parallel()
+	outputPath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	builder, err := New(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.Add("data.jsonl", []byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	builder.publish = func(oldpath, newpath string) error {
+		linkErr := os.Link(oldpath, newpath)
+		cancel()
+		return linkErr
+	}
+	builder.remove = func(path string) error {
+		if path == outputPath {
+			return errors.New("injected published archive cleanup failure")
+		}
+		return os.Remove(path)
+	}
+
+	archivePath, err := builder.FinalizeContext(ctx, Manifest{GeneratedAt: time.Now()})
+
+	if archivePath != "" || !errors.Is(err, context.Canceled) {
+		t.Fatalf("unexpected finalize result: path=%q err=%v", archivePath, err)
+	}
+	if _, statErr := os.Stat(outputPath); statErr != nil {
+		t.Fatalf("published archive should remain when retract fails: %v", statErr)
+	}
+	if builder.retractPublishedPath == "" {
+		t.Fatal("retryable published-archive cleanup state was not retained")
+	}
+	builder.remove = os.Remove
+	if err := builder.Close(); err != nil {
+		t.Fatalf("retry cleanup failed: %v", err)
+	}
+	if _, statErr := os.Stat(outputPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("retry did not remove published archive: %v", statErr)
+	}
+}
+
 func TestFinalizeContextDoesNotPublishAfterCancellation(t *testing.T) {
 	t.Parallel()
 	outputPath := filepath.Join(t.TempDir(), "bundle.tar.gz")

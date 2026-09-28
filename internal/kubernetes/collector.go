@@ -784,7 +784,12 @@ func firstNonEmptyValue(values ...string) string {
 func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byte, bool) {
 	output := newBoundedBuffer(maxBytes)
 	inPrivateKey := false
+	var jsonSkipper redact.JSONValueSkipper
 	forEachLogLine(input, func(_ int, line []byte) {
+		if jsonSkipper.Pending() {
+			jsonSkipper.Consume(string(line))
+			return
+		}
 		if len(line) == 0 {
 			if !inPrivateKey {
 				_, _ = output.WriteString("\n")
@@ -807,11 +812,21 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 
 			begin := privateKeyBeginLine.FindStringIndex(remaining)
 			if begin == nil {
-				_, _ = output.WriteString(redactor.JSONLine(remaining))
+				sanitized := redactor.JSONLine(remaining)
+				if redact.LineEndsWithSensitiveJSONAssignment(remaining) {
+					if !strings.HasSuffix(strings.TrimSpace(sanitized), redact.Replacement) {
+						sanitized += redact.Replacement
+					}
+					jsonSkipper.Start()
+				}
+				_, _ = output.WriteString(sanitized)
 				writeLine = true
 				break
 			}
-			_, _ = output.WriteString(redactor.JSONLine(remaining[:begin[0]]))
+			prefix := remaining[:begin[0]]
+			if prefix != "" {
+				_, _ = output.WriteString(redactor.JSONLine(prefix))
+			}
 			_, _ = output.WriteString(redact.Replacement)
 			writeLine = true
 			remaining = remaining[begin[1]:]

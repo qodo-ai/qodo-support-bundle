@@ -41,6 +41,12 @@ type memorySink struct {
 	files map[string][]byte
 }
 
+const prettyJSONLogPodJSON = `{"items":[{
+  "metadata":{"name":"platform","namespace":"qodo"},
+  "spec":{"containers":[{"name":"platform","image":"registry/platform:1"}]},
+  "status":{"phase":"Running","containerStatuses":[{"name":"platform","ready":true}]}
+}]}`
+
 func (sink *memorySink) Add(path string, data []byte) error {
 	if sink.files == nil {
 		sink.files = make(map[string][]byte)
@@ -855,6 +861,149 @@ func TestMarshalPodRecordsRedactsStartTimeSecret(t *testing.T) {
 	}
 	if !strings.Contains(output, redact.Replacement) {
 		t.Fatalf("pod timestamp was not redacted: %s", output)
+	}
+}
+
+func TestSanitizeLogRedactsPrettyPrintedJSONSecret(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\n  \"password\":\n  \"super-secret\",\n  \"request_id\": \"req-123\"\n}\n")
+
+	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
+	if truncated {
+		t.Fatal("pretty-printed JSON log was unexpectedly truncated")
+	}
+	output := string(sanitized)
+	if strings.Contains(output, "super-secret") {
+		t.Fatalf("pretty-printed JSON secret survived sanitization: %s", output)
+	}
+	if !strings.Contains(output, "request_id") || !strings.Contains(output, "req-123") {
+		t.Fatalf("neighboring JSON field was not preserved: %s", output)
+	}
+}
+
+func TestCollectRedactsPrettyPrintedJSONPasswordAcrossLines(t *testing.T) {
+	t.Parallel()
+	sink := &memorySink{}
+	_, err := Collect(
+		context.Background(),
+		Config{
+			Namespace:        "qodo",
+			Since:            time.Minute,
+			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
+			MaxLogBytes:      1 << 20,
+			MaxTotalLogBytes: 10 << 20,
+		},
+		&fakeRunner{
+			run: func(arguments string) (CommandResult, error) {
+				switch {
+				case strings.Contains(arguments, "get pods"):
+					return CommandResult{Stdout: []byte(prettyJSONLogPodJSON)}, nil
+				case strings.Contains(arguments, "get events"):
+					return CommandResult{Stdout: []byte(`{"items":[]}`)}, nil
+				case strings.HasPrefix(arguments, "logs ") && !strings.Contains(arguments, "--previous"):
+					return CommandResult{Stdout: []byte(
+						"{\n  \"password\":\n  \"super-secret\",\n  \"request_id\": \"req-123\"\n}\n",
+					)}, nil
+				case strings.Contains(arguments, "--previous"):
+					return CommandResult{Stdout: []byte("previous-ok\n")}, nil
+				default:
+					return CommandResult{}, errors.New("unexpected command")
+				}
+			},
+		},
+		sink,
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logOutput string
+	for path, data := range sink.files {
+		if strings.Contains(path, "/platform.log") {
+			logOutput = string(data)
+			break
+		}
+	}
+	if logOutput == "" {
+		t.Fatalf("current container log was not collected: %+v", sink.files)
+	}
+	if strings.Contains(logOutput, "super-secret") {
+		t.Fatalf("collector leaked pretty-printed JSON secret: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "request_id") || !strings.Contains(logOutput, "req-123") {
+		t.Fatalf("collector dropped neighboring JSON field: %s", logOutput)
+	}
+}
+
+func TestSanitizeLogFailsClosedForTruncatedQuotedPassword(t *testing.T) {
+	t.Parallel()
+	input := []byte("request_id=req-123 password=\"first second\n")
+
+	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
+	if truncated {
+		t.Fatal("truncated password log was unexpectedly truncated by the output bound")
+	}
+	output := string(sanitized)
+	for _, fragment := range []string{"first", "second"} {
+		if strings.Contains(output, fragment) {
+			t.Fatalf("truncated quoted password leaked %q: %s", fragment, output)
+		}
+	}
+	if !strings.Contains(output, "request_id=req-123") {
+		t.Fatalf("neighboring complete field was not preserved: %s", output)
+	}
+}
+
+func TestCollectRedactsTruncatedQuotedPassword(t *testing.T) {
+	t.Parallel()
+	sink := &memorySink{}
+	_, err := Collect(
+		context.Background(),
+		Config{
+			Namespace:        "qodo",
+			Since:            time.Minute,
+			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
+			MaxLogBytes:      1 << 20,
+			MaxTotalLogBytes: 10 << 20,
+		},
+		&fakeRunner{
+			run: func(arguments string) (CommandResult, error) {
+				switch {
+				case strings.Contains(arguments, "get pods"):
+					return CommandResult{Stdout: []byte(prettyJSONLogPodJSON)}, nil
+				case strings.Contains(arguments, "get events"):
+					return CommandResult{Stdout: []byte(`{"items":[]}`)}, nil
+				case strings.HasPrefix(arguments, "logs ") && !strings.Contains(arguments, "--previous"):
+					return CommandResult{Stdout: []byte("password=\"first second\n")}, nil
+				case strings.Contains(arguments, "--previous"):
+					return CommandResult{Stdout: []byte("previous-ok\n")}, nil
+				default:
+					return CommandResult{}, errors.New("unexpected command")
+				}
+			},
+		},
+		sink,
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logOutput string
+	for path, data := range sink.files {
+		if strings.Contains(path, "/platform.log") {
+			logOutput = string(data)
+			break
+		}
+	}
+	if logOutput == "" {
+		t.Fatalf("current container log was not collected: %+v", sink.files)
+	}
+	for _, fragment := range []string{"first", "second"} {
+		if strings.Contains(logOutput, fragment) {
+			t.Fatalf("collector leaked truncated password fragment %q: %s", fragment, logOutput)
+		}
 	}
 }
 
