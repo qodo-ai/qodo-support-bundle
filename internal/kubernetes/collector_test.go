@@ -1031,6 +1031,70 @@ func TestCollectTruncatedJSONStringDoesNotResumeSecret(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogFirstSensitiveAssignmentRedactsNestedSecret(t *testing.T) {
+	t.Parallel()
+	input := []byte(`{"password":{"note":"child-secret"},"token":"t"}` + "\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "child-secret") {
+		t.Fatalf("later token assignment leaked nested password secret: %s", output)
+	}
+}
+
+func TestSanitizeLogPrimitiveSiblingPreservesRequestID(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{
+		`{"password": 1, "request_id":"req-123"}` + "\n",
+		`{"password": true, "request_id":"req-123"}` + "\n",
+	} {
+		output := string(mustSanitizeLog(t, []byte(body)))
+		if !strings.Contains(output, "request_id") || !strings.Contains(output, "req-123") {
+			t.Fatalf("primitive sibling dropped request_id: %s", output)
+		}
+	}
+}
+
+func TestSanitizeLogMalformedContinuationSuppressesLaterSecret(t *testing.T) {
+	t.Parallel()
+	tests := []string{
+		"{\n  \"password\":\n  \"first\",}\n  \"later-secret\"\n}\n",
+		"{\n  \"password\":\n  \"first\",[\n  \"later-secret\"\n}\n",
+		"{\n  \"password\":\n  \"first\",\"value\"\n  \"later-secret\"\n}\n",
+	}
+	for _, input := range tests {
+		if strings.Contains(string(mustSanitizeLog(t, []byte(input))), "later-secret") {
+			t.Fatalf("malformed continuation leaked later-secret: %s", input)
+		}
+	}
+}
+
+func TestSanitizeLogOverlongKeyFailsClosed(t *testing.T) {
+	t.Parallel()
+	key := strings.Repeat("a", 2056)
+	input := []byte(`{"` + key + `": "secret-value"}` + "\n  later-secret\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "secret-value") || strings.Contains(output, "later-secret") {
+		t.Fatalf("overlong key leaked value: %s", output)
+	}
+}
+
+func TestSanitizeLogMalformedEscapedKeyFailsClosed(t *testing.T) {
+	t.Parallel()
+	input := []byte(`{"pass\zword": "secret-value"}` + "\n  later-secret\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "secret-value") || strings.Contains(output, "later-secret") {
+		t.Fatalf("malformed key leaked value: %s", output)
+	}
+}
+
+func mustSanitizeLog(t *testing.T, input []byte) []byte {
+	t.Helper()
+	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
+	if truncated {
+		t.Fatal("log was unexpectedly truncated by the output bound")
+	}
+	return sanitized
+}
+
 func TestSanitizeLogSameLineObjectOpenerRedactsChildSecret(t *testing.T) {
 	t.Parallel()
 	input := []byte(
@@ -1177,6 +1241,34 @@ func TestCollectGarbageAfterValueSuppressesLaterSecret(t *testing.T) {
 	output := collectCurrentLog(t, "{\n  \"password\":\n  \"first\" garbage\n  \"later-secret\"\n}\n")
 	if strings.Contains(output, "later-secret") {
 		t.Fatalf("collector resumed after garbage remainder: %s", output)
+	}
+}
+
+func TestCollectFirstSensitiveAssignmentRedactsNestedSecret(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, `{"password":{"note":"child-secret"},"token":"t"}`+"\n")
+	if strings.Contains(output, "child-secret") {
+		t.Fatalf("collector leaked nested password secret: %s", output)
+	}
+}
+
+func TestCollectPrimitiveSiblingPreservesRequestID(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, `{"password": 1, "request_id":"req-123"}`+"\n")
+	if !strings.Contains(output, "request_id") || !strings.Contains(output, "req-123") {
+		t.Fatalf("collector dropped primitive sibling: %s", output)
+	}
+	output = collectCurrentLog(t, `{"password": true, "request_id":"req-123"}`+"\n")
+	if !strings.Contains(output, "request_id") || !strings.Contains(output, "req-123") {
+		t.Fatalf("collector dropped keyword sibling: %s", output)
+	}
+}
+
+func TestCollectMalformedContinuationSuppressesLaterSecret(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\n  \"password\":\n  \"first\",}\n  \"later-secret\"\n}\n")
+	if strings.Contains(output, "later-secret") {
+		t.Fatalf("collector leaked later-secret after malformed continuation: %s", output)
 	}
 }
 

@@ -485,19 +485,20 @@ type jsonSkipFrame struct {
 // JSONValueSkipper tracks an in-progress sensitive JSON value across log lines
 // using constant-size state.
 type JSONValueSkipper struct {
-	pending     bool
-	invalid     bool
-	kind        byte
-	inString    bool
-	escaped     bool
-	unicodeLeft int
-	stringIsKey bool
-	keyword     string
-	keywordPos  int
-	numState    byte
-	numValid    bool
-	depth       int
-	stack       [maxJSONSkipperDepth]jsonSkipFrame
+	pending         bool
+	invalid         bool
+	unreadDelimiter bool
+	kind            byte
+	inString        bool
+	escaped         bool
+	unicodeLeft     int
+	stringIsKey     bool
+	keyword         string
+	keywordPos      int
+	numState        byte
+	numValid        bool
+	depth           int
+	stack           [maxJSONSkipperDepth]jsonSkipFrame
 }
 
 // Pending reports whether later lines belong to a sensitive JSON value.
@@ -508,6 +509,12 @@ func (skipper *JSONValueSkipper) Pending() bool {
 // Start begins fail-closed skipping of a sensitive JSON value.
 func (skipper *JSONValueSkipper) Start() {
 	*skipper = JSONValueSkipper{pending: true}
+}
+
+// FailClosed latches the skipper so remaining lines are not emitted.
+func (skipper *JSONValueSkipper) FailClosed() {
+	skipper.invalid = true
+	skipper.pending = true
 }
 
 // Consume advances skipper state over one log line without retaining it.
@@ -524,7 +531,12 @@ func (skipper *JSONValueSkipper) Consume(line string) int {
 			return len(line)
 		}
 		if !skipper.pending {
-			return skipper.completeRemainder(line, i+1)
+			offset := i + 1
+			if skipper.unreadDelimiter {
+				offset = i
+				skipper.unreadDelimiter = false
+			}
+			return skipper.completeRemainder(line, offset)
 		}
 	}
 	skipper.finishLine()
@@ -561,12 +573,15 @@ func jsonContinuationValid(remainder string) bool {
 		if index == len(remainder) {
 			return true
 		}
-		switch remainder[index] {
-		case '"', '{', '[', '}', ']':
-			return true
-		default:
+		if remainder[index] != '"' {
 			return false
 		}
+		_, next, closed, invalid := parseJSONQuotedString(remainder, index)
+		if !closed || invalid {
+			return false
+		}
+		index = skipJSONSpace(remainder, next)
+		return index < len(remainder) && remainder[index] == ':'
 	default:
 		return false
 	}
@@ -751,6 +766,7 @@ func (skipper *JSONValueSkipper) feedKeyword(character byte) {
 	}
 	if jsonValueDelimiter(character) {
 		if skipper.depth == 0 {
+			skipper.unreadDelimiter = true
 			skipper.complete()
 			return
 		}
@@ -771,6 +787,7 @@ func (skipper *JSONValueSkipper) feedNumber(character byte) {
 			return
 		}
 		if skipper.depth == 0 {
+			skipper.unreadDelimiter = true
 			skipper.complete()
 			return
 		}
@@ -974,36 +991,33 @@ func isJSONHex(character byte) bool {
 type JSONAssignment struct {
 	Key         string
 	ValueOffset int
+	Invalid     bool
 }
 
 // SensitiveJSONAssignment locates a sensitive JSON field whose value may continue
 // on later lines or as a same-line fragment.
 func SensitiveJSONAssignment(line string) (JSONAssignment, bool) {
-	found := JSONAssignment{}
-	matched := false
 	for index := 0; index < len(line); index++ {
 		if line[index] != '"' {
 			continue
 		}
-		key, next, ok := parseJSONObjectKey(line, index)
-		if !ok {
-			continue
+		key, next, closed, invalid := parseJSONQuotedString(line, index)
+		if !closed {
+			break
 		}
 		cursor := skipJSONSpace(line, next)
 		if cursor >= len(line) || (line[cursor] != ':' && line[cursor] != '=') {
 			index = next - 1
 			continue
 		}
-		cursor = skipJSONSpace(line, cursor+1)
-		index = next - 1
-		if !IsSensitiveKey(key) {
-			continue
+		valueOffset := skipJSONSpace(line, cursor+1)
+		if invalid {
+			return JSONAssignment{Invalid: true, ValueOffset: valueOffset}, true
 		}
-		found = JSONAssignment{Key: key, ValueOffset: cursor}
-		matched = true
-	}
-	if matched {
-		return found, true
+		if IsSensitiveKey(key) {
+			return JSONAssignment{Key: key, ValueOffset: valueOffset}, true
+		}
+		index = next - 1
 	}
 	trimmed := strings.TrimRight(line, " \t\r")
 	assignment := jsonAssignmentPrefixPattern.FindStringSubmatch(trimmed)
@@ -1013,14 +1027,15 @@ func SensitiveJSONAssignment(line string) (JSONAssignment, bool) {
 	return JSONAssignment{Key: assignment[1], ValueOffset: len(trimmed)}, true
 }
 
-func parseJSONObjectKey(line string, quoteIndex int) (string, int, bool) {
+func parseJSONQuotedString(line string, quoteIndex int) (string, int, bool, bool) {
 	if quoteIndex >= len(line) || line[quoteIndex] != '"' {
-		return "", quoteIndex, false
+		return "", quoteIndex, false, false
 	}
 	escaped := false
+	overlong := false
 	for index := quoteIndex + 1; index < len(line); index++ {
 		if index-quoteIndex > maxJSONKeyBytes {
-			return "", quoteIndex, false
+			overlong = true
 		}
 		character := line[index]
 		if escaped {
@@ -1032,15 +1047,18 @@ func parseJSONObjectKey(line string, quoteIndex int) (string, int, bool) {
 			continue
 		}
 		if character == '"' {
+			if overlong {
+				return "", index + 1, true, true
+			}
 			raw := line[quoteIndex : index+1]
 			var decoded string
 			if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
-				return "", quoteIndex, false
+				return "", index + 1, true, true
 			}
-			return decoded, index + 1, true
+			return decoded, index + 1, true, false
 		}
 	}
-	return "", quoteIndex, false
+	return "", quoteIndex, false, false
 }
 
 func skipJSONSpace(line string, index int) int {

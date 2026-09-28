@@ -854,6 +854,10 @@ func writeSensitiveJSONLogLine(
 	}
 	_, _ = output.WriteString(sanitized)
 	jsonSkipper.Start()
+	if assignment.Invalid {
+		jsonSkipper.FailClosed()
+		return
+	}
 	if assignment.ValueOffset >= len(line) {
 		return
 	}

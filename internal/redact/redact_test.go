@@ -622,6 +622,96 @@ func TestSensitiveJSONAssignmentDetectsUnicodeKey(t *testing.T) {
 	if `  "password": {`[opening.ValueOffset] != '{' {
 		t.Fatalf("value fragment does not start at opener: %q", `  "password": {`[opening.ValueOffset:])
 	}
+
+	first, ok := SensitiveJSONAssignment(`{"password":{"note":"child-secret"},"token":"t"}`)
+	if !ok || first.Invalid {
+		t.Fatal("compact password object was not detected")
+	}
+	if first.Key != "password" {
+		t.Fatalf("first sensitive key=%q", first.Key)
+	}
+	line := `{"password":{"note":"child-secret"},"token":"t"}`
+	if first.ValueOffset >= len(line) || line[first.ValueOffset] != '{' {
+		t.Fatalf("first assignment did not start at password value: offset=%d", first.ValueOffset)
+	}
+}
+
+func TestJSONValueSkipperPrimitivePreservesDelimiterSuffix(t *testing.T) {
+	t.Parallel()
+	for _, fragment := range []string{
+		`1, "request_id":"req-123"`,
+		`true, "request_id":"req-123"`,
+		`false, "request_id":"req-123"`,
+		`null, "request_id":"req-123"`,
+	} {
+		fragment := fragment
+		t.Run(fragment, func(t *testing.T) {
+			t.Parallel()
+			var skipper JSONValueSkipper
+			skipper.Start()
+			consumed := skipper.Consume(fragment)
+			if skipper.Pending() {
+				t.Fatalf("primitive did not complete: %q", fragment)
+			}
+			suffix := fragment[consumed:]
+			if !strings.HasPrefix(strings.TrimLeft(suffix, " \t"), ",") {
+				t.Fatalf("delimiter was not preserved in suffix: consumed=%d suffix=%q", consumed, suffix)
+			}
+			if !strings.Contains(suffix, "request_id") || !strings.Contains(suffix, "req-123") {
+				t.Fatalf("safe sibling missing from suffix: %q", suffix)
+			}
+		})
+	}
+}
+
+func TestJSONValueSkipperMalformedContinuationStaysPending(t *testing.T) {
+	t.Parallel()
+	tests := []string{
+		`"first",}`,
+		`"first",]`,
+		`"first",{`,
+		`"first",[`,
+		`"first","value"`,
+		`"first" garbage`,
+		`"first", garbage`,
+	}
+	for _, line := range tests {
+		line := line
+		t.Run(line, func(t *testing.T) {
+			t.Parallel()
+			var skipper JSONValueSkipper
+			skipper.Start()
+			skipper.Consume(line)
+			if !skipper.Pending() {
+				t.Fatalf("malformed continuation completed: %q", line)
+			}
+			skipper.Consume(`"later-secret"`)
+			if !skipper.Pending() {
+				t.Fatalf("later canary was not suppressed after %q", line)
+			}
+		})
+	}
+}
+
+func TestSensitiveJSONAssignmentRejectsOverlongAndMalformedKeys(t *testing.T) {
+	t.Parallel()
+	overlong := `"` + strings.Repeat("a", maxJSONKeyBytes+8) + `": "secret-value"`
+	assignment, ok := SensitiveJSONAssignment(overlong)
+	if !ok || !assignment.Invalid {
+		t.Fatalf("overlong key should be fail-closed: ok=%v invalid=%v", ok, assignment.Invalid)
+	}
+
+	malformed := `"pass\zword": "secret-value"`
+	assignment, ok = SensitiveJSONAssignment(malformed)
+	if !ok || !assignment.Invalid {
+		t.Fatalf("malformed escaped key should be fail-closed: ok=%v invalid=%v", ok, assignment.Invalid)
+	}
+
+	valueOnly := `{"request_id":"not-a-key"}`
+	assignment, ok = SensitiveJSONAssignment(valueOnly)
+	if ok {
+		t.Fatalf("value string was classified as a key: %+v", assignment)
+	}
 }
 
 func TestJSONValueSkipperGarbageAfterValueStaysPending(t *testing.T) {
