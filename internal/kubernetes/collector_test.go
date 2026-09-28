@@ -1171,6 +1171,24 @@ func TestSanitizeLogProseQuotedPasswordDoesNotSuppressLaterLine(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogIndentedPasswordKeyRedactsFollowingValue(t *testing.T) {
+	t.Parallel()
+	output := string(mustSanitizeLog(t, []byte("{\n  \"password\":\n  \"indented-secret\"\n}\n")))
+	if strings.Contains(output, "indented-secret") {
+		t.Fatalf("indented password value leaked: %s", output)
+	}
+
+	unicode := string(mustSanitizeLog(t, []byte("{\n  \"pass\\u0077ord\":\n  \"unicode-secret\"\n}\n")))
+	if strings.Contains(unicode, "unicode-secret") {
+		t.Fatalf("line-leading unicode password leaked: %s", unicode)
+	}
+
+	leadingString := string(mustSanitizeLog(t, []byte("  \"see \\\"password\\\": \\\"secret\\\"\"\nkeep-string\n")))
+	if !strings.Contains(leadingString, "keep-string") {
+		t.Fatalf("line-leading JSON string value suppressed the next line: %s", leadingString)
+	}
+}
+
 func TestSanitizeLogMalformedSeparatorEscapedKeyFailsClosed(t *testing.T) {
 	t.Parallel()
 	input := []byte("{\"ok\":1 \"pass\\u0077ord\":\"secret-value\"}\nlater-secret\n")
@@ -1419,6 +1437,22 @@ func TestCollectMalformedSeparatorEscapedKeyFailsClosed(t *testing.T) {
 	output := collectCurrentLog(t, "{\"ok\":1 \"pass\\u0077ord\":\"secret-value\"}\nlater-secret\n")
 	if strings.Contains(output, "secret-value") || strings.Contains(output, "later-secret") {
 		t.Fatalf("collector leaked canary after malformed separator: %s", output)
+	}
+}
+
+func TestCollectIndentedPasswordKeyRedactsFollowingValue(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\n  \"password\":\n  \"indented-secret\"\n}\n")
+	if strings.Contains(output, "indented-secret") {
+		t.Fatalf("collector leaked indented password: %s", output)
+	}
+	output = collectCurrentLog(t, "{\n  \"pass\\u0077ord\":\n  \"unicode-secret\"\n}\n")
+	if strings.Contains(output, "unicode-secret") {
+		t.Fatalf("collector leaked unicode indented password: %s", output)
+	}
+	output = collectCurrentLog(t, "  \"see \\\"password\\\": \\\"secret\\\"\"\nkeep-string\n")
+	if !strings.Contains(output, "keep-string") {
+		t.Fatalf("collector suppressed later line after line-leading string: %s", output)
 	}
 }
 

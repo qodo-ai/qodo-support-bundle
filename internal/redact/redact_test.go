@@ -756,6 +756,21 @@ func TestSensitiveJSONAssignmentIgnoresEscapedKeyTextInValues(t *testing.T) {
 		t.Fatalf("prose quoted password was classified as a JSON key: %+v", prose)
 	}
 
+	indented, ok := SensitiveJSONAssignment(`  "password":`)
+	if !ok || indented.Key != "password" {
+		t.Fatalf("line-leading indented password key was not detected: ok=%v assignment=%+v", ok, indented)
+	}
+
+	unicodeLeading, ok := SensitiveJSONAssignment(`  "pass\u0077ord":`)
+	if !ok || unicodeLeading.Key != "password" {
+		t.Fatalf("line-leading unicode password key was not detected: ok=%v assignment=%+v", ok, unicodeLeading)
+	}
+
+	leadingString, ok := SensitiveJSONAssignment(`  "see \"password\": \"secret\""`)
+	if ok {
+		t.Fatalf("line-leading JSON string value was classified as a key: %+v", leadingString)
+	}
+
 	malformedSeparator, ok := SensitiveJSONAssignment(`{"ok":1 "pass\u0077ord":"secret-value"}`)
 	if !ok || !malformedSeparator.Invalid {
 		t.Fatalf("malformed separator should be fail-closed: ok=%v assignment=%+v", ok, malformedSeparator)

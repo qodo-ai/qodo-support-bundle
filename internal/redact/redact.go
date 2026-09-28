@@ -1055,6 +1055,7 @@ func scanStructuredJSONAssignment(line string, mode JSONAssignmentMode) (JSONAss
 	depth := 0
 	fragment := mode == JSONAssignmentModeObjectFragment
 	root := jsonSkipFrame{state: jsonExpectKey}
+	sawNonSpace := false
 
 	current := func() *jsonSkipFrame {
 		if depth == 0 {
@@ -1082,19 +1083,23 @@ func scanStructuredJSONAssignment(line string, mode JSONAssignmentMode) (JSONAss
 			continue
 		}
 		if !fragment && depth == 0 {
-			if character == '{' {
+			switch {
+			case character == '{':
 				if !pushJSONAssignmentFrame(&stack, &depth, false) {
 					return JSONAssignment{Invalid: true, ValueOffset: index}, true
 				}
 				continue
-			}
-			if character == '[' {
+			case character == '[':
 				if !pushJSONAssignmentFrame(&stack, &depth, true) {
 					return JSONAssignment{Invalid: true, ValueOffset: index}, true
 				}
 				continue
+			case character == '"' && !sawNonSpace:
+			case root.state == jsonExpectValue || root.state == jsonExpectColon || root.state == jsonExpectCommaOrClose:
+			default:
+				sawNonSpace = true
+				continue
 			}
-			continue
 		}
 		frame := current()
 		switch frame.state {
