@@ -82,6 +82,83 @@ func TestCollectRequiresNoInputFile(t *testing.T) {
 	}
 }
 
+func TestCollectOmitsUsernameFromResolvedKubectlLog(t *testing.T) {
+	root := t.TempDir()
+	username := "review-user-canary"
+	kubectl := fakeKubectl(t, filepath.Join(root, "Users", username, "bin"), "")
+	if !strings.Contains(kubectl, username) {
+		t.Fatalf("resolved kubectl path does not include username: %s", kubectl)
+	}
+	output := filepath.Join(root, "bundle.tar.gz")
+	var stderr bytes.Buffer
+	code := Run(
+		context.Background(),
+		[]string{
+			"collect",
+			"--namespace", "qodo",
+			"--kubectl", kubectl,
+			"--output", output,
+		},
+		&bytes.Buffer{},
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	logged := stderr.String()
+	if !strings.Contains(logged, "Using kubectl:") {
+		t.Fatalf("missing kubectl status log: %s", logged)
+	}
+	if strings.Contains(logged, username) || strings.Contains(logged, kubectl) {
+		t.Fatalf("stderr leaked identifying kubectl path: %s", logged)
+	}
+}
+
+func TestCollectHonorsExplicitExcludeSystemNamespacesFalse(t *testing.T) {
+	root := t.TempDir()
+	kubectl := fakeKubectl(t, root, "")
+	output := filepath.Join(root, "bundle.tar.gz")
+	var stderr bytes.Buffer
+	code := Run(
+		context.Background(),
+		[]string{
+			"collect",
+			"--exclude-system-namespaces=false",
+			"--kubectl", kubectl,
+			"--output", output,
+		},
+		&bytes.Buffer{},
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	manifest := string(readArchive(t, output)["manifest.json"])
+	if !strings.Contains(manifest, `"exclude_system_namespaces": false`) {
+		t.Fatalf("explicit false was overwritten: %s", manifest)
+	}
+	if !strings.Contains(manifest, `"all_namespaces": true`) {
+		t.Fatalf("missing default all-namespaces scope: %s", manifest)
+	}
+}
+
+func TestValidDNSNameRejectsEmptyAndOversizedLabels(t *testing.T) {
+	t.Parallel()
+	oversized := strings.Repeat("a", 64)
+	if validDNSName("platform..0", 253) {
+		t.Fatal("consecutive dots were accepted")
+	}
+	if validDNSName(oversized, 253) {
+		t.Fatal("label longer than 63 characters was accepted")
+	}
+	if !validDNSName("platform-0", 253) {
+		t.Fatal("valid single-label pod name was rejected")
+	}
+	if !validDNSName(strings.Repeat("a", 63)+"."+strings.Repeat("b", 63), 253) {
+		t.Fatal("valid 63-character labels were rejected")
+	}
+}
+
 func TestCollectRejectsNamespaceAndNamespacesTogether(t *testing.T) {
 	t.Parallel()
 	var stderr bytes.Buffer
@@ -499,8 +576,14 @@ func intPointer(value int) *int {
 func fakeKubectl(t *testing.T, directory string, probeOutput string) string {
 	t.Helper()
 	path := filepath.Join(directory, "kubectl")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	script := `#!/bin/sh
 case " $* " in
+  *" get namespaces "*)
+    printf '%s\n' '{"items":[{"metadata":{"name":"qodo"}},{"metadata":{"name":"kube-system"}}]}'
+    ;;
   *" get pods "*)
     printf '%s\n' '{"items":[{"metadata":{"name":"platform-0","namespace":"qodo"},"spec":{"containers":[{"name":"platform"}]},"status":{"phase":"Running","containerStatuses":[{"name":"platform","ready":true,"state":{"running":{}}}]}}]}'
     ;;

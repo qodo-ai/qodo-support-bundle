@@ -623,7 +623,7 @@ func marshalPodRecords(pods []pod, redactor *redact.Redactor) ([]byte, error) {
 	for _, currentPod := range pods {
 		record := outputPod{
 			SchemaVersion: "1",
-			Timestamp:     currentPod.Status.StartTime,
+			Timestamp:     redactor.Text(currentPod.Status.StartTime),
 			Kind:          "Pod",
 			Namespace:     redactor.Text(currentPod.Metadata.Namespace),
 			Name:          redactor.Text(currentPod.Metadata.Name),

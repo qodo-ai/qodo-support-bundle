@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 )
 
 const (
@@ -117,6 +118,7 @@ func Collect(
 	ctx context.Context,
 	config Config,
 	runner kubernetes.Runner,
+	redactor *redact.Redactor,
 ) Outcome {
 	if reason := verifyTarget(ctx, config, runner); reason != "" {
 		return Outcome{Reason: reason}
@@ -160,6 +162,7 @@ func Collect(
 	}
 	report.Pod = config.Pod
 	report.Container = config.Container
+	report.Issuer = redactor.Text(report.Issuer)
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return Outcome{Reason: ReasonInvalidResponse}

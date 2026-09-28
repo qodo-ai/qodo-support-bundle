@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 )
 
 type runnerCall struct {
@@ -66,7 +67,7 @@ func TestCollectUsesBoundedArgumentArrayAndValidatesTarget(t *testing.T) {
 		Kubeconfig:   "/tmp/kube config",
 		QueryTimeout: 2 * time.Second,
 		ProbeTimeout: 5 * time.Second,
-	}, runner)
+	}, runner, redact.New())
 	if outcome.Reason != "" || outcome.Report == nil {
 		t.Fatalf("unexpected outcome: %+v", outcome)
 	}
@@ -123,7 +124,7 @@ func TestCollectAcceptsLargePodMetadataBeforeBoundedProbeExec(t *testing.T) {
 		},
 	}
 
-	outcome := Collect(context.Background(), testConfig(), runner)
+	outcome := Collect(context.Background(), testConfig(), runner, redact.New())
 
 	if outcome.Reason != "" || outcome.Report == nil || len(runner.calls) != 2 {
 		t.Fatalf("outcome=%+v calls=%d", outcome, len(runner.calls))
@@ -168,7 +169,7 @@ func TestCollectRejectsNonRunningTargetsBeforeExec(t *testing.T) {
 					return kubernetes.CommandResult{Stdout: []byte(test.pod)}, nil
 				},
 			}
-			outcome := Collect(context.Background(), testConfig(), runner)
+			outcome := Collect(context.Background(), testConfig(), runner, redact.New())
 			if outcome.Reason != test.reason || len(runner.calls) != 1 {
 				t.Fatalf("outcome=%+v calls=%d", outcome, len(runner.calls))
 			}
@@ -229,7 +230,7 @@ func TestCollectCategorizesKubectlFailuresWithoutStderr(t *testing.T) {
 					}, errors.New("private exception canary")
 				},
 			}
-			outcome := Collect(context.Background(), testConfig(), runner)
+			outcome := Collect(context.Background(), testConfig(), runner, redact.New())
 			if outcome.Reason != test.reason ||
 				strings.Contains(outcome.Reason, "canary") {
 				t.Fatalf("outcome=%+v", outcome)
@@ -273,6 +274,7 @@ func TestCollectCategorizesTargetOutputFailures(t *testing.T) {
 				context.Background(),
 				testConfig(),
 				runner,
+				redact.New(),
 			); outcome.Reason != test.reason {
 				t.Fatalf("outcome=%+v", outcome)
 			}
@@ -338,7 +340,7 @@ func TestCollectCategorizesExecFailuresWithoutStderr(t *testing.T) {
 					}, errors.New("private exception canary")
 				},
 			}
-			outcome := Collect(context.Background(), testConfig(), runner)
+			outcome := Collect(context.Background(), testConfig(), runner, redact.New())
 			if outcome.Reason != test.reason ||
 				strings.Contains(outcome.Reason, "canary") {
 				t.Fatalf("outcome=%+v", outcome)
@@ -393,7 +395,7 @@ func TestCollectCategorizesProbeOutputAndSchemaFailures(t *testing.T) {
 					return test.result, test.err
 				},
 			}
-			outcome := Collect(context.Background(), testConfig(), runner)
+			outcome := Collect(context.Background(), testConfig(), runner, redact.New())
 			if outcome.Reason != test.reason || outcome.Data != nil {
 				t.Fatalf("outcome=%+v", outcome)
 			}
@@ -423,7 +425,7 @@ func TestCollectEnforcesProbeTimeout(t *testing.T) {
 	config := testConfig()
 	config.ProbeTimeout = 20 * time.Millisecond
 	started := time.Now()
-	outcome := Collect(context.Background(), config, runner)
+	outcome := Collect(context.Background(), config, runner, redact.New())
 	if outcome.Reason != ReasonExecTimeout {
 		t.Fatalf("outcome=%+v", outcome)
 	}
@@ -452,11 +454,72 @@ func TestCollectRecognizesInternalProbeTimeoutSentinel(t *testing.T) {
 		},
 	}
 
-	outcome := Collect(context.Background(), testConfig(), runner)
+	outcome := Collect(context.Background(), testConfig(), runner, redact.New())
 
 	if outcome.Reason != ReasonExecTimeout ||
 		strings.Contains(outcome.Reason, "canary") {
 		t.Fatalf("outcome=%+v", outcome)
+	}
+}
+
+func TestCollectRedactsJWTIssuerOnSuccessAndFailure(t *testing.T) {
+	t.Parallel()
+	token := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+	issuer := "https://id.example/oidc/" + token
+	tests := []struct {
+		name   string
+		report string
+	}{
+		{
+			name: "successful probe",
+			report: `{
+			  "schema_version":1,
+			  "issuer":"` + issuer + `",
+			  "checks":[
+			    {"name":"discovery","status":"passed","reason":"","http_status":200},
+			    {"name":"jwks","status":"passed","reason":"","http_status":200}
+			  ]
+			}`,
+		},
+		{
+			name: "failed probe",
+			report: `{
+			  "schema_version":1,
+			  "issuer":"` + issuer + `",
+			  "checks":[
+			    {"name":"discovery","status":"failed","reason":"http_error","http_status":503},
+			    {"name":"jwks","status":"passed","reason":"","http_status":200}
+			  ]
+			}`,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			call := 0
+			runner := &fakeRunner{
+				run: func(
+					_ context.Context,
+					_ int64,
+					_ []string,
+				) (kubernetes.CommandResult, error) {
+					call++
+					if call == 1 {
+						return runningPod(), nil
+					}
+					return kubernetes.CommandResult{Stdout: []byte(test.report)}, nil
+				},
+			}
+			outcome := Collect(context.Background(), testConfig(), runner, redact.New())
+			if outcome.Reason != "" || outcome.Report == nil {
+				t.Fatalf("unexpected outcome: %+v", outcome)
+			}
+			if strings.Contains(outcome.Report.Issuer, token) ||
+				strings.Contains(string(outcome.Data), token) {
+				t.Fatalf("archived issuer leaked JWT: report=%q data=%s", outcome.Report.Issuer, outcome.Data)
+			}
+		})
 	}
 }
 
@@ -504,7 +567,7 @@ func TestValidDiagnosticFailuresProduceArtifact(t *testing.T) {
 			return kubernetes.CommandResult{Stdout: data}, nil
 		},
 	}
-	outcome := Collect(context.Background(), testConfig(), runner)
+	outcome := Collect(context.Background(), testConfig(), runner, redact.New())
 	if outcome.Reason != "" ||
 		outcome.Report == nil ||
 		outcome.Report.FailedChecks() != 1 ||

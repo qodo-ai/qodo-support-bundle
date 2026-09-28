@@ -837,6 +837,27 @@ func TestSanitizeLogRedactsUnterminatedPrivateKey(t *testing.T) {
 	}
 }
 
+func TestMarshalPodRecordsRedactsStartTimeSecret(t *testing.T) {
+	t.Parallel()
+	data, err := marshalPodRecords([]pod{{
+		Metadata: objectMetadata{Name: "platform-0", Namespace: "qodo"},
+		Status: podStatus{
+			StartTime: "password=raw-secret",
+			Phase:     "Running",
+		},
+	}}, redact.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(data)
+	if strings.Contains(output, "raw-secret") {
+		t.Fatalf("pod timestamp leaked raw secret: %s", output)
+	}
+	if !strings.Contains(output, redact.Replacement) {
+		t.Fatalf("pod timestamp was not redacted: %s", output)
+	}
+}
+
 func TestSanitizeLogRedactsSensitiveJSONAssignment(t *testing.T) {
 	t.Parallel()
 	input := []byte(`request_id=req-123 password={"note":"raw-secret"}` + "\n")

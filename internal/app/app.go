@@ -52,9 +52,6 @@ var (
 		return hex.EncodeToString(value), nil
 	}
 	dnsLabelPattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
-	dnsNamePattern  = regexp.MustCompile(
-		`^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$`,
-	)
 )
 
 // Run executes the support-bundle CLI and returns its process exit code.
@@ -165,7 +162,9 @@ func runCollect(
 	}
 	if !explicitNamespaces && !visited["all-namespaces"] {
 		*allNamespaces = true
-		*excludeSystemNamespaces = true
+		if !visited["exclude-system-namespaces"] {
+			*excludeSystemNamespaces = true
+		}
 	}
 	var selectedNamespaces []string
 	var err error
@@ -245,7 +244,7 @@ func runCollect(
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
-	_, _ = fmt.Fprintf(stderr, "Using kubectl: %q\n", resolvedKubectl)
+	_, _ = fmt.Fprintln(stderr, "Using kubectl: resolved executable")
 	runner := kubernetes.ExecRunner{Binary: resolvedKubectl}
 	kubernetesReport, kubernetesErr := kubernetes.Collect(
 		ctx,
@@ -293,7 +292,7 @@ func runCollect(
 			Kubeconfig:   *kubeconfig,
 			QueryTimeout: *timeout,
 			ProbeTimeout: *probeTimeout,
-		}, runner)
+		}, runner, redactor)
 		connectivityReport = outcome.Report
 		connectivityFailure = outcome.Reason
 		switch {
@@ -687,7 +686,15 @@ func validDNSLabel(value string) bool {
 }
 
 func validDNSName(value string, maxLength int) bool {
-	return len(value) <= maxLength && dnsNamePattern.MatchString(value)
+	if len(value) > maxLength {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if !validDNSLabel(label) {
+			return false
+		}
+	}
+	return true
 }
 
 func containsString(values []string, value string) bool {
