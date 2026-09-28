@@ -1,6 +1,9 @@
 package redact
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -714,6 +717,42 @@ func TestSensitiveJSONAssignmentRejectsOverlongAndMalformedKeys(t *testing.T) {
 	}
 }
 
+func TestSensitiveJSONAssignmentIgnoresEscapedKeyTextInValues(t *testing.T) {
+	t.Parallel()
+	benign := `{"message":"see \"password\": \"secret\""}`
+	assignment, ok := SensitiveJSONAssignment(benign)
+	if ok {
+		t.Fatalf("escaped password text was classified as a key: %+v", assignment)
+	}
+
+	escapedEOL := `see \"password\":`
+	assignment, ok = SensitiveJSONAssignment(escapedEOL)
+	if ok {
+		t.Fatalf("escaped password text at EOL was classified as a key: %+v", assignment)
+	}
+
+	arrayValue := `{"items":["\"password\": \"secret\""]}`
+	assignment, ok = SensitiveJSONAssignment(arrayValue)
+	if ok {
+		t.Fatalf("array value text was classified as a key: %+v", assignment)
+	}
+
+	nested, ok := SensitiveJSONAssignment(`{"data":{"password":"real-secret"}}`)
+	if !ok || nested.Invalid || nested.Key != "password" {
+		t.Fatalf("nested password key was not detected: ok=%v assignment=%+v", ok, nested)
+	}
+
+	suffix, ok := SensitiveJSONAssignment(`, "token":`)
+	if !ok || suffix.Key != "token" {
+		t.Fatalf("suffix fragment token key was not detected: ok=%v assignment=%+v", ok, suffix)
+	}
+
+	prefixed, ok := SensitiveJSONAssignment(`2026-09-28T00:00:00Z {"password":`)
+	if !ok || prefixed.Key != "password" {
+		t.Fatalf("prefixed password key was not detected: ok=%v assignment=%+v", ok, prefixed)
+	}
+}
+
 func TestJSONValueSkipperGarbageAfterValueStaysPending(t *testing.T) {
 	t.Parallel()
 	var skipper JSONValueSkipper
@@ -781,4 +820,52 @@ func TestJSONValueSkipperResetBetweenValues(t *testing.T) {
 	if !skipper.Pending() {
 		t.Fatal("truncated object after reset completed early")
 	}
+}
+
+func TestRulesetDigestIncludesURLPolicyComponents(t *testing.T) {
+	t.Parallel()
+	if !sort.StringsAreSorted(semanticURLFieldNames) {
+		t.Fatalf("semanticURLFieldNames must be sorted: %v", semanticURLFieldNames)
+	}
+	if !sort.StringsAreSorted(semanticURLFieldSeparators) {
+		t.Fatalf("semanticURLFieldSeparators must be sorted: %v", semanticURLFieldSeparators)
+	}
+	if !sort.StringsAreSorted(extraSensitiveURLQueryKeys) {
+		t.Fatalf("extraSensitiveURLQueryKeys must be sorted: %v", extraSensitiveURLQueryKeys)
+	}
+
+	parts := rulesetDigestParts(New())
+	present := make(map[string]int, len(parts))
+	for _, part := range parts {
+		present[part]++
+	}
+	for _, item := range concatPolicyStrings(semanticURLFieldNames, semanticURLFieldSeparators, extraSensitiveURLQueryKeys) {
+		if present[item] == 0 {
+			t.Fatalf("ruleset digest omitted policy component %q", item)
+		}
+	}
+
+	first := New().Ruleset()
+	second := New().Ruleset()
+	if first.Version != RulesetVersion {
+		t.Fatalf("ruleset version=%q", first.Version)
+	}
+	if first.SHA256 != second.SHA256 {
+		t.Fatal("ruleset digest was not deterministic")
+	}
+
+	altered := append([]string{}, parts...)
+	altered = append(altered, "callback")
+	digest := sha256.Sum256([]byte(strings.Join(altered, "\n")))
+	if fmt.Sprintf("%x", digest) == first.SHA256 {
+		t.Fatal("digest did not change when a URL policy component was added")
+	}
+}
+
+func concatPolicyStrings(groups ...[]string) []string {
+	var items []string
+	for _, group := range groups {
+		items = append(items, group...)
+	}
+	return items
 }

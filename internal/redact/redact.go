@@ -62,6 +62,12 @@ var sensitiveKeys = map[string]struct{}{
 	"xapikey":            {},
 }
 
+var semanticURLFieldNames = []string{"location", "referer", "uri", "url"}
+
+var semanticURLFieldSeparators = []string{"-", ".", "_"}
+
+var extraSensitiveURLQueryKeys = []string{"code", "key", "state"}
+
 type replacementPattern struct {
 	expression  *regexp.Regexp
 	replacement string
@@ -166,6 +172,14 @@ func New() *Redactor {
 
 // Ruleset returns a stable version and hash for audit manifests.
 func (redactor *Redactor) Ruleset() RulesetMetadata {
+	digest := sha256.Sum256([]byte(strings.Join(rulesetDigestParts(redactor), "\n")))
+	return RulesetMetadata{
+		Version: RulesetVersion,
+		SHA256:  fmt.Sprintf("%x", digest),
+	}
+}
+
+func rulesetDigestParts(redactor *Redactor) []string {
 	parts := []string{
 		RulesetVersion,
 		Replacement,
@@ -184,14 +198,13 @@ func (redactor *Redactor) Ruleset() RulesetMetadata {
 	}
 	sort.Strings(keys)
 	parts = append(parts, keys...)
+	parts = append(parts, semanticURLFieldNames...)
+	parts = append(parts, semanticURLFieldSeparators...)
+	parts = append(parts, extraSensitiveURLQueryKeys...)
 	for _, pattern := range redactor.patterns {
 		parts = append(parts, pattern.expression.String(), pattern.replacement)
 	}
-	digest := sha256.Sum256([]byte(strings.Join(parts, "\n")))
-	return RulesetMetadata{
-		Version: RulesetVersion,
-		SHA256:  fmt.Sprintf("%x", digest),
-	}
+	return parts
 }
 
 // IsSensitiveKey reports whether a field must be removed rather than inspected.
@@ -366,10 +379,15 @@ func (redactor *Redactor) redactMalformedURLQuery(rawURL string) string {
 }
 
 func isSensitiveURLQueryKey(key string) bool {
-	return IsSensitiveKey(key) ||
-		strings.EqualFold(key, "code") ||
-		strings.EqualFold(key, "state") ||
-		strings.EqualFold(key, "key")
+	if IsSensitiveKey(key) {
+		return true
+	}
+	for _, extra := range extraSensitiveURLQueryKeys {
+		if strings.EqualFold(key, extra) {
+			return true
+		}
+	}
+	return false
 }
 
 // Value recursively sanitizes JSON-compatible data.
@@ -406,11 +424,11 @@ func (redactor *Redactor) Value(key string, value any) any {
 
 func isURLKey(key string) bool {
 	normalized := strings.ToLower(key)
-	for _, semanticKey := range []string{"url", "uri", "location", "referer"} {
+	for _, semanticKey := range semanticURLFieldNames {
 		if normalized == semanticKey {
 			return true
 		}
-		for _, separator := range []string{"_", "-", "."} {
+		for _, separator := range semanticURLFieldSeparators {
 			if strings.HasSuffix(normalized, separator+semanticKey) {
 				return true
 			}
@@ -994,34 +1012,246 @@ type JSONAssignment struct {
 // SensitiveJSONAssignment locates a sensitive JSON field whose value may continue
 // on later lines or as a same-line fragment.
 func SensitiveJSONAssignment(line string) (JSONAssignment, bool) {
-	for index := 0; index < len(line); index++ {
-		if line[index] != '"' {
-			continue
-		}
-		key, next, closed, invalid := parseJSONQuotedString(line, index)
-		if !closed {
-			break
-		}
-		cursor := skipJSONSpace(line, next)
-		if cursor >= len(line) || (line[cursor] != ':' && line[cursor] != '=') {
-			index = next - 1
-			continue
-		}
-		valueOffset := skipJSONSpace(line, cursor+1)
-		if invalid {
-			return JSONAssignment{Invalid: true, ValueOffset: valueOffset}, true
-		}
-		if IsSensitiveKey(key) {
-			return JSONAssignment{Key: key, ValueOffset: valueOffset}, true
-		}
-		index = next - 1
+	if assignment, ok := scanStructuredJSONAssignment(line); ok {
+		return assignment, true
 	}
 	trimmed := strings.TrimRight(line, " \t\r")
 	assignment := jsonAssignmentPrefixPattern.FindStringSubmatch(trimmed)
 	if assignment == nil || !IsSensitiveKey(assignment[1]) {
 		return JSONAssignment{}, false
 	}
-	return JSONAssignment{Key: assignment[1], ValueOffset: len(trimmed)}, true
+	key := assignment[1]
+	index := strings.LastIndex(trimmed, key)
+	if index > 0 {
+		quote := index - 1
+		if (trimmed[quote] == '"' || trimmed[quote] == '\'') && jsonQuoteIsEscaped(trimmed, quote) {
+			return JSONAssignment{}, false
+		}
+	}
+	return JSONAssignment{Key: key, ValueOffset: len(trimmed)}, true
+}
+
+func scanStructuredJSONAssignment(line string) (JSONAssignment, bool) {
+	var stack [maxJSONSkipperDepth]jsonSkipFrame
+	depth := 0
+	root := jsonSkipFrame{state: jsonExpectKey}
+
+	current := func() *jsonSkipFrame {
+		if depth == 0 {
+			return &root
+		}
+		return &stack[depth-1]
+	}
+
+	pop := func() {
+		if depth == 0 {
+			root.state = jsonExpectCommaOrClose
+			return
+		}
+		depth--
+		if depth == 0 {
+			root.state = jsonExpectCommaOrClose
+			return
+		}
+		stack[depth-1].state = jsonExpectCommaOrClose
+	}
+
+	for index := 0; index < len(line); index++ {
+		character := line[index]
+		if jsonSpace(character) {
+			continue
+		}
+		frame := current()
+		if depth == 0 && character != '{' && character != '[' && character != '"' &&
+			character != ',' && character != '}' && character != ']' &&
+			frame.state != jsonExpectValue {
+			continue
+		}
+		switch frame.state {
+		case jsonExpectKeyOrEmpty:
+			if character == '}' && !frame.array {
+				pop()
+				continue
+			}
+			fallthrough
+		case jsonExpectKey:
+			if character == '{' {
+				if !pushJSONAssignmentFrame(&stack, &depth, false) {
+					return JSONAssignment{Invalid: true, ValueOffset: index}, true
+				}
+				continue
+			}
+			if character == '[' {
+				if !pushJSONAssignmentFrame(&stack, &depth, true) {
+					return JSONAssignment{Invalid: true, ValueOffset: index}, true
+				}
+				continue
+			}
+			if character == ',' || character == '}' || character == ']' {
+				continue
+			}
+			if character != '"' {
+				continue
+			}
+			if jsonQuoteIsEscaped(line, index) {
+				continue
+			}
+			assignment, next, matched, failClosed := readJSONAssignmentKey(line, index)
+			if failClosed {
+				return assignment, true
+			}
+			if matched {
+				return assignment, true
+			}
+			frame.state = jsonExpectValue
+			if next > index {
+				index = next - 1
+			}
+		case jsonExpectColon:
+			if character == ':' || character == '=' {
+				frame.state = jsonExpectValue
+			}
+		case jsonExpectValueOrEmpty:
+			if character == ']' && frame.array {
+				pop()
+				continue
+			}
+			fallthrough
+		case jsonExpectValue:
+			switch character {
+			case '"':
+				if jsonQuoteIsEscaped(line, index) {
+					continue
+				}
+				next, closed := skipJSONQuoted(line, index)
+				if !closed {
+					return JSONAssignment{}, false
+				}
+				frame.state = jsonExpectCommaOrClose
+				index = next - 1
+			case '{':
+				if !pushJSONAssignmentFrame(&stack, &depth, false) {
+					return JSONAssignment{Invalid: true, ValueOffset: index}, true
+				}
+			case '[':
+				if !pushJSONAssignmentFrame(&stack, &depth, true) {
+					return JSONAssignment{Invalid: true, ValueOffset: index}, true
+				}
+			case '}', ']':
+				pop()
+			default:
+				index = skipJSONLiteral(line, index) - 1
+				frame.state = jsonExpectCommaOrClose
+			}
+		case jsonExpectCommaOrClose:
+			if character == ',' {
+				if frame.array {
+					frame.state = jsonExpectValue
+				} else {
+					frame.state = jsonExpectKey
+				}
+				continue
+			}
+			if (character == '}' && !frame.array) || (character == ']' && frame.array) {
+				pop()
+			}
+		}
+	}
+	return JSONAssignment{}, false
+}
+
+func pushJSONAssignmentFrame(stack *[maxJSONSkipperDepth]jsonSkipFrame, depth *int, array bool) bool {
+	if *depth >= maxJSONSkipperDepth {
+		return false
+	}
+	state := jsonExpectKeyOrEmpty
+	if array {
+		state = jsonExpectValueOrEmpty
+	}
+	stack[*depth] = jsonSkipFrame{array: array, state: state}
+	*depth++
+	return true
+}
+
+func readJSONAssignmentKey(line string, quoteIndex int) (JSONAssignment, int, bool, bool) {
+	key, next, closed, invalid := parseJSONQuotedString(line, quoteIndex)
+	if !closed {
+		return JSONAssignment{Invalid: true, ValueOffset: len(line)}, quoteIndex, false, true
+	}
+	cursor := skipJSONSpace(line, next)
+	if cursor >= len(line) || (line[cursor] != ':' && line[cursor] != '=') {
+		if invalid {
+			return JSONAssignment{Invalid: true, ValueOffset: cursor}, next, false, true
+		}
+		return JSONAssignment{}, next, false, false
+	}
+	valueOffset := skipJSONSpace(line, cursor+1)
+	if invalid {
+		return JSONAssignment{Invalid: true, ValueOffset: valueOffset}, valueOffset, false, true
+	}
+	if IsSensitiveKey(key) {
+		return JSONAssignment{Key: key, ValueOffset: valueOffset}, valueOffset, true, false
+	}
+	return JSONAssignment{}, valueOffset, false, false
+}
+
+func jsonQuoteIsEscaped(line string, quoteIndex int) bool {
+	escapes := 0
+	for quoteIndex-1-escapes >= 0 && line[quoteIndex-1-escapes] == '\\' {
+		escapes++
+	}
+	return escapes%2 == 1
+}
+
+func skipJSONQuoted(line string, quoteIndex int) (int, bool) {
+	escaped := false
+	for index := quoteIndex + 1; index < len(line); index++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if line[index] == '\\' {
+			escaped = true
+			continue
+		}
+		if line[index] == '"' {
+			return index + 1, true
+		}
+	}
+	return quoteIndex, false
+}
+
+func skipJSONLiteral(line string, index int) int {
+	if index >= len(line) {
+		return index
+	}
+	switch line[index] {
+	case 't':
+		return consumeJSONKeyword(line, index, "true")
+	case 'f':
+		return consumeJSONKeyword(line, index, "false")
+	case 'n':
+		return consumeJSONKeyword(line, index, "null")
+	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		index++
+		for index < len(line) {
+			character := line[index]
+			if jsonSpace(character) || character == ',' || character == '}' || character == ']' {
+				return index
+			}
+			index++
+		}
+		return index
+	default:
+		return index + 1
+	}
+}
+
+func consumeJSONKeyword(line string, index int, word string) int {
+	if strings.HasPrefix(line[index:], word) {
+		return index + len(word)
+	}
+	return index + 1
 }
 
 func parseJSONQuotedString(line string, quoteIndex int) (string, int, bool, bool) {

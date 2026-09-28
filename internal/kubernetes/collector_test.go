@@ -1139,6 +1139,25 @@ func TestSanitizeLogNonAdvancingSuffixFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogEscapedPasswordTextDoesNotSuppressLaterLine(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\"message\":\"see \\\"password\\\": \\\"secret\\\"\"}\nkeep-next\n")
+	output := string(mustSanitizeLog(t, input))
+	if !strings.Contains(output, `"message"`) || !strings.Contains(output, "keep-next") {
+		t.Fatalf("benign escaped password text suppressed a later line: %s", output)
+	}
+
+	nested := string(mustSanitizeLog(t, []byte("{\"data\":{\"password\":\"real-secret\"}}\n")))
+	if strings.Contains(nested, "real-secret") {
+		t.Fatalf("nested password leaked: %s", nested)
+	}
+
+	arrayLine := string(mustSanitizeLog(t, []byte("{\"items\":[\"\\\"password\\\": \\\"secret\\\"\"]}\nkeep-array\n")))
+	if !strings.Contains(arrayLine, "keep-array") {
+		t.Fatalf("array value password text suppressed a later line: %s", arrayLine)
+	}
+}
+
 func mustSanitizeLog(t *testing.T, input []byte) []byte {
 	t.Helper()
 	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
@@ -1346,6 +1365,18 @@ func TestCollectRescansSuffixNestedTokenOpener(t *testing.T) {
 	output := collectCurrentLog(t, "{\"password\":{\"note\":\"first\"},\"token\":{\n  \"note\": \"second-secret\"\n}\n")
 	if strings.Contains(output, "first") || strings.Contains(output, "second-secret") {
 		t.Fatalf("collector leaked nested token secrets: %s", output)
+	}
+}
+
+func TestCollectEscapedPasswordTextDoesNotSuppressLaterLine(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\"message\":\"see \\\"password\\\": \\\"secret\\\"\"}\nkeep-next\n")
+	if !strings.Contains(output, "keep-next") {
+		t.Fatalf("collector suppressed later line after escaped password text: %s", output)
+	}
+	output = collectCurrentLog(t, "{\"data\":{\"password\":\"real-secret\"}}\n")
+	if strings.Contains(output, "real-secret") {
+		t.Fatalf("collector leaked nested password: %s", output)
 	}
 }
 
