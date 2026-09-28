@@ -65,43 +65,56 @@ func (builder *Builder) HideAbsolutePaths() {
 	builder.hideAbsolutePaths = true
 }
 
+// Option configures bundle construction.
+type Option func(*Builder)
+
+// OmitAbsolutePaths omits filesystem locations from constructor and cleanup errors.
+func OmitAbsolutePaths() Option {
+	return func(builder *Builder) {
+		builder.hideAbsolutePaths = true
+	}
+}
+
 // New creates a bundle staging directory beside the output archive.
-func New(outputPath string) (*Builder, error) {
+func New(outputPath string, options ...Option) (*Builder, error) {
+	builder := &Builder{}
+	for _, option := range options {
+		option(builder)
+	}
 	if outputPath == "" {
 		return nil, errors.New("output path is required")
 	}
 	absoluteOutput, err := filepath.Abs(outputPath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve output path: %w", err)
+		return nil, builder.wrapPath("resolve output path", err)
 	}
 	if _, err := os.Lstat(absoluteOutput); err == nil {
-		return nil, fmt.Errorf("output already exists: %s", absoluteOutput)
+		return nil, builder.existingOutput(absoluteOutput)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("inspect output path: %w", err)
+		return nil, builder.wrapPath("inspect output path", err)
 	}
 
 	outputDirectory := filepath.Dir(absoluteOutput)
 	if err := os.MkdirAll(outputDirectory, directoryMode); err != nil {
-		return nil, fmt.Errorf("create output directory: %w", err)
+		return nil, builder.wrapPath("create output directory", err)
 	}
 	stagingDirectory, err := os.MkdirTemp(outputDirectory, ".qodo-support-bundle-*")
 	if err != nil {
-		return nil, fmt.Errorf("create staging directory: %w", err)
+		return nil, builder.wrapPath("create staging directory", err)
 	}
 	if err := os.Chmod(stagingDirectory, directoryMode); err != nil {
 		_ = os.RemoveAll(stagingDirectory)
-		return nil, fmt.Errorf("secure staging directory: %w", err)
+		return nil, builder.wrapPath("secure staging directory", err)
 	}
-	return &Builder{
-		outputPath: absoluteOutput,
-		stagingDir: stagingDirectory,
-		removeAll:  os.RemoveAll,
-		remove:     os.Remove,
-		closeArchive: func(file *os.File) error {
-			return file.Close()
-		},
-		publish: os.Link,
-	}, nil
+	builder.outputPath = absoluteOutput
+	builder.stagingDir = stagingDirectory
+	builder.removeAll = os.RemoveAll
+	builder.remove = os.Remove
+	builder.closeArchive = func(file *os.File) error {
+		return file.Close()
+	}
+	builder.publish = os.Link
+	return builder, nil
 }
 
 // Add writes one sanitized file into the staged bundle.
@@ -519,6 +532,27 @@ func wrapArchiveRemoveError(path string, err error, hidePath bool) error {
 		return fmt.Errorf("remove temporary archive during cleanup: %s", cause)
 	}
 	return fmt.Errorf("remove temporary archive %q during cleanup: %w", path, err)
+}
+
+func (builder *Builder) wrapPath(operation string, err error) error {
+	if err == nil {
+		return errors.New(operation)
+	}
+	if !builder.hideAbsolutePaths {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	cause := pathFreeCause(err)
+	if cause == "" {
+		return errors.New(operation)
+	}
+	return fmt.Errorf("%s: %s", operation, cause)
+}
+
+func (builder *Builder) existingOutput(path string) error {
+	if builder.hideAbsolutePaths {
+		return errors.New("output already exists")
+	}
+	return fmt.Errorf("output already exists: %s", path)
 }
 
 func pathFreeCause(err error) string {

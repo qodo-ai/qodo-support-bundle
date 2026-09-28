@@ -1031,6 +1031,155 @@ func TestCollectTruncatedJSONStringDoesNotResumeSecret(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogSameLineObjectOpenerRedactsChildSecret(t *testing.T) {
+	t.Parallel()
+	input := []byte(
+		"{\n  \"password\": {\n    \"note\": \"child-secret\"\n  },\n  \"request_id\": \"req-123\"\n}\n",
+	)
+	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
+	if truncated {
+		t.Fatal("same-line object opener log was unexpectedly truncated")
+	}
+	output := string(sanitized)
+	if strings.Contains(output, "child-secret") {
+		t.Fatalf("nonsensitive child leaked secret: %s", output)
+	}
+	if !strings.Contains(output, "request_id") || !strings.Contains(output, "req-123") {
+		t.Fatalf("safe sibling field was not preserved: %s", output)
+	}
+}
+
+func TestSanitizeLogUnicodeSensitiveKeyRedactsMultilineValue(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\n  \"pass\\u0077ord\":\n  \"unicode-secret\",\n  \"request_id\": \"req-123\"\n}\n")
+	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
+	if truncated {
+		t.Fatal("unicode key log was unexpectedly truncated")
+	}
+	output := string(sanitized)
+	if strings.Contains(output, "unicode-secret") {
+		t.Fatalf("unicode-escaped key leaked secret: %s", output)
+	}
+	if !strings.Contains(output, "request_id") || !strings.Contains(output, "req-123") {
+		t.Fatalf("safe sibling field was not preserved: %s", output)
+	}
+}
+
+func TestSanitizeLogPreservesSafeSuffixAfterSkippedContainer(t *testing.T) {
+	t.Parallel()
+	input := []byte(
+		"{\n  \"password\": {\n    \"note\": \"child-secret\"\n  }, \"request_id\": \"req-123\"\n}\n",
+	)
+	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
+	if truncated {
+		t.Fatal("suffix container log was unexpectedly truncated")
+	}
+	output := string(sanitized)
+	if strings.Contains(output, "child-secret") {
+		t.Fatalf("child secret leaked: %s", output)
+	}
+	if !strings.Contains(output, "request_id") || !strings.Contains(output, "req-123") {
+		t.Fatalf("same-line sibling was not preserved: %s", output)
+	}
+}
+
+func TestSanitizeLogGarbageAfterValueSuppressesLaterSecret(t *testing.T) {
+	t.Parallel()
+	input := []byte(
+		"{\n  \"password\":\n  \"first\" garbage\n  \"later-secret\"\n}\n",
+	)
+	sanitized, truncated := sanitizeLog(input, redact.New(), 1<<20)
+	if truncated {
+		t.Fatal("garbage suffix log was unexpectedly truncated")
+	}
+	output := string(sanitized)
+	if strings.Contains(output, "later-secret") || strings.Contains(output, "garbage") {
+		t.Fatalf("garbage remainder resumed emission: %s", output)
+	}
+}
+
+func collectCurrentLog(t *testing.T, logBody string) string {
+	t.Helper()
+	sink := &memorySink{}
+	_, err := Collect(
+		context.Background(),
+		Config{
+			Namespace:        "qodo",
+			Since:            time.Minute,
+			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
+			MaxLogBytes:      1 << 20,
+			MaxTotalLogBytes: 10 << 20,
+		},
+		&fakeRunner{
+			run: func(arguments string) (CommandResult, error) {
+				switch {
+				case strings.Contains(arguments, "get pods"):
+					return CommandResult{Stdout: []byte(prettyJSONLogPodJSON)}, nil
+				case strings.Contains(arguments, "get events"):
+					return CommandResult{Stdout: []byte(`{"items":[]}`)}, nil
+				case strings.HasPrefix(arguments, "logs ") && !strings.Contains(arguments, "--previous"):
+					return CommandResult{Stdout: []byte(logBody)}, nil
+				case strings.Contains(arguments, "--previous"):
+					return CommandResult{Stdout: []byte("previous-ok\n")}, nil
+				default:
+					return CommandResult{}, errors.New("unexpected command")
+				}
+			},
+		},
+		sink,
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range sink.files {
+		if strings.Contains(path, "/platform.log") {
+			return string(data)
+		}
+	}
+	t.Fatalf("current container log was not collected: %+v", sink.files)
+	return ""
+}
+
+func TestCollectSameLineObjectOpenerRedactsChildSecret(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\n  \"password\": {\n    \"note\": \"child-secret\"\n  },\n  \"request_id\": \"req-123\"\n}\n")
+	if strings.Contains(output, "child-secret") {
+		t.Fatalf("collector leaked child secret: %s", output)
+	}
+	if !strings.Contains(output, "request_id") || !strings.Contains(output, "req-123") {
+		t.Fatalf("collector dropped sibling field: %s", output)
+	}
+}
+
+func TestCollectUnicodeSensitiveKeyRedactsMultilineValue(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\n  \"pass\\u0077ord\":\n  \"unicode-secret\",\n  \"request_id\": \"req-123\"\n}\n")
+	if strings.Contains(output, "unicode-secret") {
+		t.Fatalf("collector leaked unicode-key secret: %s", output)
+	}
+}
+
+func TestCollectPreservesSafeSuffixAfterSkippedContainer(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\n  \"password\": {\n    \"note\": \"child-secret\"\n  }, \"request_id\": \"req-123\"\n}\n")
+	if strings.Contains(output, "child-secret") {
+		t.Fatalf("collector leaked child secret: %s", output)
+	}
+	if !strings.Contains(output, "request_id") || !strings.Contains(output, "req-123") {
+		t.Fatalf("collector dropped same-line sibling: %s", output)
+	}
+}
+
+func TestCollectGarbageAfterValueSuppressesLaterSecret(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\n  \"password\":\n  \"first\" garbage\n  \"later-secret\"\n}\n")
+	if strings.Contains(output, "later-secret") {
+		t.Fatalf("collector resumed after garbage remainder: %s", output)
+	}
+}
+
 func TestSanitizeLogMalformedJSONValueDoesNotResumeSecret(t *testing.T) {
 	t.Parallel()
 	input := []byte("{\n  \"password\":\n  {]\n  \"request_id\": \"later-secret\"\n}\n")

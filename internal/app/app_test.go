@@ -429,6 +429,53 @@ func TestCollectDefaultOutputErrorsOmitHomePath(t *testing.T) {
 	}
 }
 
+func TestCollectDefaultBundleNewErrorsOmitHomePath(t *testing.T) {
+	const username = "review-new-canary"
+	root := t.TempDir()
+	home := filepath.Join(root, "Users", username)
+	if err := os.MkdirAll(filepath.Join(home, "qodo-support-bundles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldHome := homeDirectory
+	oldTime := currentTime
+	oldSuffix := randomOutputSuffix
+	t.Cleanup(func() {
+		homeDirectory = oldHome
+		currentTime = oldTime
+		randomOutputSuffix = oldSuffix
+	})
+	homeDirectory = func() (string, error) { return home, nil }
+	currentTime = func() time.Time {
+		return time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	}
+	randomOutputSuffix = func() (string, error) { return "aabbccddeeff", nil }
+	path, err := defaultOutputPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("already-exists"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	code := Run(
+		context.Background(),
+		[]string{"collect", "--namespace", "qodo"},
+		&bytes.Buffer{},
+		&stderr,
+	)
+	logged := stderr.String()
+	if code != 1 {
+		t.Fatalf("exit=%d stderr=%q", code, logged)
+	}
+	if strings.Contains(logged, username) || strings.Contains(logged, home) || strings.Contains(logged, path) {
+		t.Fatalf("stderr leaked default bundle path: %s", logged)
+	}
+	if !strings.Contains(logged, "output already exists") {
+		t.Fatalf("missing path-free constructor category: %s", logged)
+	}
+}
+
 func TestParseNamespacesUsesExplicitDeploymentScope(t *testing.T) {
 	t.Parallel()
 	namespaces, err := parseNamespaces(

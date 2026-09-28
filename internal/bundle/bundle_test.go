@@ -149,6 +149,35 @@ func TestFinalizeContextRetainsCleanupWhenPublishedArchiveRemovalFails(t *testin
 	}
 }
 
+func TestNewOmittingAbsolutePathsHidesExistingOutput(t *testing.T) {
+	t.Parallel()
+	const username = "review-new-canary"
+	outputPath := filepath.Join(t.TempDir(), "Users", username, "qodo-support-bundles", "bundle.tar.gz")
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outputPath, []byte("exists"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := New(outputPath, OmitAbsolutePaths())
+	if err == nil {
+		t.Fatal("expected existing output error")
+	}
+	logged := err.Error()
+	if strings.Contains(logged, username) || strings.Contains(logged, outputPath) {
+		t.Fatalf("constructor leaked default output path: %s", logged)
+	}
+	if !strings.Contains(logged, "output already exists") {
+		t.Fatalf("missing constructor operation: %s", logged)
+	}
+
+	_, explicitErr := New(outputPath)
+	if explicitErr == nil || !strings.Contains(explicitErr.Error(), outputPath) {
+		t.Fatalf("explicit constructor should retain path: %v", explicitErr)
+	}
+}
+
 func TestRetractDefaultArchiveErrorsOmitAbsolutePath(t *testing.T) {
 	t.Parallel()
 	const username = "review-retract-canary"

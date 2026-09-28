@@ -787,7 +787,11 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 	var jsonSkipper redact.JSONValueSkipper
 	forEachLogLine(input, func(_ int, line []byte) {
 		if jsonSkipper.Pending() {
-			jsonSkipper.Consume(string(line))
+			consumed := jsonSkipper.Consume(string(line))
+			if !jsonSkipper.Pending() && consumed < len(line) {
+				_, _ = output.WriteString(redactor.JSONLine(string(line[consumed:])))
+				_, _ = output.WriteString("\n")
+			}
 			return
 		}
 		if len(line) == 0 {
@@ -812,14 +816,7 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 
 			begin := privateKeyBeginLine.FindStringIndex(remaining)
 			if begin == nil {
-				sanitized := redactor.JSONLine(remaining)
-				if redact.LineEndsWithSensitiveJSONAssignment(remaining) {
-					if !strings.HasSuffix(strings.TrimSpace(sanitized), redact.Replacement) {
-						sanitized += redact.Replacement
-					}
-					jsonSkipper.Start()
-				}
-				_, _ = output.WriteString(sanitized)
+				writeSensitiveJSONLogLine(output, remaining, redactor, &jsonSkipper)
 				writeLine = true
 				break
 			}
@@ -837,6 +834,34 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 		}
 	})
 	return output.Bytes(), output.Truncated()
+}
+
+func writeSensitiveJSONLogLine(
+	output *boundedBuffer,
+	line string,
+	redactor *redact.Redactor,
+	jsonSkipper *redact.JSONValueSkipper,
+) {
+	assignment, ok := redact.SensitiveJSONAssignment(line)
+	if !ok {
+		_, _ = output.WriteString(redactor.JSONLine(line))
+		return
+	}
+	prefix := line[:assignment.ValueOffset]
+	sanitized := redactor.JSONLine(prefix)
+	if !strings.HasSuffix(strings.TrimSpace(sanitized), redact.Replacement) {
+		sanitized += redact.Replacement
+	}
+	_, _ = output.WriteString(sanitized)
+	jsonSkipper.Start()
+	if assignment.ValueOffset >= len(line) {
+		return
+	}
+	fragment := line[assignment.ValueOffset:]
+	consumed := jsonSkipper.Consume(fragment)
+	if !jsonSkipper.Pending() && consumed < len(fragment) {
+		_, _ = output.WriteString(redactor.JSONLine(fragment[consumed:]))
+	}
 }
 
 func forEachLogLine(input []byte, visit func(index int, line []byte)) {

@@ -602,6 +602,63 @@ func TestJSONValueSkipperMaxArrayDepth(t *testing.T) {
 	}
 }
 
+func TestSensitiveJSONAssignmentDetectsUnicodeKey(t *testing.T) {
+	t.Parallel()
+	assignment, ok := SensitiveJSONAssignment(`  "pass\u0077ord":`)
+	if !ok {
+		t.Fatal("escaped password key was not detected")
+	}
+	if assignment.Key != "password" {
+		t.Fatalf("decoded key=%q", assignment.Key)
+	}
+	if assignment.ValueOffset != len(`  "pass\u0077ord":`) {
+		t.Fatalf("value offset=%d", assignment.ValueOffset)
+	}
+
+	opening, ok := SensitiveJSONAssignment(`  "password": {`)
+	if !ok || opening.ValueOffset >= len(`  "password": {`) {
+		t.Fatalf("same-line object opener was not detected: ok=%v offset=%d", ok, opening.ValueOffset)
+	}
+	if `  "password": {`[opening.ValueOffset] != '{' {
+		t.Fatalf("value fragment does not start at opener: %q", `  "password": {`[opening.ValueOffset:])
+	}
+}
+
+func TestJSONValueSkipperGarbageAfterValueStaysPending(t *testing.T) {
+	t.Parallel()
+	var skipper JSONValueSkipper
+	skipper.Start()
+	consumed := skipper.Consume(`"first" garbage`)
+	if !skipper.Pending() {
+		t.Fatal("garbage after a complete string resumed the skipper")
+	}
+	if consumed != len(`"first" garbage`) {
+		t.Fatalf("consumed=%d", consumed)
+	}
+	skipper.Consume(`"later-secret"`)
+	if !skipper.Pending() {
+		t.Fatal("later secret line was not fail-closed after garbage")
+	}
+}
+
+func TestJSONValueSkipperReturnsSuffixAfterContainerClose(t *testing.T) {
+	t.Parallel()
+	var skipper JSONValueSkipper
+	skipper.Start()
+	if skipper.Consume(`{`) != 1 || !skipper.Pending() {
+		t.Fatal("object opener should stay pending")
+	}
+	line := `  }, "request_id": "req-123"`
+	consumed := skipper.Consume(line)
+	if skipper.Pending() {
+		t.Fatal("closed object did not complete")
+	}
+	suffix := line[consumed:]
+	if !strings.Contains(suffix, "request_id") || !strings.Contains(suffix, "req-123") {
+		t.Fatalf("safe suffix was not returned: consumed=%d suffix=%q", consumed, suffix)
+	}
+}
+
 func TestJSONValueSkipperResetBetweenValues(t *testing.T) {
 	t.Parallel()
 	var skipper JSONValueSkipper

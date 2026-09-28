@@ -236,13 +236,15 @@ func runCollect(
 		}
 		_, _ = fmt.Fprintln(stderr, message)
 	}
-	builder, err := bundle.New(*output)
+	var builder *bundle.Builder
+	if usedDefaultOutput {
+		builder, err = bundle.New(*output, bundle.OmitAbsolutePaths())
+	} else {
+		builder, err = bundle.New(*output)
+	}
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
-	}
-	if usedDefaultOutput {
-		builder.HideAbsolutePaths()
 	}
 	cleanupPending := true
 	defer func() {
