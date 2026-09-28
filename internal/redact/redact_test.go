@@ -460,11 +460,44 @@ func TestJSONValueSkipperTable(t *testing.T) {
 			wantPending: false,
 		},
 		{
-			name:         "true false null",
-			lines:        []string{"true"},
-			wantPending:  false,
-			reuse:        []string{"false", "null"},
-			reusePending: false,
+			name:        "true primitive",
+			lines:       []string{"true"},
+			wantPending: false,
+		},
+		{
+			name:        "false primitive",
+			lines:       []string{"false"},
+			wantPending: false,
+		},
+		{
+			name:        "null primitive",
+			lines:       []string{"null"},
+			wantPending: false,
+		},
+		{
+			name:        "object trailing comma",
+			lines:       []string{`{"a":1,}`},
+			wantPending: true,
+		},
+		{
+			name:        "array trailing comma",
+			lines:       []string{`[1,]`},
+			wantPending: true,
+		},
+		{
+			name:        "unterminated string then later quote",
+			lines:       []string{`"unterminated-secret`, `"closes-on-next-line"`, `"later-secret"`},
+			wantPending: true,
+		},
+		{
+			name:        "trailing backslash at EOL",
+			lines:       []string{`"abc\`, `"later-secret"`},
+			wantPending: true,
+		},
+		{
+			name:        "incomplete unicode at EOL",
+			lines:       []string{`"\u12`, `"later-secret"`},
+			wantPending: true,
 		},
 		{
 			name: "nested mixed containers",
@@ -541,6 +574,31 @@ func TestJSONValueSkipperTable(t *testing.T) {
 				t.Fatalf("reuse pending=%v want=%v", skipper.Pending(), test.reusePending)
 			}
 		})
+	}
+}
+
+func TestJSONValueSkipperMaxArrayDepth(t *testing.T) {
+	t.Parallel()
+	nested := func(depth int) string {
+		return strings.Repeat("[", depth) + strings.Repeat("]", depth)
+	}
+
+	var complete JSONValueSkipper
+	complete.Start()
+	complete.Consume(nested(64))
+	if complete.Pending() {
+		t.Fatal("exactly 64 nested arrays did not complete")
+	}
+
+	var overflow JSONValueSkipper
+	overflow.Start()
+	overflow.Consume(nested(65))
+	if !overflow.Pending() {
+		t.Fatal("65 nested arrays completed instead of failing closed")
+	}
+	overflow.Consume(`"later-secret"`)
+	if !overflow.Pending() {
+		t.Fatal("overflow skipper resumed after a later quoted line")
 	}
 }
 

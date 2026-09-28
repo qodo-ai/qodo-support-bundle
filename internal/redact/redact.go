@@ -456,6 +456,7 @@ const (
 
 const (
 	jsonExpectKeyOrEmpty byte = iota
+	jsonExpectKey
 	jsonExpectColon
 	jsonExpectValue
 	jsonExpectCommaOrClose
@@ -817,6 +818,14 @@ func (skipper *JSONValueSkipper) feedContainer(character byte) {
 			return
 		}
 		skipper.fail()
+	case jsonExpectKey:
+		if character == '"' {
+			skipper.kind = jsonSkipString
+			skipper.inString = true
+			skipper.stringIsKey = true
+			return
+		}
+		skipper.fail()
 	case jsonExpectValueOrEmpty:
 		if character == ']' && frame.array {
 			skipper.pop()
@@ -836,7 +845,7 @@ func (skipper *JSONValueSkipper) feedContainer(character byte) {
 			if frame.array {
 				frame.state = jsonExpectValue
 			} else {
-				frame.state = jsonExpectKeyOrEmpty
+				frame.state = jsonExpectKey
 			}
 			return
 		}
@@ -859,6 +868,7 @@ func (skipper *JSONValueSkipper) finishLine() {
 		return
 	}
 	if skipper.inString || skipper.escaped || skipper.unicodeLeft > 0 {
+		skipper.fail()
 		return
 	}
 	switch skipper.kind {
