@@ -356,6 +356,27 @@ func (redactor *Redactor) URL(rawURL string) string {
 	return redactor.Text(parsed.String())
 }
 
+// SanitizeSplitJSONURLValue sanitizes a complete JSON string value at line start.
+func (redactor *Redactor) SanitizeSplitJSONURLValue(line string) (string, int, bool) {
+	valueOffset := skipJSONSpace(line, 0)
+	if valueOffset >= len(line) || line[valueOffset] != '"' {
+		return "", 0, false
+	}
+	end, closed := skipJSONQuoted(line, valueOffset)
+	if !closed {
+		return "", 0, false
+	}
+	var value string
+	if err := json.Unmarshal([]byte(line[valueOffset:end]), &value); err != nil {
+		return "", 0, false
+	}
+	sanitized, err := json.Marshal(redactor.URL(value))
+	if err != nil {
+		return "", 0, false
+	}
+	return line[:valueOffset] + string(sanitized), end, true
+}
+
 func (redactor *Redactor) redactMalformedURLQuery(rawURL string) string {
 	queryStart := strings.IndexByte(rawURL, '?')
 	if queryStart < 0 {
@@ -1113,7 +1134,7 @@ func SensitiveJSONObjectAssignment(line string) (JSONAssignment, bool) {
 
 // ScanSensitiveJSONAssignment locates a sensitive JSON field using an explicit scan mode.
 func ScanSensitiveJSONAssignment(line string, mode JSONAssignmentMode) (JSONAssignment, bool) {
-	if assignment, ok := scanStructuredJSONAssignment(line, mode); ok {
+	if assignment, ok := scanStructuredJSONAssignment(line, mode, IsSensitiveKey); ok {
 		return assignment, true
 	}
 	if mode == JSONAssignmentModeRaw {
@@ -1135,7 +1156,16 @@ func ScanSensitiveJSONAssignment(line string, mode JSONAssignmentMode) (JSONAssi
 	return JSONAssignment{Key: key, KeyOffset: index - 1, ValueOffset: len(trimmed)}, true
 }
 
-func scanStructuredJSONAssignment(line string, mode JSONAssignmentMode) (JSONAssignment, bool) {
+// ScanSemanticURLJSONAssignment locates a semantic URL field using an explicit scan mode.
+func ScanSemanticURLJSONAssignment(line string, mode JSONAssignmentMode) (JSONAssignment, bool) {
+	return scanStructuredJSONAssignment(line, mode, isURLKey)
+}
+
+func scanStructuredJSONAssignment(
+	line string,
+	mode JSONAssignmentMode,
+	matchKey func(string) bool,
+) (JSONAssignment, bool) {
 	var stack [maxJSONSkipperDepth]jsonSkipFrame
 	depth := 0
 	fragment := mode == JSONAssignmentModeObjectFragment
@@ -1216,7 +1246,7 @@ func scanStructuredJSONAssignment(line string, mode JSONAssignmentMode) (JSONAss
 			if jsonQuoteIsEscaped(line, index) {
 				continue
 			}
-			assignment, next, matched, failClosed := readJSONAssignmentKey(line, index)
+			assignment, next, matched, failClosed := readJSONAssignmentKey(line, index, matchKey)
 			if failClosed {
 				return assignment, true
 			}
@@ -1295,7 +1325,11 @@ func pushJSONAssignmentFrame(stack *[maxJSONSkipperDepth]jsonSkipFrame, depth *i
 	return true
 }
 
-func readJSONAssignmentKey(line string, quoteIndex int) (JSONAssignment, int, bool, bool) {
+func readJSONAssignmentKey(
+	line string,
+	quoteIndex int,
+	matchKey func(string) bool,
+) (JSONAssignment, int, bool, bool) {
 	key, next, closed, invalid := parseJSONQuotedString(line, quoteIndex)
 	if !closed {
 		return JSONAssignment{Invalid: true, ValueOffset: len(line)}, quoteIndex, false, true
@@ -1311,7 +1345,7 @@ func readJSONAssignmentKey(line string, quoteIndex int) (JSONAssignment, int, bo
 	if invalid {
 		return JSONAssignment{Invalid: true, ValueOffset: valueOffset}, valueOffset, false, true
 	}
-	if IsSensitiveKey(key) {
+	if matchKey(key) {
 		return JSONAssignment{
 			Key:         key,
 			KeyOffset:   quoteIndex,

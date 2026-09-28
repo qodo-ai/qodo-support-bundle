@@ -1569,6 +1569,73 @@ func TestCollectRedactsPrettyPrintedURLFragment(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogRedactsSplitURLValue(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\n  \"url\":\n  \"https://example.test/#opaque-value\",\n  \"request_id\": \"req-123\"\n}\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "opaque-value") {
+		t.Fatalf("split URL fragment leaked: %s", output)
+	}
+	for _, expected := range []string{"https://example.test/", "request_id", "req-123"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("split URL sanitization dropped %q: %s", expected, output)
+		}
+	}
+}
+
+func TestCollectRedactsSplitURLValue(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "{\n  \"url\":\n  \"https://example.test/#opaque-value\",\n  \"request_id\": \"req-123\"\n}\n")
+	if strings.Contains(output, "opaque-value") {
+		t.Fatalf("collector leaked split URL fragment: %s", output)
+	}
+	for _, expected := range []string{"https://example.test/", "request_id", "req-123"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("collector split URL sanitization dropped %q: %s", expected, output)
+		}
+	}
+}
+
+func TestSanitizeLogSplitURLMalformedValuesFailClosed(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"truncated string": "{\n  \"url\":\n  \"https://example.test/#opaque-value\n  \"request_id\": \"later-secret\"\n}\n",
+		"non-string":       "{\n  \"url\":\n  {\"value\":\"opaque-value\"},\n  \"request_id\": \"later-secret\"\n}\n",
+	}
+	for name, input := range tests {
+		name, input := name, input
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output := string(mustSanitizeLog(t, []byte(input)))
+			for _, forbidden := range []string{"opaque-value", "later-secret"} {
+				if strings.Contains(output, forbidden) {
+					t.Fatalf("malformed split URL leaked %q: %s", forbidden, output)
+				}
+			}
+		})
+	}
+}
+
+func TestCollectSplitURLMalformedValuesFailClosed(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"truncated string": "{\n  \"url\":\n  \"https://example.test/#opaque-value\n  \"request_id\": \"later-secret\"\n}\n",
+		"non-string":       "{\n  \"url\":\n  {\"value\":\"opaque-value\"},\n  \"request_id\": \"later-secret\"\n}\n",
+	}
+	for name, input := range tests {
+		name, input := name, input
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output := collectCurrentLog(t, input)
+			for _, forbidden := range []string{"opaque-value", "later-secret"} {
+				if strings.Contains(output, forbidden) {
+					t.Fatalf("collector malformed split URL leaked %q: %s", forbidden, output)
+				}
+			}
+		})
+	}
+}
+
 func TestSanitizeLogRedactsURLAfterSensitiveJSONValue(t *testing.T) {
 	t.Parallel()
 	tests := map[string]string{

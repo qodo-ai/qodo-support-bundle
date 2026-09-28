@@ -358,6 +358,49 @@ func TestJSONObjectFragmentSanitizesSkipperContainerSuffix(t *testing.T) {
 	}
 }
 
+func TestScanSemanticURLJSONAssignmentFindsSplitValue(t *testing.T) {
+	t.Parallel()
+	assignment, ok := ScanSemanticURLJSONAssignment(
+		`  "request_url":`,
+		JSONAssignmentModeObjectFragment,
+	)
+	if !ok || assignment.Invalid || assignment.Key != "request_url" ||
+		assignment.ValueOffset != len(`  "request_url":`) {
+		t.Fatalf("split semantic URL assignment not found: ok=%v assignment=%+v", ok, assignment)
+	}
+}
+
+func TestSanitizeSplitJSONURLValue(t *testing.T) {
+	t.Parallel()
+	output, consumed, ok := New().SanitizeSplitJSONURLValue(
+		`  "https://user:password@example.test/path?token=opaque-token&request_id=req-1#opaque-fragment",`,
+	)
+	if !ok || consumed <= 0 {
+		t.Fatalf("valid split URL value was rejected: consumed=%d", consumed)
+	}
+	for _, forbidden := range []string{"user", "password", "opaque-token", "opaque-fragment"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("split URL retained %q: %s", forbidden, output)
+		}
+	}
+	if !strings.Contains(output, "example.test/path") || !strings.Contains(output, "request_id=req-1") {
+		t.Fatalf("split URL lost safe content: %s", output)
+	}
+}
+
+func TestSanitizeSplitJSONURLValueRejectsMalformedOrNonString(t *testing.T) {
+	t.Parallel()
+	for _, input := range []string{
+		`"https://example.test/#opaque-value`,
+		`{"value":"opaque-value"}`,
+		`null`,
+	} {
+		if output, consumed, ok := New().SanitizeSplitJSONURLValue(input); ok || output != "" || consumed != 0 {
+			t.Fatalf("invalid split URL value accepted: input=%q output=%q consumed=%d", input, output, consumed)
+		}
+	}
+}
+
 func TestJSONLineRedactsURLUserinfoInOrdinaryStringFields(t *testing.T) {
 	t.Parallel()
 	input := `{"curl":"https://user:plain@localhost/path","message":"https://other:visible@localhost/path","location_id":"rack-1"}`

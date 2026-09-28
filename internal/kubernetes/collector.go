@@ -786,7 +786,37 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 	inPrivateKey := false
 	var jsonSkipper redact.JSONValueSkipper
 	var jsonContext redact.JSONStructureTracker
+	pendingJSONURL := false
 	forEachLogLine(input, func(_ int, line []byte) {
+		if pendingJSONURL {
+			pendingJSONURL = false
+			sanitized, consumed, ok := redactor.SanitizeSplitJSONURLValue(string(line))
+			if !ok {
+				failJSONLog(&jsonSkipper, &jsonContext)
+				return
+			}
+			observeJSONStructure(&jsonContext, &jsonSkipper, string(line[:consumed]))
+			if jsonContext.Invalid() {
+				return
+			}
+			_, _ = output.WriteString(sanitized)
+			if consumed < len(line) {
+				writeSensitiveJSONLogLine(
+					output,
+					string(line[consumed:]),
+					redactor,
+					&jsonSkipper,
+					redact.JSONAssignmentModeObjectFragment,
+					&jsonContext,
+					&pendingJSONURL,
+				)
+			}
+			if !jsonContext.Invalid() {
+				_, _ = output.WriteString("\n")
+			}
+			finishJSONStructureLine(&jsonSkipper, &jsonContext)
+			return
+		}
 		if jsonSkipper.Pending() {
 			consumed := jsonSkipper.Consume(string(line))
 			if jsonSkipper.Pending() {
@@ -800,6 +830,7 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 					&jsonSkipper,
 					redact.JSONAssignmentModeObjectFragment,
 					&jsonContext,
+					&pendingJSONURL,
 				)
 				_, _ = output.WriteString("\n")
 			}
@@ -838,7 +869,15 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 			begin := privateKeyBeginLine.FindStringIndex(remaining)
 			if begin == nil {
 				mode := jsonContext.AssignmentMode()
-				writeSensitiveJSONLogLine(output, remaining, redactor, &jsonSkipper, mode, &jsonContext)
+				writeSensitiveJSONLogLine(
+					output,
+					remaining,
+					redactor,
+					&jsonSkipper,
+					mode,
+					&jsonContext,
+					&pendingJSONURL,
+				)
 				writeLine = true
 				break
 			}
@@ -873,6 +912,7 @@ func writeSensitiveJSONLogLine(
 	jsonSkipper *redact.JSONValueSkipper,
 	mode redact.JSONAssignmentMode,
 	jsonContext *redact.JSONStructureTracker,
+	pendingJSONURL *bool,
 ) {
 	if jsonContext != nil && jsonContext.Invalid() {
 		jsonSkipper.FailClosed()
@@ -887,6 +927,33 @@ func writeSensitiveJSONLogLine(
 		}
 		assignment, ok := redact.ScanSensitiveJSONAssignment(remaining, scanMode)
 		if !ok {
+			urlAssignment, isURL := redact.ScanSemanticURLJSONAssignment(remaining, scanMode)
+			if isURL {
+				if urlAssignment.Invalid {
+					failJSONLog(jsonSkipper, jsonContext)
+					return
+				}
+				trimmed := strings.TrimRight(remaining, " \t\r")
+				if urlAssignment.ValueOffset >= len(trimmed) {
+					observeJSONStructure(jsonContext, jsonSkipper, remaining)
+					if jsonContext != nil && jsonContext.Invalid() {
+						return
+					}
+					sanitized, valid := sanitizeJSONAssignmentPrefix(
+						redactor,
+						remaining,
+						urlAssignment,
+						scanMode,
+					)
+					if !valid {
+						failJSONLog(jsonSkipper, jsonContext)
+						return
+					}
+					_, _ = output.WriteString(sanitized)
+					*pendingJSONURL = true
+					return
+				}
+			}
 			observeJSONStructure(jsonContext, jsonSkipper, remaining)
 			if jsonContext != nil && jsonContext.Invalid() {
 				return
