@@ -1513,6 +1513,35 @@ func TestCollectPreservesProsePunctuationAndFollowingLines(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogPreservesBracketLikeProseAndFollowingLines(t *testing.T) {
+	t.Parallel()
+	input := []byte("retry [1] unexpected }\nINFO still-running request_id=req-456\n")
+	output := string(mustSanitizeLog(t, input))
+	for _, expected := range []string{"retry [1] unexpected }", "INFO still-running", "req-456"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("bracket-like prose suppressed %q: %s", expected, output)
+		}
+	}
+	arrayOutput := string(mustSanitizeLog(t, []byte("  [1]\narray-next\n")))
+	if !strings.Contains(arrayOutput, "[1]") || !strings.Contains(arrayOutput, "array-next") {
+		t.Fatalf("line-leading JSON array was not preserved: %s", arrayOutput)
+	}
+}
+
+func TestCollectPreservesBracketLikeProseAndFollowingLines(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(t, "retry [1] unexpected }\nINFO still-running request_id=req-456\n")
+	for _, expected := range []string{"retry [1] unexpected }", "INFO still-running", "req-456"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("collector suppressed bracket-like prose %q: %s", expected, output)
+		}
+	}
+	arrayOutput := collectCurrentLog(t, "  [1]\narray-next\n")
+	if !strings.Contains(arrayOutput, "[1]") || !strings.Contains(arrayOutput, "array-next") {
+		t.Fatalf("collector did not preserve line-leading JSON array: %s", arrayOutput)
+	}
+}
+
 func TestSanitizeLogRedactsPrettyPrintedURLFragment(t *testing.T) {
 	t.Parallel()
 	input := []byte("{\n  \"url\": \"https://example.test/#opaque-value\",\n  \"request_id\": \"req-123\"\n}\n")
@@ -1537,6 +1566,58 @@ func TestCollectRedactsPrettyPrintedURLFragment(t *testing.T) {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("collector URL sanitization dropped %q: %s", expected, output)
 		}
+	}
+}
+
+func TestSanitizeLogRedactsURLAfterSensitiveJSONValue(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"compact": `{"password":"secret","url":"https://example.test/#opaque-value","request_id":"req-compact"}` + "\n",
+		"multiline": "{\n" +
+			"  \"password\": {\n" +
+			"    \"nested\": \"secret\"\n" +
+			"  }, \"url\": \"https://example.test/#opaque-value\",\n" +
+			"  \"request_id\": \"req-multiline\"\n" +
+			"}\n",
+	}
+	for name, input := range tests {
+		name, input := name, input
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output := string(mustSanitizeLog(t, []byte(input)))
+			if strings.Contains(output, "secret") || strings.Contains(output, "opaque-value") {
+				t.Fatalf("sensitive JSON sibling leaked: %s", output)
+			}
+			if !strings.Contains(output, "https://example.test/") || !strings.Contains(output, "req-"+name) {
+				t.Fatalf("safe JSON sibling was lost: %s", output)
+			}
+		})
+	}
+}
+
+func TestCollectRedactsURLAfterSensitiveJSONValue(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"compact": `{"password":"secret","url":"https://example.test/#opaque-value","request_id":"req-compact"}` + "\n",
+		"multiline": "{\n" +
+			"  \"password\": {\n" +
+			"    \"nested\": \"secret\"\n" +
+			"  }, \"url\": \"https://example.test/#opaque-value\",\n" +
+			"  \"request_id\": \"req-multiline\"\n" +
+			"}\n",
+	}
+	for name, input := range tests {
+		name, input := name, input
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output := collectCurrentLog(t, input)
+			if strings.Contains(output, "secret") || strings.Contains(output, "opaque-value") {
+				t.Fatalf("collector leaked sensitive JSON sibling: %s", output)
+			}
+			if !strings.Contains(output, "https://example.test/") || !strings.Contains(output, "req-"+name) {
+				t.Fatalf("collector lost safe JSON sibling: %s", output)
+			}
+		})
 	}
 }
 

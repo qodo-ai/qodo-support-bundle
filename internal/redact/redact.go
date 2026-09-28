@@ -464,34 +464,88 @@ func (redactor *Redactor) JSONLine(line string) string {
 	return string(sanitized)
 }
 
-// JSONObjectFragment sanitizes one or more fields from a pretty-printed JSON object.
-func (redactor *Redactor) JSONObjectFragment(line string) string {
+// JSONObjectFragment sanitizes valid fields from a JSON object continuation.
+func (redactor *Redactor) JSONObjectFragment(line string) (string, bool) {
 	trimmed := strings.TrimRight(line, " \t\r")
 	trailingSpace := line[len(trimmed):]
-	hasComma := strings.HasSuffix(trimmed, ",")
-	if hasComma {
-		trimmed = strings.TrimSuffix(trimmed, ",")
-	}
 	leadingLength := len(trimmed) - len(strings.TrimLeft(trimmed, " \t"))
 	leadingSpace := trimmed[:leadingLength]
 	fragment := strings.TrimSpace(trimmed)
 	if fragment == "" {
-		return redactor.Text(line)
+		return redactor.Text(line), true
 	}
 
+	leadingComma := strings.HasPrefix(fragment, ",")
+	if leadingComma {
+		fragment = strings.TrimSpace(fragment[1:])
+	}
+	if !startsJSONObjectMember(fragment) {
+		return redactor.Text(line), true
+	}
+
+	sanitized, ok := redactor.sanitizeJSONObjectMembers(fragment)
+	if !ok {
+		return "", false
+	}
+	if leadingComma {
+		sanitized = "," + sanitized
+	}
+	return leadingSpace + sanitized + trailingSpace, true
+}
+
+func startsJSONObjectMember(fragment string) bool {
+	if fragment == "" || fragment[0] != '"' {
+		return false
+	}
+	_, next, complete, invalid := parseJSONQuotedString(fragment, 0)
+	if invalid || !complete {
+		return true
+	}
+	next = skipJSONSpace(fragment, next)
+	return next < len(fragment) && fragment[next] == ':'
+}
+
+func (redactor *Redactor) sanitizeJSONObjectMembers(fragment string) (string, bool) {
+	if strings.HasSuffix(fragment, ",") {
+		body := strings.TrimSpace(strings.TrimSuffix(fragment, ","))
+		sanitized, ok := redactor.marshalJSONObjectMembers(body + "}")
+		if !ok {
+			return "", false
+		}
+		return sanitized[:len(sanitized)-1] + ",", true
+	}
+
+	for end := len(fragment); ; {
+		if sanitized, ok := redactor.marshalJSONObjectMembers(fragment[:end]); ok {
+			return sanitized + fragment[end:], true
+		}
+		cursor := end
+		for cursor > 0 && jsonSpace(fragment[cursor-1]) {
+			cursor--
+		}
+		if cursor == 0 || (fragment[cursor-1] != '}' && fragment[cursor-1] != ']') {
+			break
+		}
+		end = cursor - 1
+	}
+
+	sanitized, ok := redactor.marshalJSONObjectMembers(fragment + "}")
+	if !ok {
+		return "", false
+	}
+	return sanitized[:len(sanitized)-1], true
+}
+
+func (redactor *Redactor) marshalJSONObjectMembers(fragment string) (string, bool) {
 	var value map[string]any
-	if err := json.Unmarshal([]byte("{"+fragment+"}"), &value); err != nil {
-		return redactor.Text(line)
+	if err := json.Unmarshal([]byte("{"+fragment), &value); err != nil {
+		return "", false
 	}
 	sanitized, err := json.Marshal(redactor.Value("", value))
 	if err != nil || len(sanitized) < 2 {
-		return redactor.Text(line)
+		return "", false
 	}
-	result := leadingSpace + string(sanitized[1:len(sanitized)-1])
-	if hasComma {
-		result += ","
-	}
-	return result + trailingSpace
+	return string(sanitized[1:]), true
 }
 
 const maxJSONSkipperDepth = 64
@@ -1035,6 +1089,7 @@ func isJSONHex(character byte) bool {
 
 type JSONAssignment struct {
 	Key         string
+	KeyOffset   int
 	ValueOffset int
 	Invalid     bool
 }
@@ -1077,7 +1132,7 @@ func ScanSensitiveJSONAssignment(line string, mode JSONAssignmentMode) (JSONAssi
 			return JSONAssignment{}, false
 		}
 	}
-	return JSONAssignment{Key: key, ValueOffset: len(trimmed)}, true
+	return JSONAssignment{Key: key, KeyOffset: index - 1, ValueOffset: len(trimmed)}, true
 }
 
 func scanStructuredJSONAssignment(line string, mode JSONAssignmentMode) (JSONAssignment, bool) {
@@ -1119,7 +1174,7 @@ func scanStructuredJSONAssignment(line string, mode JSONAssignmentMode) (JSONAss
 					return JSONAssignment{Invalid: true, ValueOffset: index}, true
 				}
 				continue
-			case character == '[':
+			case character == '[' && !sawNonSpace:
 				if !pushJSONAssignmentFrame(&stack, &depth, true) {
 					return JSONAssignment{Invalid: true, ValueOffset: index}, true
 				}
@@ -1257,7 +1312,11 @@ func readJSONAssignmentKey(line string, quoteIndex int) (JSONAssignment, int, bo
 		return JSONAssignment{Invalid: true, ValueOffset: valueOffset}, valueOffset, false, true
 	}
 	if IsSensitiveKey(key) {
-		return JSONAssignment{Key: key, ValueOffset: valueOffset}, valueOffset, true, false
+		return JSONAssignment{
+			Key:         key,
+			KeyOffset:   quoteIndex,
+			ValueOffset: valueOffset,
+		}, valueOffset, true, false
 	}
 	return JSONAssignment{}, valueOffset, false, false
 }
@@ -1469,12 +1528,16 @@ func plausibleJSONOpener(fragment string, index int) bool {
 	if fragment[index] != '{' && fragment[index] != '[' {
 		return false
 	}
+	prefixIsSpace := strings.TrimSpace(fragment[:index]) == ""
+	if fragment[index] == '[' && !prefixIsSpace {
+		return false
+	}
 	next := index + 1
 	for next < len(fragment) && jsonSpace(fragment[next]) {
 		next++
 	}
 	if next == len(fragment) {
-		return strings.TrimSpace(fragment[:index]) == ""
+		return prefixIsSpace
 	}
 	if fragment[index] == '{' {
 		return fragment[next] == '"' || fragment[next] == '}'

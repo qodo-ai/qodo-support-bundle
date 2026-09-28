@@ -303,6 +303,61 @@ func TestJSONLineSanitizesSemanticURLFields(t *testing.T) {
 	}
 }
 
+func TestJSONObjectFragmentSanitizesContinuationSyntax(t *testing.T) {
+	t.Parallel()
+	redactor := New()
+	tests := map[string]string{
+		"parent closer":  `,"url":"https://example.test/#opaque-value","request_id":"req-1"}`,
+		"nested closers": `,"url":"https://example.test/#opaque-value","request_id":"req-2"}]}`,
+		"next sibling":   `, "url": "https://example.test/#opaque-value",`,
+	}
+	for name, input := range tests {
+		name, input := name, input
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output, ok := redactor.JSONObjectFragment(input)
+			if !ok {
+				t.Fatalf("valid object continuation was rejected: %q", input)
+			}
+			if strings.Contains(output, "opaque-value") {
+				t.Fatalf("URL fragment survived object continuation: %s", output)
+			}
+			if !strings.Contains(output, "https://example.test/") {
+				t.Fatalf("safe URL was lost: %s", output)
+			}
+		})
+	}
+}
+
+func TestJSONObjectFragmentRejectsMalformedContinuation(t *testing.T) {
+	t.Parallel()
+	output, ok := New().JSONObjectFragment(
+		`,"url":"https://example.test/#opaque-value"} garbage`,
+	)
+	if ok || output != "" {
+		t.Fatalf("malformed continuation was accepted: ok=%v output=%q", ok, output)
+	}
+}
+
+func TestJSONObjectFragmentSanitizesSkipperContainerSuffix(t *testing.T) {
+	t.Parallel()
+	var skipper JSONValueSkipper
+	skipper.Start()
+	if consumed := skipper.Consume("{"); consumed != 1 || !skipper.Pending() {
+		t.Fatalf("container opener was not pending: consumed=%d", consumed)
+	}
+	line := `  }, "url": "https://example.test/#opaque-value",`
+	consumed := skipper.Consume(line)
+	if skipper.Pending() {
+		t.Fatal("closed container remained pending")
+	}
+	output, ok := New().JSONObjectFragment(line[consumed:])
+	if !ok || strings.Contains(output, "opaque-value") ||
+		!strings.Contains(output, "https://example.test/") {
+		t.Fatalf("skipper suffix was not sanitized: consumed=%d ok=%v output=%q", consumed, ok, output)
+	}
+}
+
 func TestJSONLineRedactsURLUserinfoInOrdinaryStringFields(t *testing.T) {
 	t.Parallel()
 	input := `{"curl":"https://user:plain@localhost/path","message":"https://other:visible@localhost/path","location_id":"rack-1"}`

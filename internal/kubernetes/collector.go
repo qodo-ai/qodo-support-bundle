@@ -846,7 +846,12 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 			if prefix != "" {
 				mode := jsonContext.AssignmentMode()
 				jsonContext.Observe(prefix)
-				_, _ = output.WriteString(sanitizeJSONLogText(redactor, prefix, mode))
+				sanitized, ok := sanitizeJSONLogText(redactor, prefix, mode)
+				if !ok {
+					failJSONLog(&jsonSkipper, &jsonContext)
+					return
+				}
+				_, _ = output.WriteString(sanitized)
 			}
 			_, _ = output.WriteString(redact.Replacement)
 			writeLine = true
@@ -886,7 +891,12 @@ func writeSensitiveJSONLogLine(
 			if jsonContext != nil && jsonContext.Invalid() {
 				return
 			}
-			_, _ = output.WriteString(sanitizeJSONLogText(redactor, remaining, scanMode))
+			sanitized, valid := sanitizeJSONLogText(redactor, remaining, scanMode)
+			if !valid {
+				failJSONLog(jsonSkipper, jsonContext)
+				return
+			}
+			_, _ = output.WriteString(sanitized)
 			return
 		}
 		observeJSONStructure(jsonContext, jsonSkipper, remaining[:assignment.ValueOffset])
@@ -894,7 +904,11 @@ func writeSensitiveJSONLogLine(
 			return
 		}
 		prefix := remaining[:assignment.ValueOffset]
-		sanitized := sanitizeJSONLogText(redactor, prefix, scanMode)
+		sanitized, valid := sanitizeJSONAssignmentPrefix(redactor, prefix, assignment, scanMode)
+		if !valid {
+			failJSONLog(jsonSkipper, jsonContext)
+			return
+		}
 		if !strings.HasSuffix(strings.TrimSpace(sanitized), redact.Replacement) {
 			sanitized += redact.Replacement
 		}
@@ -935,11 +949,40 @@ func writeSensitiveJSONLogLine(
 	}
 }
 
-func sanitizeJSONLogText(redactor *redact.Redactor, text string, mode redact.JSONAssignmentMode) string {
+func sanitizeJSONAssignmentPrefix(
+	redactor *redact.Redactor,
+	prefix string,
+	assignment redact.JSONAssignment,
+	mode redact.JSONAssignmentMode,
+) (string, bool) {
+	if mode != redact.JSONAssignmentModeObjectFragment ||
+		assignment.KeyOffset < 0 ||
+		assignment.KeyOffset > len(prefix) {
+		return redactor.JSONLine(prefix), true
+	}
+	sanitized, ok := redactor.JSONObjectFragment(prefix[:assignment.KeyOffset])
+	if !ok {
+		return "", false
+	}
+	return sanitized + prefix[assignment.KeyOffset:], true
+}
+
+func sanitizeJSONLogText(
+	redactor *redact.Redactor,
+	text string,
+	mode redact.JSONAssignmentMode,
+) (string, bool) {
 	if mode == redact.JSONAssignmentModeObjectFragment {
 		return redactor.JSONObjectFragment(text)
 	}
-	return redactor.JSONLine(text)
+	return redactor.JSONLine(text), true
+}
+
+func failJSONLog(jsonSkipper *redact.JSONValueSkipper, jsonContext *redact.JSONStructureTracker) {
+	jsonSkipper.FailClosed()
+	if jsonContext != nil {
+		jsonContext.FailClosed()
+	}
 }
 
 func observeJSONStructure(
