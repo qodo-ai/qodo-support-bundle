@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 )
 
 const (

@@ -194,7 +194,7 @@ provenance. Verify a downloaded binary with:
 
 ```bash
 gh attestation verify ./qodo-support-bundle-linux-amd64 \
-  --repo Codium-ai/qodo-platform
+  --repo qodo-ai/qodo-support-bundle
 ```
 
 ## Customer delivery

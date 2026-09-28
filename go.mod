@@ -1,3 +1,3 @@
-module github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle
+module github.com/qodo-ai/qodo-support-bundle
 
 go 1.23

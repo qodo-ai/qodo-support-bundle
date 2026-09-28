@@ -1,5 +1,5 @@
 VERSION ?= dev
-MODULE := github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle
+MODULE := github.com/qodo-ai/qodo-support-bundle
 PYTHON ?= python3
 TEST_VENV ?= .test-venv
 override QODO_SUPPORT_BUNDLE_VERSION := $(value VERSION)

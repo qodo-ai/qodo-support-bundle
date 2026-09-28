@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/redact"
+	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 )
 
 type fakeRunner struct {

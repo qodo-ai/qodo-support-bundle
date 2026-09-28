@@ -5,7 +5,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/Codium-ai/qodo-platform/tools/qodo-support-bundle/internal/app"
+	"github.com/qodo-ai/qodo-support-bundle/internal/app"
 )
 
 func main() {
