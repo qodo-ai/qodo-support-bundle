@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/phoenix"
 	"github.com/qodo-ai/qodo-support-bundle/internal/prometheus"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 	"github.com/qodo-ai/qodo-support-bundle/internal/workload"
@@ -19,6 +20,7 @@ import (
 type CollectionManifestOptions struct {
 	Coverage   map[Source]Coverage
 	Prometheus map[string]any
+	Phoenix    map[string]any
 }
 
 // PrometheusSummary supplies the optional human-readable Prometheus section.
@@ -26,6 +28,19 @@ type PrometheusSummary struct {
 	Requested bool
 	Coverage  Coverage
 	Report    *prometheus.Report
+}
+
+// PhoenixSummary supplies the optional human-readable Phoenix section.
+type PhoenixSummary struct {
+	Requested bool
+	Coverage  Coverage
+	Report    *phoenix.Report
+}
+
+// SummaryOptions groups optional telemetry sections.
+type SummaryOptions struct {
+	Prometheus PrometheusSummary
+	Phoenix    PhoenixSummary
 }
 
 // BuildCustomerContext returns the non-empty, sanitized customer descriptions.
@@ -99,10 +114,14 @@ func BuildCollectionManifest(
 	}
 	coverage := InitializeCoverage(nil)
 	prometheusMetadata := map[string]any{"enabled": false}
+	phoenixMetadata := map[string]any{"enabled": false}
 	if len(options) > 0 {
 		coverage = completeCoverageMap(options[0].Coverage)
 		if options[0].Prometheus != nil {
 			prometheusMetadata = options[0].Prometheus
+		}
+		if options[0].Phoenix != nil {
+			phoenixMetadata = options[0].Phoenix
 		}
 	}
 	return map[string]any{
@@ -118,7 +137,90 @@ func BuildCollectionManifest(
 		"connectivity":              connectivity,
 		"coverage":                  coverage,
 		"prometheus":                prometheusMetadata,
+		"phoenix":                   phoenixMetadata,
 	}
+}
+
+// BuildPhoenixMetadata returns bounded configuration and sanitized aggregate
+// report metadata. Raw trace attributes, diagnostics, endpoints, and command
+// output are deliberately excluded.
+func BuildPhoenixMetadata(
+	config *phoenix.Config,
+	report *phoenix.Report,
+	coverage Coverage,
+	redactor *redact.Redactor,
+) map[string]any {
+	metadata := map[string]any{"enabled": config != nil}
+	if config == nil {
+		return metadata
+	}
+	effective := config.WithDefaults()
+	metadata["namespace"] = summaryValue(redactor.Text(config.Namespace))
+	mode := "window"
+	if config.TraceID != "" {
+		mode = "trace_id"
+		metadata["trace_id"] = strings.ToLower(config.TraceID)
+	}
+	metadata["mode"] = mode
+	metadata["contract_version"] = phoenix.ContractVersion
+	addMetadataTime(metadata, "configured_start", config.Start)
+	addMetadataTime(metadata, "configured_end", config.End)
+	metadata["command_timeout"] = effective.CommandTimeout.String()
+	metadata["discovery_timeout"] = effective.DiscoveryTimeout.String()
+	metadata["readiness_timeout"] = effective.ReadinessTimeout.String()
+	metadata["connect_timeout"] = effective.ConnectTimeout.String()
+	metadata["request_timeout"] = effective.RequestTimeout.String()
+	metadata["idle_timeout"] = effective.IdleTimeout.String()
+	metadata["overall_timeout"] = effective.OverallTimeout.String()
+	metadata["max_window"] = effective.MaxWindow.String()
+	metadata["max_response_bytes"] = effective.MaxResponseBytes
+	metadata["max_projects"] = effective.MaxProjects
+	metadata["max_traces"] = effective.MaxTraces
+	metadata["max_spans"] = effective.MaxSpans
+	metadata["max_pages"] = effective.MaxPages
+	metadata["page_size"] = effective.PageSize
+	metadata["max_retained_bytes_per_trace"] = effective.MaxRetainedBytesPerTrace
+	metadata["max_total_retained_bytes"] = effective.MaxTotalRetainedBytes
+	metadata["collection_status"] = stableCoverageState(coverage.State).String()
+	metadata["retained_records"] = max(coverage.RecordCount, 0)
+	metadata["retained_bytes"] = max(coverage.RetainedBytes, 0)
+	metadata["truncated"] = coverage.Truncated
+	if reason := stablePhoenixMetadataReason(coverage); reason != "" {
+		metadata["reason"] = reason
+	}
+	if report == nil {
+		return metadata
+	}
+	if report.ContractVersion == phoenix.ContractVersion {
+		metadata["contract_version"] = report.ContractVersion
+	}
+	if report.RequestedStart != "" {
+		metadata["requested_start"] = summaryValue(redactor.Text(report.RequestedStart))
+	}
+	if report.RequestedEnd != "" {
+		metadata["requested_end"] = summaryValue(redactor.Text(report.RequestedEnd))
+	}
+	if report.ActualStart != "" {
+		metadata["actual_start"] = summaryValue(redactor.Text(report.ActualStart))
+	}
+	if report.ActualEnd != "" {
+		metadata["actual_end"] = summaryValue(redactor.Text(report.ActualEnd))
+	}
+	if report.Mode == "window" || report.Mode == "trace_id" {
+		metadata["report_mode"] = report.Mode
+	}
+	switch report.State {
+	case phoenix.ReportComplete, phoenix.ReportPartial, phoenix.ReportFailed:
+		metadata["report_state"] = string(report.State)
+	}
+	metadata["projects_found"] = max(report.Coverage.ProjectsFound, 0)
+	metadata["projects_read"] = max(report.Coverage.ProjectsRead, 0)
+	metadata["traces_found"] = max(report.Coverage.TracesFound, 0)
+	metadata["traces_retained"] = max(report.Coverage.TracesRetained, 0)
+	metadata["spans_found"] = max(report.Coverage.SpansFound, 0)
+	metadata["spans_retained"] = max(report.Coverage.SpansRetained, 0)
+	metadata["pages_read"] = max(report.Coverage.PagesRead, 0)
+	return metadata
 }
 
 // BuildPrometheusMetadata returns only bounded, non-sensitive configuration
@@ -206,7 +308,7 @@ func BuildSummary(
 	probeEnabled bool,
 	connectivity *zitadel.Report,
 	probeFailure string,
-	prometheusSummaries ...PrometheusSummary,
+	options ...SummaryOptions,
 ) string {
 	var summary strings.Builder
 	fmt.Fprintln(&summary, "# Qodo support bundle summary")
@@ -267,8 +369,13 @@ func BuildSummary(
 			fmt.Fprintln(&summary, "- Login and token issuance were not tested.")
 		}
 	}
-	if len(prometheusSummaries) > 0 && prometheusSummaries[0].Requested {
-		prometheusSummary := prometheusSummaries[0]
+	var prometheusSummary PrometheusSummary
+	var phoenixSummary PhoenixSummary
+	if len(options) > 0 {
+		prometheusSummary = options[0].Prometheus
+		phoenixSummary = options[0].Phoenix
+	}
+	if prometheusSummary.Requested {
 		fmt.Fprintln(&summary, "\n## Prometheus")
 		fmt.Fprintf(
 			&summary,
@@ -287,6 +394,33 @@ func BuildSummary(
 				max(prometheusSummary.Report.RetainedRecords, 0),
 				max(prometheusSummary.Report.RetainedBytes, 0),
 				prometheusSummary.Report.Truncated,
+			)
+		}
+	}
+	if phoenixSummary.Requested {
+		fmt.Fprintln(&summary, "\n## Phoenix")
+		fmt.Fprintf(
+			&summary,
+			"\n- Collection: %s",
+			stableCoverageState(phoenixSummary.Coverage.State),
+		)
+		if reason := stablePhoenixMetadataReason(phoenixSummary.Coverage); reason != "" {
+			fmt.Fprintf(&summary, " (%s)", reason)
+		}
+		fmt.Fprintln(&summary)
+		if phoenixSummary.Report != nil {
+			mode := phoenixSummary.Report.Mode
+			if mode == "" {
+				mode = "window"
+			}
+			fmt.Fprintf(
+				&summary,
+				"- Mode: %s; retained traces: %d; retained spans: %d; retained bytes: %d; truncated: %t\n",
+				mode,
+				max(phoenixSummary.Report.Coverage.TracesRetained, 0),
+				max(phoenixSummary.Report.Coverage.SpansRetained, 0),
+				max(phoenixSummary.Coverage.RetainedBytes, 0),
+				phoenixSummary.Coverage.Truncated,
 			)
 		}
 	}
@@ -371,6 +505,18 @@ func stablePrometheusMetadataReason(coverage Coverage) string {
 		return coverage.Reason
 	default:
 		return stablePrometheusReason(coverage.Reason)
+	}
+}
+
+func stablePhoenixMetadataReason(coverage Coverage) string {
+	switch coverage.Reason {
+	case reasonCollectionError,
+		reasonPhoenixInvalidReport,
+		reasonPhoenixUnavailable,
+		reasonPhoenixCoverageIncomplete:
+		return coverage.Reason
+	default:
+		return stablePhoenixReason(coverage.Reason)
 	}
 }
 

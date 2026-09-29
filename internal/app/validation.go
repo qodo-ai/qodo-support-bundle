@@ -9,6 +9,7 @@ import (
 )
 
 var dnsLabelPattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
+var traceIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
 
 func validatePrometheusFlags(
 	enabled bool,
@@ -33,6 +34,44 @@ func validatePrometheusFlags(
 	}
 	if !validDNSLabel(*prometheusNamespace) {
 		return errors.New("--prometheus-namespace must be a Kubernetes DNS label")
+	}
+	return nil
+}
+
+func validatePhoenixFlags(
+	enabled bool,
+	visited map[string]bool,
+	namespaces []string,
+	allNamespaces bool,
+	phoenixNamespace *string,
+	traceID *string,
+) error {
+	if !enabled {
+		switch {
+		case visited["phoenix-namespace"]:
+			return errors.New("--phoenix-namespace requires --collect-phoenix")
+		case visited["trace-id"]:
+			return errors.New("--trace-id requires --collect-phoenix")
+		default:
+			return nil
+		}
+	}
+	if *phoenixNamespace == "" {
+		if allNamespaces || len(namespaces) != 1 {
+			return errors.New(
+				"--phoenix-namespace is required when --collect-phoenix uses multiple or all namespaces",
+			)
+		}
+		*phoenixNamespace = namespaces[0]
+	}
+	if !validDNSLabel(*phoenixNamespace) {
+		return errors.New("--phoenix-namespace must be a Kubernetes DNS label")
+	}
+	if *traceID != "" {
+		if !traceIDPattern.MatchString(*traceID) {
+			return errors.New("--trace-id must be exactly 32 hexadecimal characters")
+		}
+		*traceID = strings.ToLower(*traceID)
 	}
 	return nil
 }

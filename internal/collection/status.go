@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/phoenix"
 	"github.com/qodo-ai/qodo-support-bundle/internal/prometheus"
 	"github.com/qodo-ai/qodo-support-bundle/internal/workload"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
@@ -17,6 +18,9 @@ const (
 	reasonPrometheusInvalidReport      = "invalid_report"
 	reasonPrometheusUnavailable        = "collection_unavailable"
 	reasonPrometheusCoverageIncomplete = "query_coverage_incomplete"
+	reasonPhoenixInvalidReport         = "invalid_report"
+	reasonPhoenixUnavailable           = "collection_unavailable"
+	reasonPhoenixCoverageIncomplete    = "trace_coverage_incomplete"
 )
 
 // KubernetesCoverage derives coverage from a completed Kubernetes collection.
@@ -108,6 +112,51 @@ func PrometheusCoverage(report prometheus.Report, collectionErr error) Coverage 
 		coverage.Reason = reasonPrometheusCoverageIncomplete
 	default:
 		coverage.Reason = reasonPrometheusUnavailable
+	}
+	return coverage
+}
+
+// PhoenixCoverage derives source coverage from the collector's sanitized
+// report. Only stable Phoenix reason codes are propagated.
+func PhoenixCoverage(report phoenix.Report, collectionErr error) Coverage {
+	coverage := Coverage{
+		RequestedStart: phoenixReportTime(report.RequestedStart),
+		RequestedEnd:   phoenixReportTime(report.RequestedEnd),
+		ActualStart:    phoenixReportTime(report.ActualStart),
+		ActualEnd:      phoenixReportTime(report.ActualEnd),
+		RetainedBytes:  max(report.Coverage.RetainedBytes, 0),
+		RecordCount:    int64(max(report.Coverage.TracesRetained, 0)),
+		Truncated:      report.Coverage.Truncated,
+	}
+	completeErr := phoenix.ValidateCompleteCoverage(report)
+	if collectionErr == nil && completeErr == nil {
+		coverage.State = CoverageComplete
+		return coverage
+	}
+
+	switch {
+	case report.State == phoenix.ReportPartial:
+		coverage.State = CoveragePartial
+	case report.State == phoenix.ReportFailed:
+		coverage.State = CoverageUnavailable
+	case collectionErr != nil && coverage.RecordCount == 0:
+		coverage.State = CoverageUnavailable
+	case coverage.Truncated || coverage.RecordCount > 0:
+		coverage.State = CoveragePartial
+	default:
+		coverage.State = CoverageUnavailable
+	}
+	switch {
+	case collectionErr != nil:
+		coverage.Reason = reasonCollectionError
+	case stablePhoenixReason(report.Reason) != "":
+		coverage.Reason = stablePhoenixReason(report.Reason)
+	case report.State == phoenix.ReportComplete && completeErr != nil:
+		coverage.Reason = reasonPhoenixInvalidReport
+	case coverage.State == CoveragePartial:
+		coverage.Reason = reasonPhoenixCoverageIncomplete
+	default:
+		coverage.Reason = reasonPhoenixUnavailable
 	}
 	return coverage
 }
@@ -212,6 +261,41 @@ func stablePrometheusReason(reason string) string {
 		"artifact_staging_failed",
 		"collection_canceled",
 		reasonPrometheusCoverageIncomplete:
+		return reason
+	default:
+		return ""
+	}
+}
+
+func phoenixReportTime(value string) *time.Time {
+	if value == "" {
+		return nil
+	}
+	return prometheusReportTime(value)
+}
+
+func stablePhoenixReason(reason string) string {
+	switch reason {
+	case "project_limit_exceeded",
+		"trace_limit_exceeded",
+		"span_limit_exceeded",
+		"page_limit_exceeded",
+		"per_trace_byte_budget_exceeded",
+		"total_byte_budget_exceeded",
+		"response_byte_limit_exceeded",
+		"invalid_response",
+		"http_status_error",
+		"request_failed",
+		"request_deadline_exceeded",
+		"idle_deadline_exceeded",
+		"discovery_failed",
+		"forward_failed",
+		"invalid_tunnel_endpoint",
+		"tunnel_unavailable",
+		"tunnel_cleanup_failed",
+		"artifact_staging_failed",
+		"collection_canceled",
+		reasonPhoenixCoverageIncomplete:
 		return reason
 	default:
 		return ""

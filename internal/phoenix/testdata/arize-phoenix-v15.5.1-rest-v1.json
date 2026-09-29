@@ -1,0 +1,73 @@
+{
+  "phoenix_tag": "arize-phoenix-v15.5.1",
+  "commit": "a4b65920d4b977ab1f0f948c6bfc7f379b5a0a74",
+  "api_version": "v1",
+  "service": {
+    "approved_label": {
+      "app.kubernetes.io/name": "phoenix"
+    },
+    "port": 6006
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/v1/projects",
+      "query": [
+        "cursor",
+        "limit",
+        "include_experiment_projects=false",
+        "include_dataset_evaluator_projects=false"
+      ],
+      "response": {
+        "data": [
+          {
+            "id": "string",
+            "name": "string",
+            "description": "optional string"
+          }
+        ],
+        "next_cursor": "optional string"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/v1/projects/{project_identifier}/spans",
+      "query_window": [
+        "cursor",
+        "limit",
+        "start_time",
+        "end_time"
+      ],
+      "query_exact": [
+        "cursor",
+        "limit",
+        "trace_id"
+      ],
+      "response": {
+        "data": [
+          {
+            "id": "string",
+            "name": "string",
+            "context": {
+              "trace_id": "string",
+              "span_id": "string"
+            },
+            "span_kind": "string",
+            "parent_id": "optional string",
+            "start_time": "RFC3339 timestamp",
+            "end_time": "RFC3339 timestamp",
+            "status_code": "string",
+            "status_message": "string or null",
+            "attributes": "object",
+            "events": "array"
+          }
+        ],
+        "next_cursor": "optional string"
+      }
+    }
+  ],
+  "collector_surface": {
+    "library_only": false,
+    "cli_functionality": true
+  }
+}

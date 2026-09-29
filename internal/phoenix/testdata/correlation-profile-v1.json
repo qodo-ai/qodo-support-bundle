@@ -1,0 +1,25 @@
+{
+  "profile_version": "1",
+  "platform_source": {
+    "observed_attribute": "vcs.repository",
+    "repository_key_present": true
+  },
+  "phoenix_rest_v1_15_5_1": {
+    "repository_correlation_available": false,
+    "pull_request_correlation_available": false,
+    "available_allowlisted_vcs_attributes": [
+      "vcs.provider",
+      "vcs.event.type"
+    ]
+  },
+  "release_gates": {
+    "repository_correlation": {
+      "gated": true,
+      "reason": "repository value is not available through the locked Phoenix REST response contract"
+    },
+    "pull_request_correlation": {
+      "gated": true,
+      "reason": "pull request identity is not available through the platform source or locked Phoenix REST response contract"
+    }
+  }
+}

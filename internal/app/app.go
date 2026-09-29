@@ -6,11 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/bundle"
 	"github.com/qodo-ai/qodo-support-bundle/internal/collection"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/phoenix"
 	"github.com/qodo-ai/qodo-support-bundle/internal/prometheus"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 	"github.com/qodo-ai/qodo-support-bundle/internal/telemetry"
@@ -121,6 +123,21 @@ func runCollect(
 		"",
 		"Namespace hosting the Prometheus service",
 	)
+	collectPhoenix := flags.Bool(
+		"collect-phoenix",
+		false,
+		"Collect bounded Phoenix trace telemetry",
+	)
+	phoenixNamespace := flags.String(
+		"phoenix-namespace",
+		"",
+		"Namespace hosting the Phoenix service",
+	)
+	traceID := flags.String(
+		"trace-id",
+		"",
+		"Exact 32-hex-character Phoenix trace ID",
+	)
 	platformNamespace := flags.String(
 		"platform-namespace",
 		"",
@@ -220,6 +237,17 @@ func runCollect(
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
+	if err := validatePhoenixFlags(
+		*collectPhoenix,
+		visited,
+		selectedNamespaces,
+		*allNamespaces,
+		phoenixNamespace,
+		traceID,
+	); err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 2
+	}
 	var prometheusConfig *prometheus.Config
 	if *collectPrometheus {
 		config := buildPrometheusConfig(
@@ -241,6 +269,26 @@ func runCollect(
 			return 2
 		}
 		prometheusConfig = &config
+	}
+	var phoenixConfig *phoenix.Config
+	if *collectPhoenix {
+		config := buildPhoenixConfig(
+			*phoenixNamespace,
+			*kubeContext,
+			*kubeconfig,
+			collectionTime,
+			*since,
+			*traceID,
+		)
+		if *since > config.MaxWindow {
+			_, _ = fmt.Fprintf(
+				stderr,
+				"--since must not exceed %s when --collect-phoenix is enabled\n",
+				config.MaxWindow,
+			)
+			return 2
+		}
+		phoenixConfig = &config
 	}
 	usedDefaultOutput := false
 	if *output == "" {
@@ -285,13 +333,19 @@ func runCollect(
 	_, _ = fmt.Fprintln(stderr, "Using kubectl: resolved executable")
 	runner := kubernetes.ExecRunner{Binary: resolvedKubectl}
 	collectors := collection.DefaultCollectors()
-	if prometheusConfig != nil {
-		collectors.Forwarder, err = buildPrometheusForwarder(
+	if prometheusConfig != nil || phoenixConfig != nil {
+		factory := func(
+			binary string,
+			config telemetry.ForwardConfig,
+		) (telemetry.Forwarder, error) {
+			return telemetry.NewKubectlForwarder(binary, config)
+		}
+		err = configureTelemetryForwarders(
+			&collectors,
 			resolvedKubectl,
-			*prometheusConfig,
-			func(binary string, config telemetry.ForwardConfig) (telemetry.Forwarder, error) {
-				return telemetry.NewKubectlForwarder(binary, config)
-			},
+			prometheusConfig,
+			phoenixConfig,
+			factory,
 		)
 		if err != nil {
 			_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
@@ -338,6 +392,7 @@ func runCollect(
 			Problem:    *problem,
 			Kubernetes: kubernetesConfig,
 			Prometheus: prometheusConfig,
+			Phoenix:    phoenixConfig,
 			Zitadel:    zitadelConfig,
 			Progress: func(event collection.Event) {
 				writeCollectionEvent(stderr, event)
@@ -411,28 +466,158 @@ func buildPrometheusConfig(
 	return config
 }
 
+func buildPhoenixConfig(
+	namespace string,
+	kubeContext string,
+	kubeconfig string,
+	end time.Time,
+	since time.Duration,
+	traceID string,
+) phoenix.Config {
+	config := phoenix.DefaultConfig()
+	config.Namespace = namespace
+	config.Context = kubeContext
+	config.Kubeconfig = kubeconfig
+	config.End = end.UTC()
+	config.Start = config.End.Add(-since)
+	config.TraceID = strings.ToLower(traceID)
+	return config
+}
+
 func buildPrometheusForwarder(
 	resolvedKubectl string,
 	config prometheus.Config,
 	factory telemetryForwarderFactory,
 ) (telemetry.Forwarder, error) {
+	return buildTelemetryForwarder(
+		resolvedKubectl,
+		config.Namespace,
+		config.Context,
+		config.Kubeconfig,
+		config.ReadinessTimeout,
+		"Prometheus",
+		factory,
+	)
+}
+
+func buildPhoenixForwarder(
+	resolvedKubectl string,
+	config phoenix.Config,
+	factory telemetryForwarderFactory,
+) (telemetry.Forwarder, error) {
+	return buildTelemetryForwarder(
+		resolvedKubectl,
+		config.Namespace,
+		config.Context,
+		config.Kubeconfig,
+		config.ReadinessTimeout,
+		"Phoenix",
+		factory,
+	)
+}
+
+func buildTelemetryForwarder(
+	resolvedKubectl string,
+	namespace string,
+	kubeContext string,
+	kubeconfig string,
+	readinessTimeout time.Duration,
+	source string,
+	factory telemetryForwarderFactory,
+) (telemetry.Forwarder, error) {
 	if factory == nil {
-		return nil, errors.New("create Prometheus telemetry forwarder: invalid factory")
+		return nil, fmt.Errorf("create %s telemetry forwarder: invalid factory", source)
 	}
 	forwarder, err := factory(resolvedKubectl, telemetry.ForwardConfig{
-		Namespace:        config.Namespace,
-		Context:          config.Context,
-		Kubeconfig:       config.Kubeconfig,
-		ReadinessTimeout: config.ReadinessTimeout,
+		Namespace:        namespace,
+		Context:          kubeContext,
+		Kubeconfig:       kubeconfig,
+		ReadinessTimeout: readinessTimeout,
 		MaxOutputBytes:   defaultForwardOutputLimit,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create Prometheus telemetry forwarder: %w", err)
+		return nil, fmt.Errorf("create %s telemetry forwarder: %w", source, err)
 	}
 	if forwarder == nil {
-		return nil, errors.New("create Prometheus telemetry forwarder: invalid result")
+		return nil, fmt.Errorf("create %s telemetry forwarder: invalid result", source)
 	}
 	return forwarder, nil
+}
+
+func configureTelemetryForwarders(
+	collectors *collection.Collectors,
+	resolvedKubectl string,
+	prometheusConfig *prometheus.Config,
+	phoenixConfig *phoenix.Config,
+	factory telemetryForwarderFactory,
+) error {
+	if collectors == nil {
+		return errors.New("configure telemetry forwarders: invalid collectors")
+	}
+	switch {
+	case prometheusConfig != nil &&
+		phoenixConfig != nil &&
+		prometheusConfig.Namespace == phoenixConfig.Namespace &&
+		prometheusConfig.Context == phoenixConfig.Context &&
+		prometheusConfig.Kubeconfig == phoenixConfig.Kubeconfig:
+		readinessTimeout := max(
+			prometheusConfig.ReadinessTimeout,
+			phoenixConfig.ReadinessTimeout,
+		)
+		forwarder, err := buildTelemetryForwarder(
+			resolvedKubectl,
+			prometheusConfig.Namespace,
+			prometheusConfig.Context,
+			prometheusConfig.Kubeconfig,
+			readinessTimeout,
+			"shared",
+			factory,
+		)
+		if err != nil {
+			return err
+		}
+		collectors.Forwarder = forwarder
+	case prometheusConfig != nil && phoenixConfig != nil:
+		prometheusForwarder, err := buildPrometheusForwarder(
+			resolvedKubectl,
+			*prometheusConfig,
+			factory,
+		)
+		if err != nil {
+			return err
+		}
+		phoenixForwarder, err := buildPhoenixForwarder(
+			resolvedKubectl,
+			*phoenixConfig,
+			factory,
+		)
+		if err != nil {
+			return err
+		}
+		collectors.PrometheusForwarder = prometheusForwarder
+		collectors.PhoenixForwarder = phoenixForwarder
+	case prometheusConfig != nil:
+		forwarder, err := buildPrometheusForwarder(
+			resolvedKubectl,
+			*prometheusConfig,
+			factory,
+		)
+		if err != nil {
+			return err
+		}
+		collectors.Forwarder = forwarder
+	case phoenixConfig != nil:
+		forwarder, err := buildPhoenixForwarder(
+			resolvedKubectl,
+			*phoenixConfig,
+			factory,
+		)
+		if err != nil {
+			return err
+		}
+		collectors.Forwarder = forwarder
+	}
+	return nil
 }
 
 func printUsage(writer io.Writer) {

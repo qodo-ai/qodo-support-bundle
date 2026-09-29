@@ -8,6 +8,7 @@ import (
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/bundle"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/phoenix"
 	"github.com/qodo-ai/qodo-support-bundle/internal/prometheus"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 	"github.com/qodo-ai/qodo-support-bundle/internal/telemetry"
@@ -31,6 +32,11 @@ const (
 	EventPrometheusPartial     EventKind = "prometheus_partial"
 	EventPrometheusUnavailable EventKind = "prometheus_unavailable"
 
+	EventPhoenixStarted     EventKind = "phoenix_started"
+	EventPhoenixComplete    EventKind = "phoenix_complete"
+	EventPhoenixPartial     EventKind = "phoenix_partial"
+	EventPhoenixUnavailable EventKind = "phoenix_unavailable"
+
 	EventZitadelStarted           EventKind = "zitadel_started"
 	EventZitadelUnavailable       EventKind = "zitadel_unavailable"
 	EventZitadelDiagnosticFailure EventKind = "zitadel_diagnostic_failure"
@@ -51,6 +57,7 @@ type Request struct {
 	Problem          string
 	Kubernetes       kubernetes.Config
 	Prometheus       *prometheus.Config
+	Phoenix          *phoenix.Config
 	Zitadel          *zitadel.Config
 	Progress         func(Event)
 }
@@ -63,6 +70,7 @@ type Result struct {
 	KubernetesReport     kubernetes.Report
 	WorkloadReport       *workload.Report
 	PrometheusReport     *prometheus.Report
+	PhoenixReport        *phoenix.Report
 	ConnectivityReport   *zitadel.Report
 	ConnectivityFailure  string
 	CanceledBeforeBundle bool
@@ -102,6 +110,16 @@ type PrometheusCollector func(
 	*redact.Redactor,
 ) (prometheus.Report, error)
 
+// PhoenixCollector collects and stages bounded Phoenix trace telemetry.
+type PhoenixCollector func(
+	context.Context,
+	phoenix.Config,
+	kubernetes.Runner,
+	telemetry.Forwarder,
+	kubernetes.Sink,
+	*redact.Redactor,
+) (phoenix.Report, error)
+
 // ZitadelCollector executes the optional Platform-to-Zitadel probe.
 type ZitadelCollector func(
 	context.Context,
@@ -115,8 +133,15 @@ type Collectors struct {
 	Kubernetes KubernetesCollector
 	Workload   WorkloadCollector
 	Prometheus PrometheusCollector
-	Forwarder  telemetry.Forwarder
-	Zitadel    ZitadelCollector
+	Phoenix    PhoenixCollector
+	// PrometheusForwarder and PhoenixForwarder may reference the same
+	// sequential forwarder when both services are in one namespace.
+	PrometheusForwarder telemetry.Forwarder
+	PhoenixForwarder    telemetry.Forwarder
+	// Forwarder is retained as a shared dependency for callers that collect
+	// only one telemetry source or place both sources in one namespace.
+	Forwarder telemetry.Forwarder
+	Zitadel   ZitadelCollector
 }
 
 // DefaultCollectors returns the production source collectors.
@@ -125,6 +150,7 @@ func DefaultCollectors() Collectors {
 		Kubernetes: kubernetes.Collect,
 		Workload:   workload.Collect,
 		Prometheus: prometheus.Collect,
+		Phoenix:    phoenix.Collect,
 		Zitadel:    zitadel.Collect,
 	}
 }
@@ -146,6 +172,7 @@ func Execute(
 		collectors,
 		request.CurrentTime,
 		request.Prometheus != nil,
+		request.Phoenix != nil,
 		request.Zitadel != nil,
 	); err != nil {
 		return Result{}, err
@@ -153,6 +180,9 @@ func Execute(
 	requested := []Source{SourceKubernetes, SourceWorkload}
 	if request.Prometheus != nil {
 		requested = append(requested, SourcePrometheus)
+	}
+	if request.Phoenix != nil {
+		requested = append(requested, SourcePhoenix)
 	}
 	if request.Zitadel != nil {
 		requested = append(requested, SourceZitadel)
@@ -227,7 +257,7 @@ func Execute(
 			ctx,
 			prometheusConfig,
 			runner,
-			collectors.Forwarder,
+			sourceForwarder(collectors.PrometheusForwarder, collectors.Forwarder),
 			archive,
 			redactor,
 		)
@@ -261,6 +291,50 @@ func Execute(
 			reportEvent(request.Progress, Event{
 				Kind:   EventPrometheusUnavailable,
 				Reason: prometheusCoverage.Reason,
+			})
+		}
+	}
+
+	if request.Phoenix != nil {
+		reportEvent(request.Progress, Event{Kind: EventPhoenixStarted})
+		phoenixReport, phoenixErr := collectors.Phoenix(
+			ctx,
+			*request.Phoenix,
+			runner,
+			sourceForwarder(collectors.PhoenixForwarder, collectors.Forwarder),
+			archive,
+			redactor,
+		)
+		result.PhoenixReport = &phoenixReport
+		if ctx.Err() != nil {
+			result.CanceledBeforeBundle = true
+			return result, ctx.Err()
+		}
+		if errors.Is(phoenixErr, phoenix.ErrArtifactStaging) {
+			return result, phoenixErr
+		}
+		phoenixCoverage := PhoenixCoverage(phoenixReport, phoenixErr)
+		result.Coverage[SourcePhoenix] = phoenixCoverage
+		switch phoenixCoverage.State {
+		case CoverageComplete:
+			reportEvent(request.Progress, Event{Kind: EventPhoenixComplete})
+		case CoveragePartial:
+			kubernetesReport.Issues = append(
+				kubernetesReport.Issues,
+				phoenixCollectionIssue(phoenixCoverage),
+			)
+			reportEvent(request.Progress, Event{
+				Kind:   EventPhoenixPartial,
+				Reason: phoenixCoverage.Reason,
+			})
+		default:
+			kubernetesReport.Issues = append(
+				kubernetesReport.Issues,
+				phoenixCollectionIssue(phoenixCoverage),
+			)
+			reportEvent(request.Progress, Event{
+				Kind:   EventPhoenixUnavailable,
+				Reason: phoenixCoverage.Reason,
 			})
 		}
 	}
@@ -368,10 +442,17 @@ func Execute(
 		request.Zitadel != nil,
 		result.ConnectivityReport,
 		result.ConnectivityFailure,
-		PrometheusSummary{
-			Requested: request.Prometheus != nil,
-			Coverage:  result.Coverage[SourcePrometheus],
-			Report:    result.PrometheusReport,
+		SummaryOptions{
+			Prometheus: PrometheusSummary{
+				Requested: request.Prometheus != nil,
+				Coverage:  result.Coverage[SourcePrometheus],
+				Report:    result.PrometheusReport,
+			},
+			Phoenix: PhoenixSummary{
+				Requested: request.Phoenix != nil,
+				Coverage:  result.Coverage[SourcePhoenix],
+				Report:    result.PhoenixReport,
+			},
 		},
 	)
 	if err := archive.Add(summaryArtifactPath, []byte(summary)); err != nil {
@@ -394,6 +475,12 @@ func Execute(
 		request.Prometheus,
 		result.PrometheusReport,
 		result.Coverage[SourcePrometheus],
+		redactor,
+	)
+	phoenixMetadata := BuildPhoenixMetadata(
+		request.Phoenix,
+		result.PhoenixReport,
+		result.Coverage[SourcePhoenix],
 		redactor,
 	)
 	ruleset := redactor.Ruleset()
@@ -423,6 +510,7 @@ func Execute(
 			CollectionManifestOptions{
 				Coverage:   result.Coverage,
 				Prometheus: prometheusMetadata,
+				Phoenix:    phoenixMetadata,
 			},
 		),
 	})
@@ -437,6 +525,7 @@ func validateDependencies(
 	collectors Collectors,
 	currentTime func() time.Time,
 	requirePrometheus bool,
+	requirePhoenix bool,
 	requireZitadel bool,
 ) error {
 	switch {
@@ -456,13 +545,29 @@ func validateDependencies(
 		return errors.New("workload collector is required")
 	case requirePrometheus && collectors.Prometheus == nil:
 		return errors.New("Prometheus collector is required")
-	case requirePrometheus && collectors.Forwarder == nil:
-		return errors.New("telemetry forwarder is required")
+	case requirePrometheus &&
+		sourceForwarder(collectors.PrometheusForwarder, collectors.Forwarder) == nil:
+		return errors.New("Prometheus telemetry forwarder is required")
+	case requirePhoenix && collectors.Phoenix == nil:
+		return errors.New("Phoenix collector is required")
+	case requirePhoenix &&
+		sourceForwarder(collectors.PhoenixForwarder, collectors.Forwarder) == nil:
+		return errors.New("Phoenix telemetry forwarder is required")
 	case requireZitadel && collectors.Zitadel == nil:
 		return errors.New("Zitadel collector is required")
 	default:
 		return nil
 	}
+}
+
+func sourceForwarder(
+	specific telemetry.Forwarder,
+	shared telemetry.Forwarder,
+) telemetry.Forwarder {
+	if specific != nil {
+		return specific
+	}
+	return shared
 }
 
 func sanitizeReason(reason string, redactor *redact.Redactor) string {
@@ -545,6 +650,14 @@ func prometheusCollectionIssue(coverage Coverage) kubernetes.Issue {
 	return kubernetes.Issue{
 		Operation: "collect Prometheus telemetry",
 		Message: "Prometheus telemetry " +
+			coverage.State.String() + ": " + coverage.Reason,
+	}
+}
+
+func phoenixCollectionIssue(coverage Coverage) kubernetes.Issue {
+	return kubernetes.Issue{
+		Operation: "collect Phoenix telemetry",
+		Message: "Phoenix telemetry " +
 			coverage.State.String() + ": " + coverage.Reason,
 	}
 }

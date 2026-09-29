@@ -17,6 +17,7 @@ import (
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/collection"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/phoenix"
 	"github.com/qodo-ai/qodo-support-bundle/internal/prometheus"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 	"github.com/qodo-ai/qodo-support-bundle/internal/telemetry"
@@ -398,6 +399,181 @@ func TestPrometheusFlagCouplingAndNamespaceInference(t *testing.T) {
 	}
 }
 
+func TestPhoenixFlagCouplingTraceValidationAndNamespaceInference(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		enabled    bool
+		visited    map[string]bool
+		namespaces []string
+		all        bool
+		namespace  string
+		traceID    string
+		wantNS     string
+		wantTrace  string
+		wantError  string
+	}{
+		{
+			name:       "general mode infers single explicit namespace",
+			enabled:    true,
+			namespaces: []string{"qodo"},
+			wantNS:     "qodo",
+		},
+		{
+			name:       "exact mode normalizes trace id",
+			enabled:    true,
+			namespaces: []string{"qodo"},
+			traceID:    "ABCDEF0123456789ABCDEF0123456789",
+			wantNS:     "qodo",
+			wantTrace:  "abcdef0123456789abcdef0123456789",
+		},
+		{
+			name:       "multiple namespaces require Phoenix namespace",
+			enabled:    true,
+			namespaces: []string{"qodo", "zitadel"},
+			wantError:  "--phoenix-namespace is required",
+		},
+		{
+			name:      "all namespaces require Phoenix namespace",
+			enabled:   true,
+			all:       true,
+			wantError: "--phoenix-namespace is required",
+		},
+		{
+			name:      "trace id rejected while disabled",
+			visited:   map[string]bool{"trace-id": true},
+			traceID:   "abcdef0123456789abcdef0123456789",
+			wantError: "--trace-id requires --collect-phoenix",
+		},
+		{
+			name:       "trace id has exact hexadecimal shape",
+			enabled:    true,
+			namespaces: []string{"qodo"},
+			traceID:    "not-a-trace-id",
+			wantError:  "--trace-id must be exactly 32 hexadecimal characters",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			namespace := test.namespace
+			traceID := test.traceID
+			err := validatePhoenixFlags(
+				test.enabled,
+				test.visited,
+				test.namespaces,
+				test.all,
+				&namespace,
+				&traceID,
+			)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("error=%v", err)
+				}
+				return
+			}
+			if err != nil || namespace != test.wantNS || traceID != test.wantTrace {
+				t.Fatalf("namespace=%q trace=%q error=%v", namespace, traceID, err)
+			}
+		})
+	}
+}
+
+func TestBuildPhoenixConfigUsesGeneralWindowAndExactTrace(t *testing.T) {
+	t.Parallel()
+	end := time.Date(2026, 9, 29, 14, 15, 16, 0, time.FixedZone("test", 2*60*60))
+	general := buildPhoenixConfig(
+		"phoenix",
+		"customer",
+		"/tmp/customer.kubeconfig",
+		end,
+		45*time.Minute,
+		"",
+	)
+	want := phoenix.DefaultConfig()
+	want.Namespace = "phoenix"
+	want.Context = "customer"
+	want.Kubeconfig = "/tmp/customer.kubeconfig"
+	want.End = end.UTC()
+	want.Start = want.End.Add(-45 * time.Minute)
+	if !reflect.DeepEqual(general, want) || general.TraceID != "" {
+		t.Fatalf("general config=%+v want=%+v", general, want)
+	}
+
+	exact := buildPhoenixConfig(
+		"phoenix",
+		"",
+		"",
+		end,
+		time.Hour,
+		"ABCDEF0123456789ABCDEF0123456789",
+	)
+	if exact.TraceID != "abcdef0123456789abcdef0123456789" ||
+		!exact.Start.Equal(end.UTC().Add(-time.Hour)) ||
+		!exact.End.Equal(end.UTC()) {
+		t.Fatalf("unexpected exact config: %+v", exact)
+	}
+}
+
+func TestConfigureTelemetryForwardersSharesOnlyCompatibleNamespace(t *testing.T) {
+	t.Parallel()
+	prometheusConfig := prometheus.DefaultConfig()
+	prometheusConfig.Namespace = "telemetry"
+	prometheusConfig.Context = "customer"
+	prometheusConfig.Kubeconfig = "/tmp/kubeconfig"
+	phoenixConfig := phoenix.DefaultConfig()
+	phoenixConfig.Namespace = "telemetry"
+	phoenixConfig.Context = "customer"
+	phoenixConfig.Kubeconfig = "/tmp/kubeconfig"
+	var calls []telemetry.ForwardConfig
+	factory := func(
+		_ string,
+		config telemetry.ForwardConfig,
+	) (telemetry.Forwarder, error) {
+		calls = append(calls, config)
+		return &unusedTelemetryForwarder{}, nil
+	}
+	collectors := collection.Collectors{}
+	if err := configureTelemetryForwarders(
+		&collectors,
+		"/opt/bin/kubectl",
+		&prometheusConfig,
+		&phoenixConfig,
+		factory,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 ||
+		collectors.Forwarder == nil ||
+		collectors.PrometheusForwarder != nil ||
+		collectors.PhoenixForwarder != nil ||
+		calls[0].Namespace != "telemetry" {
+		t.Fatalf("compatible sources did not share one forwarder: calls=%+v collectors=%+v", calls, collectors)
+	}
+
+	calls = nil
+	collectors = collection.Collectors{}
+	phoenixConfig.Namespace = "phoenix"
+	if err := configureTelemetryForwarders(
+		&collectors,
+		"/opt/bin/kubectl",
+		&prometheusConfig,
+		&phoenixConfig,
+		factory,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 ||
+		collectors.Forwarder != nil ||
+		collectors.PrometheusForwarder == nil ||
+		collectors.PhoenixForwarder == nil ||
+		calls[0].Namespace != "telemetry" ||
+		calls[1].Namespace != "phoenix" {
+		t.Fatalf("different namespaces did not receive isolated forwarders: calls=%+v collectors=%+v", calls, collectors)
+	}
+}
+
 func TestCollectRejectsInvalidPrometheusFlagCombinations(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -431,6 +607,70 @@ func TestCollectRejectsInvalidPrometheusFlagCombinations(t *testing.T) {
 				"--collect-prometheus",
 			},
 			message: "--prometheus-namespace is required when --collect-prometheus uses multiple or all namespaces",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var stderr bytes.Buffer
+			code := Run(
+				context.Background(),
+				test.arguments,
+				&bytes.Buffer{},
+				&stderr,
+			)
+			if code != 2 || strings.TrimSpace(stderr.String()) != test.message {
+				t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+			}
+		})
+	}
+}
+
+func TestCollectRejectsInvalidPhoenixFlagCombinationsAndWindow(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		arguments []string
+		message   string
+	}{
+		{
+			name: "target while disabled",
+			arguments: []string{
+				"collect",
+				"--namespace", "qodo",
+				"--phoenix-namespace", "telemetry",
+			},
+			message: "--phoenix-namespace requires --collect-phoenix",
+		},
+		{
+			name: "trace while disabled",
+			arguments: []string{
+				"collect",
+				"--namespace", "qodo",
+				"--trace-id", "abcdef0123456789abcdef0123456789",
+			},
+			message: "--trace-id requires --collect-phoenix",
+		},
+		{
+			name: "invalid trace shape",
+			arguments: []string{
+				"collect",
+				"--namespace", "qodo",
+				"--collect-phoenix",
+				"--trace-id", "abc",
+			},
+			message: "--trace-id must be exactly 32 hexadecimal characters",
+		},
+		{
+			name: "window exceeds maximum",
+			arguments: []string{
+				"collect",
+				"--namespace", "qodo",
+				"--collect-phoenix",
+				"--since", "25h",
+			},
+			message: "--since must not exceed 24h0m0s when --collect-phoenix is enabled",
 		},
 	}
 	for _, test := range tests {
@@ -630,12 +870,15 @@ func TestCollectLeavesPrometheusDisabledByDefault(t *testing.T) {
 		!strings.Contains(manifest, `"enabled": false`) {
 		t.Fatalf("Prometheus was not disabled in manifest: %s", manifest)
 	}
+	if !strings.Contains(manifest, `"phoenix": {`) {
+		t.Fatalf("Phoenix was not disabled in manifest: %s", manifest)
+	}
 	if strings.Contains(stderr.String(), "Prometheus telemetry") {
 		t.Fatalf("disabled Prometheus emitted progress: %s", stderr.String())
 	}
 }
 
-func TestPrometheusProgressDoesNotRenderEventReason(t *testing.T) {
+func TestTelemetryProgressDoesNotRenderEventReason(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		kind collection.EventKind
@@ -650,6 +893,16 @@ func TestPrometheusProgressDoesNotRenderEventReason(t *testing.T) {
 		{
 			collection.EventPrometheusUnavailable,
 			"Prometheus telemetry: unavailable; diagnostic recorded.\n",
+		},
+		{collection.EventPhoenixStarted, "Collecting Phoenix telemetry...\n"},
+		{collection.EventPhoenixComplete, "Phoenix telemetry: complete.\n"},
+		{
+			collection.EventPhoenixPartial,
+			"Phoenix telemetry: partial collection recorded.\n",
+		},
+		{
+			collection.EventPhoenixUnavailable,
+			"Phoenix telemetry: unavailable; diagnostic recorded.\n",
 		},
 	}
 	for _, test := range tests {
