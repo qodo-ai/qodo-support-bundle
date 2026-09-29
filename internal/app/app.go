@@ -1,11 +1,9 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +16,7 @@ import (
 	"time"
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/bundle"
+	"github.com/qodo-ai/qodo-support-bundle/internal/collection"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
@@ -338,7 +337,7 @@ func runCollect(
 	if kubernetesErr != nil || len(kubernetesReport.Issues) > 0 || connectivityFailure != "" {
 		collectionStatus = collectionStatusPartial
 	}
-	issuesData, err := marshalIssues(kubernetesReport.Issues)
+	issuesData, err := collection.MarshalIssues(kubernetesReport.Issues)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
@@ -350,21 +349,9 @@ func runCollect(
 		}
 	}
 
-	manifestNamespaces := selectedNamespaces
-	namespaceValue := strings.Join(selectedNamespaces, ",")
-	if *allNamespaces {
-		manifestNamespaces = kubernetesReport.Namespaces
-		namespaceValue = "*"
-	}
 	generatedAt := currentTime().UTC()
-	customerContext := map[string]string{}
-	if value := strings.TrimSpace(redactor.Text(*activity)); value != "" {
-		customerContext["activity"] = value
-	}
-	if value := strings.TrimSpace(redactor.Text(*problem)); value != "" {
-		customerContext["problem"] = value
-	}
-	summary := buildSummary(
+	customerContext := collection.BuildCustomerContext(*activity, *problem, redactor)
+	summary := collection.BuildSummary(
 		generatedAt,
 		collectionStatus,
 		kubernetesReport,
@@ -377,20 +364,18 @@ func runCollect(
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
-	connectivityMetadata := map[string]any{"enabled": *checkZitadel}
-	if *checkZitadel {
-		connectivityMetadata["namespace"] = redactor.Text(*platformNamespace)
-		connectivityMetadata["pod"] = redactor.Text(*platformPod)
-		connectivityMetadata["container"] = redactor.Text(*platformContainer)
-		connectivityMetadata["probe_timeout"] = probeTimeout.String()
-		if connectivityFailure != "" {
-			connectivityMetadata["collection_status"] = collectionStatusPartial
-			connectivityMetadata["reason"] = connectivityFailure
-		} else {
-			connectivityMetadata["collection_status"] = collectionStatusComplete
-			connectivityMetadata["failed_checks"] = connectivityReport.FailedChecks()
-		}
-	}
+	connectivityMetadata := collection.BuildConnectivityMetadata(
+		*checkZitadel,
+		*platformNamespace,
+		*platformPod,
+		*platformContainer,
+		*probeTimeout,
+		zitadel.Outcome{
+			Report: connectivityReport,
+			Reason: connectivityFailure,
+		},
+		redactor,
+	)
 	ruleset := redactor.Ruleset()
 	archivePath, err := builder.FinalizeContext(ctx, bundle.Manifest{
 		CollectorVersion: Version,
@@ -400,18 +385,18 @@ func runCollect(
 			"sha256":  ruleset.SHA256,
 		},
 		CustomerContext: customerContext,
-		Collection: map[string]any{
-			"status":                    collectionStatus,
-			"namespace":                 redactor.Text(namespaceValue),
-			"namespaces":                redactStrings(manifestNamespaces, redactor),
-			"all_namespaces":            *allNamespaces,
-			"exclude_system_namespaces": *excludeSystemNamespaces,
-			"selector":                  redactor.Text(*selector),
-			"since":                     since.String(),
-			"max_metadata_bytes":        *maxMetadataBytes,
-			"kubernetes":                kubernetesReport,
-			"connectivity":              connectivityMetadata,
-		},
+		Collection: collection.BuildCollectionManifest(
+			collectionStatus,
+			selectedNamespaces,
+			*allNamespaces,
+			*excludeSystemNamespaces,
+			*selector,
+			*since,
+			*maxMetadataBytes,
+			kubernetesReport,
+			connectivityMetadata,
+			redactor,
+		),
 	})
 	if err != nil {
 		if errors.Is(err, bundle.ErrCleanup) {
@@ -655,78 +640,6 @@ func parseNamespaces(namespace string, namespaces string) ([]string, error) {
 	return result, nil
 }
 
-func buildSummary(
-	generatedAt time.Time,
-	status string,
-	report kubernetes.Report,
-	customerContext map[string]string,
-	probeEnabled bool,
-	connectivity *zitadel.Report,
-	probeFailure string,
-) string {
-	var summary strings.Builder
-	fmt.Fprintln(&summary, "# Qodo support bundle summary")
-	fmt.Fprintf(&summary, "\n- Captured: %s\n", generatedAt.Format(time.RFC3339Nano))
-	fmt.Fprintf(&summary, "- Collection status: %s\n", status)
-	if value := summaryValue(customerContext["activity"]); value != "" {
-		fmt.Fprintf(&summary, "- Customer activity: %s\n", value)
-	}
-	if value := summaryValue(customerContext["problem"]); value != "" {
-		fmt.Fprintf(&summary, "- Reported problem: %s\n", value)
-	}
-	fmt.Fprintln(&summary, "\n## Kubernetes")
-	fmt.Fprintf(
-		&summary,
-		"\n- Scope: %d/%d namespaces, %d pods, %d containers (%d init, %d ephemeral)\n",
-		len(report.Namespaces),
-		report.NamespacesRequested,
-		report.Pods,
-		report.Containers,
-		report.InitContainers,
-		report.EphemeralContainers,
-	)
-	fmt.Fprintf(&summary, "- Container restarts: %d\n", report.ContainerRestarts)
-	fmt.Fprintf(&summary, "- OOMKills: %d\n", report.OOMKills)
-	fmt.Fprintf(
-		&summary,
-		"- Metadata bytes: %d/%d\n",
-		report.MetadataBytes,
-		report.MetadataLimitBytes,
-	)
-	fmt.Fprintf(
-		&summary,
-		"- Truncated metadata files: %d\n",
-		report.TruncatedMetadataFiles,
-	)
-	fmt.Fprintf(
-		&summary,
-		"- Namespaces skipped by metadata limit: %d\n",
-		report.MetadataNamespacesSkipped,
-	)
-	fmt.Fprintf(&summary, "- Log files: %d\n", report.LogFiles)
-	fmt.Fprintf(&summary, "- Truncated log files: %d\n", report.TruncatedLogFiles)
-	fmt.Fprintf(&summary, "- Collection issues: %d\n", len(report.Issues))
-	if probeEnabled {
-		fmt.Fprintln(&summary, "\n## Platform to Zitadel")
-		switch {
-		case probeFailure != "":
-			fmt.Fprintf(&summary, "\n- Probe collection: unavailable (%s)\n", probeFailure)
-		case connectivity != nil:
-			fmt.Fprintln(&summary, "\n- Probe collection: complete")
-			for _, check := range connectivity.Checks {
-				fmt.Fprintf(&summary, "- %s: %s", check.Name, check.Status)
-				if check.Reason != "" {
-					fmt.Fprintf(&summary, " (%s)", check.Reason)
-				}
-				fmt.Fprintln(&summary)
-			}
-			fmt.Fprintln(&summary, "- Login and token issuance were not tested.")
-		}
-	}
-	fmt.Fprintln(&summary, "\nReview every file before sharing.")
-	return summary.String()
-}
-
 func validDNSLabel(value string) bool {
 	return len(value) <= 63 && dnsLabelPattern.MatchString(value)
 }
@@ -759,10 +672,6 @@ func closeBundle(closer io.Closer, stderr io.Writer, exitCode *int) {
 	}
 }
 
-func summaryValue(value string) string {
-	return strings.Join(strings.Fields(value), " ")
-}
-
 func terminalText(redactor *redact.Redactor, value string) string {
 	return strings.Map(func(character rune) rune {
 		if character < 0x20 || character == 0x7f {
@@ -770,14 +679,6 @@ func terminalText(redactor *redact.Redactor, value string) string {
 		}
 		return character
 	}, redactor.Text(value))
-}
-
-func redactStrings(values []string, redactor *redact.Redactor) []string {
-	redacted := make([]string, 0, len(values))
-	for _, value := range values {
-		redacted = append(redacted, redactor.Text(value))
-	}
-	return redacted
 }
 
 func writeCollectionProgress(
@@ -817,21 +718,6 @@ func writeCollectionProgress(
 			progress.Total,
 		)
 	}
-}
-
-func marshalIssues(issues []kubernetes.Issue) ([]byte, error) {
-	if len(issues) == 0 {
-		return nil, nil
-	}
-	var output bytes.Buffer
-	encoder := json.NewEncoder(&output)
-	encoder.SetEscapeHTML(false)
-	for _, issue := range issues {
-		if err := encoder.Encode(issue); err != nil {
-			return nil, fmt.Errorf("encode collection issue: %w", err)
-		}
-	}
-	return output.Bytes(), nil
 }
 
 func printUsage(writer io.Writer) {

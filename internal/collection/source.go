@@ -1,4 +1,5 @@
-// Package collection defines source-independent collection metadata.
+// Package collection defines collection metadata and pure report assembly.
+// Source collectors remain independent; this package consumes their results.
 package collection
 
 // Source identifies a supported data source in collection metadata.
