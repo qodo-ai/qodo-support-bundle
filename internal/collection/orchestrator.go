@@ -222,7 +222,6 @@ func Execute(
 		prometheusConfig := effectivePrometheusConfig(
 			*request.Prometheus,
 			request.Kubernetes,
-			kubernetesReport,
 		)
 		prometheusReport, prometheusErr := collectors.Prometheus(
 			ctx,
@@ -500,15 +499,10 @@ func workloadCollectionNamespaces(
 func effectivePrometheusConfig(
 	config prometheus.Config,
 	kubernetesConfig kubernetes.Config,
-	report kubernetes.Report,
 ) prometheus.Config {
-	if kubernetesConfig.AllNamespaces &&
-		kubernetesConfig.ExcludeSystemNamespaces {
-		config.Namespaces = append(
-			[]string(nil),
-			report.CollectionNamespaces...,
-		)
-		config.AllNamespaces = false
+	if kubernetesConfig.AllNamespaces {
+		config.ExcludeSystemNamespaces =
+			kubernetesConfig.ExcludeSystemNamespaces
 	}
 	return config
 }

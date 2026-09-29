@@ -459,6 +459,7 @@ func TestBuildPrometheusConfigUsesDefaultsBoundsAndSeparateScope(t *testing.T) {
 		"monitoring",
 		namespaces,
 		false,
+		false,
 		"customer",
 		"/tmp/customer.kubeconfig",
 		end,
@@ -484,12 +485,15 @@ func TestBuildPrometheusConfigUsesDefaultsBoundsAndSeparateScope(t *testing.T) {
 		"monitoring",
 		nil,
 		true,
+		true,
 		"",
 		"",
 		end,
 		time.Hour,
 	)
-	if !all.AllNamespaces || len(all.Namespaces) != 0 {
+	if !all.AllNamespaces ||
+		!all.ExcludeSystemNamespaces ||
+		len(all.Namespaces) != 0 {
 		t.Fatalf("all-namespace scope was broadened incorrectly: %+v", all)
 	}
 }

@@ -61,13 +61,14 @@ var (
 // Config controls one bounded collection. Start is inclusive and End is
 // exclusive. Both must be UTC and the interval may not exceed MaximumWindow.
 type Config struct {
-	Namespace     string
-	Namespaces    []string
-	AllNamespaces bool
-	Context       string
-	Kubeconfig    string
-	Start         time.Time
-	End           time.Time
+	Namespace               string
+	Namespaces              []string
+	AllNamespaces           bool
+	ExcludeSystemNamespaces bool
+	Context                 string
+	Kubeconfig              string
+	Start                   time.Time
+	End                     time.Time
 
 	CommandTimeout   time.Duration
 	DiscoveryTimeout time.Duration
@@ -226,6 +227,8 @@ func validateNamespaceScope(config Config) error {
 	switch {
 	case config.AllNamespaces && len(config.Namespaces) != 0:
 		return invalidConfig("all-namespaces scope cannot include explicit namespaces")
+	case config.ExcludeSystemNamespaces && !config.AllNamespaces:
+		return invalidConfig("system namespaces can only be excluded from all-namespaces scope")
 	case !config.AllNamespaces &&
 		(len(config.Namespaces) == 0 || len(config.Namespaces) > MaximumNamespaces):
 		return invalidConfig("explicit namespace scope is out of range")

@@ -226,6 +226,7 @@ func runCollect(
 			*prometheusNamespace,
 			selectedNamespaces,
 			*allNamespaces,
+			*excludeSystemNamespaces,
 			*kubeContext,
 			*kubeconfig,
 			collectionTime,
@@ -392,6 +393,7 @@ func buildPrometheusConfig(
 	namespace string,
 	namespaces []string,
 	allNamespaces bool,
+	excludeSystemNamespaces bool,
 	kubeContext string,
 	kubeconfig string,
 	end time.Time,
@@ -401,6 +403,7 @@ func buildPrometheusConfig(
 	config.Namespace = namespace
 	config.Namespaces = append([]string(nil), namespaces...)
 	config.AllNamespaces = allNamespaces
+	config.ExcludeSystemNamespaces = excludeSystemNamespaces
 	config.Context = kubeContext
 	config.Kubeconfig = kubeconfig
 	config.End = end.UTC()

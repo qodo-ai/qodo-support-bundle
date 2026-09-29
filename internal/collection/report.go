@@ -139,6 +139,7 @@ func BuildPrometheusMetadata(
 	metadata["namespace"] = summaryValue(redactor.Text(config.Namespace))
 	metadata["namespaces"] = sanitizeMetadataStrings(effective.Namespaces, redactor)
 	metadata["all_namespaces"] = effective.AllNamespaces
+	metadata["exclude_system_namespaces"] = effective.ExcludeSystemNamespaces
 	metadata["catalog_version"] = prometheus.CatalogVersion
 	addMetadataTime(metadata, "configured_start", config.Start)
 	addMetadataTime(metadata, "configured_end", config.End)

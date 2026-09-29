@@ -19,6 +19,7 @@ const (
 	namespaceRegexToken       = "{{namespace_regex}}"
 	namespaceSelectorTemplate = `namespace=~"` + namespaceRegexToken + `"`
 	allNamespacesRegex        = ".*"
+	systemNamespacesRegex     = "^(?:kube-system|kube-public|kube-node-lease|gmp-system|gmp-public|cnrm-system|configconnector-operator-system|gke-managed-.*)$"
 )
 
 //go:embed catalog/v1.json
@@ -196,7 +197,15 @@ func renderScopedPromQL(query Query, config Config) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	rendered := strings.ReplaceAll(query.PromQL, namespaceRegexToken, scopeRegex)
+	selector := `namespace=~"` + scopeRegex + `"`
+	if config.ExcludeSystemNamespaces {
+		selector += `,namespace!~"` + systemNamespacesRegex + `"`
+	}
+	rendered := strings.ReplaceAll(
+		query.PromQL,
+		namespaceSelectorTemplate,
+		selector,
+	)
 	if rendered == query.PromQL ||
 		strings.Contains(rendered, namespaceRegexToken) ||
 		strings.Contains(rendered, "{{") ||

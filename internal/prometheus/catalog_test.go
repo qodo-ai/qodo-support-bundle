@@ -199,6 +199,32 @@ func TestAllNamespacesUsesFixedSafeRegex(t *testing.T) {
 	}
 }
 
+func TestAllNamespacesCanExcludeFixedSystemNamespaces(t *testing.T) {
+	t.Parallel()
+	config := testConfig()
+	config.Namespaces = nil
+	config.AllNamespaces = true
+	config.ExcludeSystemNamespaces = true
+	config = config.WithDefaults()
+	if err := validateConfig(config); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range BuiltinCatalog().Queries {
+		rendered, err := renderScopedPromQL(query, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		included := strings.Count(rendered, `namespace=~".*"`)
+		excluded := strings.Count(
+			rendered,
+			`namespace!~"`+systemNamespacesRegex+`"`,
+		)
+		if included == 0 || excluded != included {
+			t.Fatalf("query %q does not exclude every system namespace selector: %q", query.ID, rendered)
+		}
+	}
+}
+
 func TestCPUThrottlingRatioPreservesSubOneDenominators(t *testing.T) {
 	t.Parallel()
 	var expression string
@@ -225,12 +251,14 @@ func TestInvalidNamespaceScopesFailClosed(t *testing.T) {
 		tooMany[index] = fmt.Sprintf("ns-%03d", index)
 	}
 	tests := []struct {
-		name          string
-		namespaces    []string
-		allNamespaces bool
+		name                    string
+		namespaces              []string
+		allNamespaces           bool
+		excludeSystemNamespaces bool
 	}{
 		{name: "empty explicit"},
 		{name: "all with explicit", namespaces: []string{"team-a"}, allNamespaces: true},
+		{name: "exclude with explicit", namespaces: []string{"team-a"}, excludeSystemNamespaces: true},
 		{name: "duplicate", namespaces: []string{"team-a", "team-a"}},
 		{name: "oversized", namespaces: tooMany},
 		{name: "regex injection", namespaces: []string{`team-a|.*`}},
@@ -243,6 +271,7 @@ func TestInvalidNamespaceScopesFailClosed(t *testing.T) {
 			config := testConfig()
 			config.Namespaces = test.namespaces
 			config.AllNamespaces = test.allNamespaces
+			config.ExcludeSystemNamespaces = test.excludeSystemNamespaces
 			if err := config.Validate(); err == nil {
 				t.Fatalf("unsafe scope accepted: %#v", config)
 			}

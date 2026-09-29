@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -122,12 +123,16 @@ func TestDefaultCollectorsWireInjectablePrometheusCollector(t *testing.T) {
 	}
 }
 
-func TestExecuteScopesPrometheusToDiscoveredApplicationNamespaces(t *testing.T) {
+func TestExecuteExcludesSystemNamespacesWithoutExpandingLargeScope(t *testing.T) {
 	t.Parallel()
 	config := prometheusConfig()
 	config.Namespaces = nil
 	config.AllNamespaces = true
 	var captured prometheus.Config
+	applicationNamespaces := make([]string, prometheus.MaximumNamespaces+1)
+	for index := range applicationNamespaces {
+		applicationNamespaces[index] = fmt.Sprintf("team-%03d", index)
+	}
 
 	collectors := Collectors{
 		Kubernetes: func(
@@ -138,10 +143,10 @@ func TestExecuteScopesPrometheusToDiscoveredApplicationNamespaces(t *testing.T) 
 			*redact.Redactor,
 		) (kubernetes.Report, error) {
 			return kubernetes.Report{
-				Namespaces:           []string{"team-a", "team-b"},
-				CollectionNamespaces: []string{"team-a", "team-b"},
+				Namespaces:           applicationNamespaces,
+				CollectionNamespaces: applicationNamespaces,
 				ExcludedNamespaces:   []string{"kube-system"},
-				NamespacesRequested:  2,
+				NamespacesRequested:  len(applicationNamespaces),
 			}, nil
 		},
 		Workload: successfulWorkloadCollector,
@@ -181,9 +186,10 @@ func TestExecuteScopesPrometheusToDiscoveredApplicationNamespaces(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if captured.AllNamespaces ||
-		!reflect.DeepEqual(captured.Namespaces, []string{"team-a", "team-b"}) {
-		t.Fatalf("Prometheus scope was not restricted to discovered application namespaces: %+v", captured)
+	if !captured.AllNamespaces ||
+		!captured.ExcludeSystemNamespaces ||
+		len(captured.Namespaces) != 0 {
+		t.Fatalf("Prometheus scope expanded discovered namespaces: %+v", captured)
 	}
 }
 
