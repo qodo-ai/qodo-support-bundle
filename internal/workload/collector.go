@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
@@ -29,8 +28,7 @@ const (
 	MaximumSourceBytes   int64 = 64 << 20
 	MaximumTotalBytes    int64 = 256 << 20
 
-	apiRecordLimit     = 101
-	maxDiagnosticBytes = 1024
+	apiRecordLimit = 101
 )
 
 const (
@@ -197,7 +195,7 @@ func Collect(
 			if runErr != nil {
 				coverage.State = CoverageFailed
 				coverage.Reason = reasonRequestFailed
-				coverage.Diagnostic = requestDiagnostic(result, runErr, redactor)
+				coverage.Diagnostic = requestDiagnostic(result, runErr)
 				report.Coverage = append(report.Coverage, coverage)
 				continue
 			}
@@ -393,21 +391,40 @@ func runAPIRequest(
 func requestDiagnostic(
 	result CommandResult,
 	requestErr error,
-	redactor *redact.Redactor,
 ) string {
 	message := strings.TrimSpace(string(result.Stderr))
 	if message == "" && requestErr != nil {
 		message = requestErr.Error()
 	}
-	message = strings.Join(strings.Fields(redactor.Text(message)), " ")
-	if len(message) <= maxDiagnosticBytes {
-		return message
+	message = strings.ToLower(strings.ToValidUTF8(message, " "))
+	switch {
+	case strings.Contains(message, "forbidden"),
+		strings.Contains(message, "permission denied"),
+		strings.Contains(message, "access denied"):
+		return "access forbidden"
+	case strings.Contains(message, "unauthorized"),
+		strings.Contains(message, "authentication required"):
+		return "authentication required"
+	case strings.Contains(message, "too many requests"),
+		strings.Contains(message, "rate limit"):
+		return "Kubernetes API rate limited"
+	case strings.Contains(message, "deadline exceeded"),
+		strings.Contains(message, "timed out"),
+		strings.Contains(message, "timeout"):
+		return "request timed out"
+	case strings.Contains(message, "not found"),
+		strings.Contains(message, "the server could not find the requested resource"):
+		return "resource or API not found"
+	case strings.Contains(message, "connection refused"),
+		strings.Contains(message, "no route to host"),
+		strings.Contains(message, "service unavailable"):
+		return "Kubernetes API unavailable"
+	case strings.Contains(message, "x509"),
+		strings.Contains(message, "tls handshake"):
+		return "Kubernetes API TLS verification failed"
+	default:
+		return "request failed"
 	}
-	end := maxDiagnosticBytes
-	for end > 0 && !utf8.ValidString(message[:end]) {
-		end--
-	}
-	return message[:end]
 }
 
 func sourceSpecs() []sourceSpec {

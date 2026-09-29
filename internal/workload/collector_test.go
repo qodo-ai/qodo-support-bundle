@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
@@ -277,9 +276,7 @@ func TestCollectReportsPartialFailuresAndContinuation(t *testing.T) {
 	}
 	if report.Coverage[0].State != CoverageFailed ||
 		report.Coverage[0].Reason != reasonRequestFailed ||
-		!strings.Contains(report.Coverage[0].Diagnostic, redact.Replacement) ||
-		!strings.Contains(report.Coverage[0].Diagnostic, "access denied") ||
-		strings.Contains(report.Coverage[0].Diagnostic, "raw-secret-value") ||
+		report.Coverage[0].Diagnostic != "access forbidden" ||
 		report.Coverage[5].State != CoverageFailed ||
 		report.Coverage[5].Reason != reasonNormalizationFailed {
 		t.Fatalf("unexpected failure coverage: %+v", report.Coverage)
@@ -329,20 +326,45 @@ func TestCollectReportsPartialFailuresAndContinuation(t *testing.T) {
 	}
 }
 
-func TestRequestDiagnosticIsRedactedBoundedAndValidUTF8(t *testing.T) {
+func TestRequestDiagnosticClassifiesFailuresWithoutRetainingIdentities(t *testing.T) {
 	t.Parallel()
-	diagnostic := requestDiagnostic(
-		kubernetes.CommandResult{
-			Stderr: []byte("password=raw-secret-value " + strings.Repeat("界", maxDiagnosticBytes)),
+	tests := []struct {
+		name   string
+		result kubernetes.CommandResult
+		err    error
+		want   string
+	}{
+		{
+			name: "malformed forbidden stderr",
+			result: kubernetes.CommandResult{
+				Stderr: []byte("\xffUser \"Jane Doe\" cannot list deployments: Forbidden"),
+			},
+			err:  errors.New("fallback must not be used"),
+			want: "access forbidden",
 		},
-		errors.New("fallback must not be used"),
-		redact.New(),
-	)
-	if strings.Contains(diagnostic, "raw-secret-value") ||
-		!strings.Contains(diagnostic, redact.Replacement) ||
-		len(diagnostic) > maxDiagnosticBytes ||
-		!utf8.ValidString(diagnostic) {
-		t.Fatalf("unsafe request diagnostic: %q", diagnostic)
+		{
+			name: "timeout fallback",
+			err:  errors.New("context deadline exceeded"),
+			want: "request timed out",
+		},
+		{
+			name: "unknown failure",
+			result: kubernetes.CommandResult{
+				Stderr: []byte("User \"Jane Doe\" encountered an unusual failure"),
+			},
+			err:  errors.New("fallback must not be used"),
+			want: "request failed",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := requestDiagnostic(test.result, test.err); got != test.want ||
+				strings.Contains(got, "Jane Doe") {
+				t.Fatalf("requestDiagnostic() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
