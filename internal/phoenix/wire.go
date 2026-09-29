@@ -26,9 +26,28 @@ var retainedAttributeKeys = map[string]struct{}{
 	"vcs.event.type":         {},
 }
 
+var allowedSpanKinds = map[string]struct{}{
+	"LLM":       {},
+	"CHAIN":     {},
+	"TOOL":      {},
+	"RETRIEVER": {},
+	"EMBEDDING": {},
+	"AGENT":     {},
+	"RERANKER":  {},
+	"GUARDRAIL": {},
+	"EVALUATOR": {},
+	"UNKNOWN":   {},
+}
+
+var allowedStatusCodes = map[string]struct{}{
+	"OK":    {},
+	"ERROR": {},
+	"UNSET": {},
+}
+
 type projectEnvelope struct {
-	Data       []wireProject `json:"data"`
-	NextCursor *string       `json:"next_cursor,omitempty"`
+	Data       json.RawMessage `json:"data"`
+	NextCursor *string         `json:"next_cursor,omitempty"`
 }
 
 type wireProject struct {
@@ -38,8 +57,8 @@ type wireProject struct {
 }
 
 type spansEnvelope struct {
-	Data       []wireSpan `json:"data"`
-	NextCursor *string    `json:"next_cursor,omitempty"`
+	Data       json.RawMessage `json:"data"`
+	NextCursor *string         `json:"next_cursor,omitempty"`
 }
 
 type wireSpan struct {
@@ -73,9 +92,15 @@ func decodeProjects(data []byte) ([]Project, string, error) {
 	if err := decodeStrict(data, &envelope); err != nil {
 		return nil, "", errInvalidResponse
 	}
-	projects := make([]Project, 0, len(envelope.Data))
-	seen := make(map[string]struct{}, len(envelope.Data))
-	for _, project := range envelope.Data {
+	var wireProjects []wireProject
+	if len(envelope.Data) == 0 ||
+		bytes.Equal(bytes.TrimSpace(envelope.Data), []byte("null")) ||
+		decodeStrict(envelope.Data, &wireProjects) != nil {
+		return nil, "", errInvalidResponse
+	}
+	projects := make([]Project, 0, len(wireProjects))
+	seen := make(map[string]struct{}, len(wireProjects))
+	for _, project := range wireProjects {
 		if !validBoundedText(project.ID, 1024) || !validBoundedText(project.Name, 1024) {
 			return nil, "", errInvalidResponse
 		}
@@ -83,7 +108,7 @@ func decodeProjects(data []byte) ([]Project, string, error) {
 			return nil, "", errInvalidResponse
 		}
 		seen[project.ID] = struct{}{}
-		projects = append(projects, Project{ID: project.ID, Name: project.Name})
+		projects = append(projects, Project{ID: project.ID})
 	}
 	cursor, err := validatedCursor(envelope.NextCursor)
 	if err != nil {
@@ -101,8 +126,14 @@ func decodeSpans(
 	if err := decodeStrict(data, &envelope); err != nil {
 		return nil, "", 0, errInvalidResponse
 	}
-	spans := make([]normalizedSpan, 0, len(envelope.Data))
-	for _, raw := range envelope.Data {
+	var wireSpans []wireSpan
+	if len(envelope.Data) == 0 ||
+		bytes.Equal(bytes.TrimSpace(envelope.Data), []byte("null")) ||
+		decodeStrict(envelope.Data, &wireSpans) != nil {
+		return nil, "", 0, errInvalidResponse
+	}
+	spans := make([]normalizedSpan, 0, len(wireSpans))
+	for _, raw := range wireSpans {
 		span, keep, err := normalizeSpan(raw, config, redactor)
 		if err != nil {
 			return nil, "", 0, errInvalidResponse
@@ -115,7 +146,7 @@ func decodeSpans(
 	if err != nil {
 		return nil, "", 0, errInvalidResponse
 	}
-	return spans, cursor, len(envelope.Data), nil
+	return spans, cursor, len(wireSpans), nil
 }
 
 func normalizeSpan(
@@ -140,6 +171,12 @@ func normalizeSpan(
 	spanID := strings.ToLower(raw.Context.SpanID)
 	if !validTraceID(traceID) ||
 		!validSpanID(spanID) {
+		return normalizedSpan{}, false, errInvalidResponse
+	}
+	if _, allowed := allowedSpanKinds[raw.SpanKind]; !allowed {
+		return normalizedSpan{}, false, errInvalidResponse
+	}
+	if _, allowed := allowedStatusCodes[raw.StatusCode]; !allowed {
 		return normalizedSpan{}, false, errInvalidResponse
 	}
 	start, err := time.Parse(time.RFC3339Nano, raw.StartTime)
@@ -184,7 +221,6 @@ func normalizeSpan(
 		span: Span{
 			SpanID:     spanID,
 			ParentID:   parentID,
-			Name:       redactor.Text(raw.Name),
 			SpanKind:   redactor.Text(raw.SpanKind),
 			StatusCode: redactor.Text(raw.StatusCode),
 			Start:      start.Format(time.RFC3339Nano),

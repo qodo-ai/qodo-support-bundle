@@ -44,6 +44,9 @@ const (
 	reasonCleanup           = "tunnel_cleanup_failed"
 	reasonArtifactStaging   = "artifact_staging_failed"
 	reasonCanceled          = "collection_canceled"
+
+	traceMemoryReserve int64 = 2 << 10
+	spanMemoryReserve  int64 = 512
 )
 
 type requestResult struct {
@@ -62,6 +65,7 @@ type traceGroup struct {
 	start   time.Time
 	end     time.Time
 	spanIDs map[string]struct{}
+	bytes   int64
 }
 
 // Collect discovers Phoenix, opens a loopback tunnel, queries the locked v1
@@ -223,6 +227,7 @@ func collectGroups(
 		return nil, reason, diagnostic
 	}
 	groups := make(map[string]*traceGroup)
+	var retainedEstimate int64
 	for _, project := range projects {
 		coverage.ProjectsRead++
 		cursor := ""
@@ -262,6 +267,11 @@ func collectGroups(
 				}
 			}
 			for _, span := range spans {
+				spanBytes, err := json.Marshal(span.span)
+				if err != nil {
+					return sortedGroups(groups), reasonMalformed, "span_encoding"
+				}
+				spanFootprint := int64(len(spanBytes)) + spanMemoryReserve
 				key := project.ID + "\x00" + span.traceID
 				group := groups[key]
 				if group == nil {
@@ -270,28 +280,57 @@ func collectGroups(
 						markTruncated(coverage, reasonTraceLimit, "trace_limit")
 						return sortedGroups(groups), "", ""
 					}
-					group = &traceGroup{
-						record: Record{
-							SchemaVersion:   recordSchemaVersion,
-							ContractVersion: ContractVersion,
-							Project: Project{
-								ID:   redactor.Text(project.ID),
-								Name: redactor.Text(project.Name),
-							},
-							TraceID:     span.traceID,
-							Correlation: correlation(config),
+					record := Record{
+						SchemaVersion:   recordSchemaVersion,
+						ContractVersion: ContractVersion,
+						Project: Project{
+							ID: redactor.Text(project.ID),
 						},
+						TraceID:     span.traceID,
+						Start:       span.start.Format(time.RFC3339Nano),
+						End:         span.end.Format(time.RFC3339Nano),
+						Correlation: correlation(config),
+						Spans:       []Span{},
+					}
+					base, err := json.Marshal(record)
+					if err != nil {
+						return sortedGroups(groups), reasonMalformed, "trace_encoding"
+					}
+					traceFootprint := int64(len(base)) + traceMemoryReserve
+					if traceFootprint > config.MaxRetainedBytesPerTrace ||
+						spanFootprint > config.MaxRetainedBytesPerTrace-traceFootprint {
+						markTruncated(coverage, reasonPerTraceBudget, "trace_budget")
+						return sortedGroups(groups), "", ""
+					}
+					newFootprint := traceFootprint + spanFootprint
+					if retainedEstimate > config.MaxTotalRetainedBytes-newFootprint {
+						markTruncated(coverage, reasonTotalBudget, "total_budget")
+						return sortedGroups(groups), "", ""
+					}
+					group = &traceGroup{
+						record:  record,
 						start:   span.start,
 						end:     span.end,
 						spanIDs: make(map[string]struct{}),
+						bytes:   traceFootprint,
 					}
 					groups[key] = group
+					retainedEstimate += traceFootprint
+				} else if spanFootprint > config.MaxRetainedBytesPerTrace-group.bytes {
+					markTruncated(coverage, reasonPerTraceBudget, "trace_budget")
+					return sortedGroups(groups), "", ""
+				}
+				if retainedEstimate > config.MaxTotalRetainedBytes-spanFootprint {
+					markTruncated(coverage, reasonTotalBudget, "total_budget")
+					return sortedGroups(groups), "", ""
 				}
 				if _, duplicate := group.spanIDs[span.span.SpanID]; duplicate {
 					return sortedGroups(groups), reasonMalformed, "duplicate_span"
 				}
 				group.spanIDs[span.span.SpanID] = struct{}{}
 				group.record.Spans = append(group.record.Spans, span.span)
+				group.bytes += spanFootprint
+				retainedEstimate += spanFootprint
 				if span.start.Before(group.start) {
 					group.start = span.start
 				}
@@ -370,10 +409,7 @@ func collectProjects(
 		cursor = nextCursor
 	}
 	sort.Slice(projects, func(left, right int) bool {
-		if projects[left].ID != projects[right].ID {
-			return projects[left].ID < projects[right].ID
-		}
-		return projects[left].Name < projects[right].Name
+		return projects[left].ID < projects[right].ID
 	})
 	return projects, "", ""
 }
@@ -417,9 +453,6 @@ func sortedGroups(groups map[string]*traceGroup) []*traceGroup {
 		rightRecord := result[right].record
 		if leftRecord.Project.ID != rightRecord.Project.ID {
 			return leftRecord.Project.ID < rightRecord.Project.ID
-		}
-		if leftRecord.Project.Name != rightRecord.Project.Name {
-			return leftRecord.Project.Name < rightRecord.Project.Name
 		}
 		return leftRecord.TraceID < rightRecord.TraceID
 	})

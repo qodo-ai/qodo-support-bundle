@@ -152,7 +152,7 @@ func TestCollectWindowStagesDeterministicRedactedArtifacts(t *testing.T) {
 			assertProjectQuery(t, request.URL.Query(), "")
 			writeJSON(t, writer, map[string]any{
 				"data": []any{
-					map[string]any{"id": "project-b", "name": "B", "description": nil},
+					map[string]any{"id": "project-b", "name": "Alice Smith oncology", "description": nil},
 				},
 				"next_cursor": "project-next",
 			})
@@ -238,6 +238,9 @@ func TestCollectWindowStagesDeterministicRedactedArtifacts(t *testing.T) {
 	coverageText := string(sink.files[CoverageArtifactPath])
 	for _, forbidden := range []string{
 		"raw description",
+		"Alice Smith",
+		"oncology",
+		"leukemia",
 		"status raw secret",
 		"event raw secret",
 		"attribute raw secret",
@@ -351,7 +354,7 @@ func TestStrictWireRejectionsAndWindowDrop(t *testing.T) {
 	config := testConfig().WithDefaults()
 	valid := fmt.Sprintf(`{"data":[{
 		"id":"%s","name":"span","context":{"trace_id":"%s","span_id":"%s"},
-		"span_kind":"INTERNAL","parent_id":null,
+		"span_kind":"CHAIN","parent_id":null,
 		"start_time":"%s","end_time":"%s","status_code":"OK",
 		"status_message":null,"attributes":{},"events":[]
 	}]}`,
@@ -365,6 +368,10 @@ func TestStrictWireRejectionsAndWindowDrop(t *testing.T) {
 		"unknown field":  []byte(strings.Replace(valid, `"events":[]`, `"events":[],"future":true`, 1)),
 		"duplicate key":  []byte(strings.Replace(valid, `"name":"span"`, `"name":"span","name":"other"`, 1)),
 		"missing events": []byte(strings.Replace(valid, `,"events":[]`, "", 1)),
+		"invalid kind":   []byte(strings.Replace(valid, `"span_kind":"CHAIN"`, `"span_kind":"PERSON_NAME"`, 1)),
+		"invalid status": []byte(strings.Replace(valid, `"status_code":"OK"`, `"status_code":"DIAGNOSIS"`, 1)),
+		"missing data":   []byte(`{}`),
+		"null data":      []byte(`{"data":null}`),
 		"invalid utf8":   append([]byte(valid), 0xff),
 	}
 	for name, data := range cases {
@@ -377,7 +384,7 @@ func TestStrictWireRejectionsAndWindowDrop(t *testing.T) {
 	}
 	outside := []byte(fmt.Sprintf(`{"data":[{
 		"id":"%s","name":"span","context":{"trace_id":"%s","span_id":"%s"},
-		"span_kind":"INTERNAL","start_time":"%s","end_time":"%s",
+		"span_kind":"CHAIN","start_time":"%s","end_time":"%s",
 		"status_code":"OK","status_message":"","attributes":{},"events":[]
 	}]}`,
 		testGlobalSpanID,
@@ -392,7 +399,7 @@ func TestStrictWireRejectionsAndWindowDrop(t *testing.T) {
 	}
 	crossing := []byte(fmt.Sprintf(`{"data":[{
 		"id":"%s","name":"span","context":{"trace_id":"%s","span_id":"%s"},
-		"span_kind":"INTERNAL","start_time":"%s","end_time":"%s",
+		"span_kind":"CHAIN","start_time":"%s","end_time":"%s",
 		"status_code":"OK","status_message":"","attributes":{},"events":[]
 	}]}`,
 		testGlobalSpanID,
@@ -404,6 +411,16 @@ func TestStrictWireRejectionsAndWindowDrop(t *testing.T) {
 	spans, _, found, err = decodeSpans(crossing, config, redact.New())
 	if err != nil || found != 1 || len(spans) != 1 {
 		t.Fatalf("crossing decode: spans=%+v found=%d err=%v", spans, found, err)
+	}
+	for name, data := range map[string][]byte{
+		"missing project data": []byte(`{}`),
+		"null project data":    []byte(`{"data":null}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := decodeProjects(data); !errors.Is(err, errInvalidResponse) {
+				t.Fatalf("decodeProjects() error = %v", err)
+			}
+		})
 	}
 }
 
@@ -628,19 +645,20 @@ func TestRetentionBudgetsTruncateAtRecordBoundaries(t *testing.T) {
 	record := Record{
 		SchemaVersion:   recordSchemaVersion,
 		ContractVersion: ContractVersion,
-		Project:         Project{ID: "p", Name: "project"},
+		Project:         Project{ID: "p"},
 		TraceID:         testTraceA,
 		Start:           config.Start.Format(time.RFC3339Nano),
 		End:             config.Start.Add(2 * time.Second).Format(time.RFC3339Nano),
 		Correlation:     "surrounding",
 		Spans: []Span{
 			{
-				SpanID: testSpanA, Name: "first", SpanKind: "INTERNAL", StatusCode: "OK",
+				SpanID: testSpanA, SpanKind: "CHAIN", StatusCode: "OK",
 				Start: config.Start.Format(time.RFC3339Nano), End: config.Start.Add(time.Second).Format(time.RFC3339Nano),
 			},
 			{
-				SpanID: testSpanB, Name: strings.Repeat("x", 1000), SpanKind: "INTERNAL", StatusCode: "OK",
-				Start: config.Start.Add(time.Second).Format(time.RFC3339Nano), End: config.Start.Add(2 * time.Second).Format(time.RFC3339Nano),
+				SpanID: testSpanB, SpanKind: "CHAIN", StatusCode: "OK",
+				Attributes: map[string]string{"service.name": strings.Repeat("x", 1000)},
+				Start:      config.Start.Add(time.Second).Format(time.RFC3339Nano), End: config.Start.Add(2 * time.Second).Format(time.RFC3339Nano),
 			},
 		},
 	}
@@ -684,6 +702,59 @@ func TestRetentionBudgetsTruncateAtRecordBoundaries(t *testing.T) {
 		coverage.TracesRetained != 1 ||
 		!coverage.Truncated {
 		t.Fatalf("total coverage = %+v", coverage)
+	}
+}
+
+func TestAggregationStopsBeforeRetainedMemoryBudget(t *testing.T) {
+	t.Parallel()
+	config := testConfig().WithDefaults()
+	config.MaxRetainedBytesPerTrace = 4 << 10
+	config.MaxTotalRetainedBytes = 8 << 10
+	serverURL, stop := startIPv4Server(t, http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch request.URL.Path {
+		case projectsPath:
+			writeJSON(t, writer, map[string]any{
+				"data": []any{map[string]any{"id": "p", "name": "project"}},
+			})
+		case "/v1/projects/p/spans":
+			span := wireSpanJSON(
+				testTraceA,
+				testSpanA,
+				config.Start.Add(time.Minute),
+				config.Start.Add(2*time.Minute),
+			)
+			span["attributes"] = map[string]any{
+				"service.name": strings.Repeat("x", 4<<10),
+			}
+			writeJSON(t, writer, map[string]any{"data": []any{span}})
+		default:
+			t.Fatalf("unexpected path %q", request.URL.Path)
+		}
+	}))
+	defer stop()
+
+	sink := &fakeSink{}
+	report, err := Collect(
+		context.Background(),
+		config,
+		&fakeRunner{},
+		&fakeForwarder{baseURL: serverURL},
+		sink,
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if report.State != ReportPartial ||
+		report.Reason != reasonPerTraceBudget ||
+		!report.Coverage.Truncated ||
+		report.Coverage.TracesFound != 1 ||
+		report.Coverage.TracesRetained != 0 ||
+		len(sink.files[TracesArtifactPath]) != 0 {
+		t.Fatalf("report=%+v files=%v", report, mapKeys(sink.files))
 	}
 }
 
@@ -778,12 +849,12 @@ func testConfig() Config {
 func wireSpanJSON(traceID, spanID string, start, end time.Time) map[string]any {
 	return map[string]any{
 		"id":   testGlobalSpanID,
-		"name": "workflow token=span-secret",
+		"name": "Alice Smith diagnosis leukemia",
 		"context": map[string]any{
 			"trace_id": traceID,
 			"span_id":  spanID,
 		},
-		"span_kind":      "INTERNAL",
+		"span_kind":      "CHAIN",
 		"parent_id":      nil,
 		"start_time":     start.Format(time.RFC3339Nano),
 		"end_time":       end.Format(time.RFC3339Nano),

@@ -23,7 +23,7 @@
           {
             "id": "string",
             "name": "string",
-            "description": "optional string"
+            "description": "optional string or null"
           }
         ],
         "next_cursor": "optional string"

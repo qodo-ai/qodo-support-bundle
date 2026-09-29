@@ -299,15 +299,13 @@ type Report struct {
 
 // Project is the safe project identity retained in each trace record.
 type Project struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID string `json:"id"`
 }
 
 // Span is the normalized safe span model.
 type Span struct {
 	SpanID     string            `json:"span_id"`
 	ParentID   string            `json:"parent_id,omitempty"`
-	Name       string            `json:"name"`
 	SpanKind   string            `json:"span_kind"`
 	StatusCode string            `json:"status_code"`
 	Start      string            `json:"start"`
