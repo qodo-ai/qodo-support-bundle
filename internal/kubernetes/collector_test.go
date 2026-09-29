@@ -1569,6 +1569,104 @@ func TestCollectRedactsPrettyPrintedURLFragment(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogStructuredFragmentRegressions(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		input    string
+		expected []string
+	}{
+		"array element": {
+			input: "[\n" +
+				"  {\"url\":\"https://example.test/#opaque-value\",\"password\":\"secret\",\"request_id\":\"req-array\"}\n" +
+				"]\n",
+			expected: []string{"https://example.test/", "req-array"},
+		},
+		"nested sensitive prefix": {
+			input: "{\n" +
+				"  \"outer\":{\"safe\":1,\"password\":\"secret\"},\n" +
+				"  \"request_id\":\"req-nested\"\n" +
+				"}\n",
+			expected: []string{`"safe":1`, "req-nested"},
+		},
+		"nested object opener": {
+			input: "{\n" +
+				"  \"metadata\": {\n" +
+				"    \"url\":\"https://example.test/#opaque-value\",\n" +
+				"    \"password\":\"secret\"\n" +
+				"  },\n" +
+				"  \"request_id\":\"req-meta\"\n" +
+				"}\n",
+			expected: []string{"https://example.test/", "req-meta"},
+		},
+	}
+	for name, test := range tests {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output := string(mustSanitizeLog(t, []byte(test.input)))
+			for _, forbidden := range []string{"opaque-value", "secret"} {
+				if strings.Contains(output, forbidden) {
+					t.Fatalf("structured fragment leaked %q: %s", forbidden, output)
+				}
+			}
+			for _, expected := range test.expected {
+				if !strings.Contains(output, expected) {
+					t.Fatalf("structured fragment lost %q: %s", expected, output)
+				}
+			}
+		})
+	}
+}
+
+func TestCollectStructuredFragmentRegressions(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		input    string
+		expected []string
+	}{
+		"array element": {
+			input: "[\n" +
+				"  {\"url\":\"https://example.test/#opaque-value\",\"password\":\"secret\",\"request_id\":\"req-array\"}\n" +
+				"]\n",
+			expected: []string{"https://example.test/", "req-array"},
+		},
+		"nested sensitive prefix": {
+			input: "{\n" +
+				"  \"outer\":{\"safe\":1,\"password\":\"secret\"},\n" +
+				"  \"request_id\":\"req-nested\"\n" +
+				"}\n",
+			expected: []string{`"safe":1`, "req-nested"},
+		},
+		"nested object opener": {
+			input: "{\n" +
+				"  \"metadata\": {\n" +
+				"    \"url\":\"https://example.test/#opaque-value\",\n" +
+				"    \"password\":\"secret\"\n" +
+				"  },\n" +
+				"  \"request_id\":\"req-meta\"\n" +
+				"}\n",
+			expected: []string{"https://example.test/", "req-meta"},
+		},
+	}
+	for name, test := range tests {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output := collectCurrentLog(t, test.input)
+			for _, forbidden := range []string{"opaque-value", "secret"} {
+				if strings.Contains(output, forbidden) {
+					t.Fatalf("collector structured fragment leaked %q: %s", forbidden, output)
+				}
+			}
+			for _, expected := range test.expected {
+				if !strings.Contains(output, expected) {
+					t.Fatalf("collector structured fragment lost %q: %s", expected, output)
+				}
+			}
+		})
+	}
+}
+
 func TestSanitizeLogRedactsSplitURLValue(t *testing.T) {
 	t.Parallel()
 	input := []byte("{\n  \"url\":\n  \"https://example.test/#opaque-value\",\n  \"request_id\": \"req-123\"\n}\n")
@@ -1580,6 +1678,30 @@ func TestSanitizeLogRedactsSplitURLValue(t *testing.T) {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("split URL sanitization dropped %q: %s", expected, output)
 		}
+	}
+}
+
+func TestSanitizeLogRedactsSplitURLAfterBlankLines(t *testing.T) {
+	t.Parallel()
+	input := []byte("{\n  \"url\":\n  \n\t\n  \"https://example.test/#opaque-value\",\n  \"request_id\":\"req-blank\"\n}\n")
+	output := string(mustSanitizeLog(t, input))
+	if strings.Contains(output, "opaque-value") ||
+		!strings.Contains(output, "https://example.test/") ||
+		!strings.Contains(output, "req-blank") {
+		t.Fatalf("split URL with blank lines was not preserved safely: %s", output)
+	}
+}
+
+func TestCollectRedactsSplitURLAfterBlankLines(t *testing.T) {
+	t.Parallel()
+	output := collectCurrentLog(
+		t,
+		"{\n  \"url\":\n  \n\t\n  \"https://example.test/#opaque-value\",\n  \"request_id\":\"req-blank\"\n}\n",
+	)
+	if strings.Contains(output, "opaque-value") ||
+		!strings.Contains(output, "https://example.test/") ||
+		!strings.Contains(output, "req-blank") {
+		t.Fatalf("collector split URL with blank lines was not preserved safely: %s", output)
 	}
 }
 
@@ -1601,6 +1723,7 @@ func TestSanitizeLogSplitURLMalformedValuesFailClosed(t *testing.T) {
 	tests := map[string]string{
 		"truncated string": "{\n  \"url\":\n  \"https://example.test/#opaque-value\n  \"request_id\": \"later-secret\"\n}\n",
 		"non-string":       "{\n  \"url\":\n  {\"value\":\"opaque-value\"},\n  \"request_id\": \"later-secret\"\n}\n",
+		"bare text":        "{\n  \"url\":\n  opaque-value\n  \"request_id\": \"later-secret\"\n}\n",
 	}
 	for name, input := range tests {
 		name, input := name, input
@@ -1621,6 +1744,7 @@ func TestCollectSplitURLMalformedValuesFailClosed(t *testing.T) {
 	tests := map[string]string{
 		"truncated string": "{\n  \"url\":\n  \"https://example.test/#opaque-value\n  \"request_id\": \"later-secret\"\n}\n",
 		"non-string":       "{\n  \"url\":\n  {\"value\":\"opaque-value\"},\n  \"request_id\": \"later-secret\"\n}\n",
+		"bare text":        "{\n  \"url\":\n  opaque-value\n  \"request_id\": \"later-secret\"\n}\n",
 	}
 	for name, input := range tests {
 		name, input := name, input

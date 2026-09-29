@@ -329,6 +329,44 @@ func TestJSONObjectFragmentSanitizesContinuationSyntax(t *testing.T) {
 	}
 }
 
+func TestJSONObjectFragmentSanitizesStructuredArrayElement(t *testing.T) {
+	t.Parallel()
+	output, ok := New().JSONObjectFragment(
+		`{"url":"https://example.test/#opaque-value","password":"secret","request_id":"req-array"}`,
+	)
+	if !ok {
+		t.Fatal("structured array element was rejected")
+	}
+	for _, forbidden := range []string{"opaque-value", "secret"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("structured array element leaked %q: %s", forbidden, output)
+		}
+	}
+	for _, expected := range []string{"https://example.test/", "req-array"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("structured array element lost %q: %s", expected, output)
+		}
+	}
+}
+
+func TestJSONObjectFragmentHandlesNestedIncompleteStructures(t *testing.T) {
+	t.Parallel()
+	redactor := New()
+	tests := map[string]string{
+		`  "metadata": {`:      `"metadata":{`,
+		`  "outer":{"safe":1,`: `"outer":{"safe":1,`,
+	}
+	for input, expected := range tests {
+		output, ok := redactor.JSONObjectFragment(input)
+		if !ok {
+			t.Fatalf("valid nested fragment was rejected: %q", input)
+		}
+		if !strings.Contains(output, expected) {
+			t.Fatalf("nested fragment changed unexpectedly: input=%q output=%q", input, output)
+		}
+	}
+}
+
 func TestJSONObjectFragmentRejectsMalformedContinuation(t *testing.T) {
 	t.Parallel()
 	output, ok := New().JSONObjectFragment(

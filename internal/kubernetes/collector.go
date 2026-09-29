@@ -789,6 +789,16 @@ func sanitizeLog(input []byte, redactor *redact.Redactor, maxBytes int64) ([]byt
 	pendingJSONURL := false
 	forEachLogLine(input, func(_ int, line []byte) {
 		if pendingJSONURL {
+			if len(bytes.TrimSpace(line)) == 0 {
+				jsonContext.EndLine()
+				if jsonContext.Invalid() {
+					jsonSkipper.FailClosed()
+					return
+				}
+				_, _ = output.Write(line)
+				_, _ = output.WriteString("\n")
+				return
+			}
 			pendingJSONURL = false
 			sanitized, consumed, ok := redactor.SanitizeSplitJSONURLValue(string(line))
 			if !ok {

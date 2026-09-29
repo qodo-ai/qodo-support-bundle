@@ -485,7 +485,7 @@ func (redactor *Redactor) JSONLine(line string) string {
 	return string(sanitized)
 }
 
-// JSONObjectFragment sanitizes valid fields from a JSON object continuation.
+// JSONObjectFragment sanitizes a bounded structured JSON continuation.
 func (redactor *Redactor) JSONObjectFragment(line string) (string, bool) {
 	trimmed := strings.TrimRight(line, " \t\r")
 	trailingSpace := line[len(trimmed):]
@@ -500,13 +500,22 @@ func (redactor *Redactor) JSONObjectFragment(line string) (string, bool) {
 	if leadingComma {
 		fragment = strings.TrimSpace(fragment[1:])
 	}
-	if !startsJSONObjectMember(fragment) {
+
+	wrapObject := startsJSONObjectMember(fragment)
+	if !wrapObject && (fragment == "" || (fragment[0] != '{' && fragment[0] != '[')) {
 		return redactor.Text(line), true
 	}
 
-	sanitized, ok := redactor.sanitizeJSONObjectMembers(fragment)
+	continuationComma := strings.HasSuffix(fragment, ",")
+	if continuationComma {
+		fragment = strings.TrimSpace(strings.TrimSuffix(fragment, ","))
+	}
+	sanitized, ok := redactor.sanitizeStructuredJSONFragment(fragment, wrapObject)
 	if !ok {
 		return "", false
+	}
+	if continuationComma {
+		sanitized += ","
 	}
 	if leadingComma {
 		sanitized = "," + sanitized
@@ -526,18 +535,12 @@ func startsJSONObjectMember(fragment string) bool {
 	return next < len(fragment) && fragment[next] == ':'
 }
 
-func (redactor *Redactor) sanitizeJSONObjectMembers(fragment string) (string, bool) {
-	if strings.HasSuffix(fragment, ",") {
-		body := strings.TrimSpace(strings.TrimSuffix(fragment, ","))
-		sanitized, ok := redactor.marshalJSONObjectMembers(body + "}")
-		if !ok {
-			return "", false
-		}
-		return sanitized[:len(sanitized)-1] + ",", true
-	}
-
+func (redactor *Redactor) sanitizeStructuredJSONFragment(
+	fragment string,
+	wrapObject bool,
+) (string, bool) {
 	for end := len(fragment); ; {
-		if sanitized, ok := redactor.marshalJSONObjectMembers(fragment[:end]); ok {
+		if sanitized, ok := redactor.completeAndSanitizeJSONFragment(fragment[:end], wrapObject); ok {
 			return sanitized + fragment[end:], true
 		}
 		cursor := end
@@ -549,24 +552,98 @@ func (redactor *Redactor) sanitizeJSONObjectMembers(fragment string) (string, bo
 		}
 		end = cursor - 1
 	}
+	return "", false
+}
 
-	sanitized, ok := redactor.marshalJSONObjectMembers(fragment + "}")
+func (redactor *Redactor) completeAndSanitizeJSONFragment(
+	fragment string,
+	wrapObject bool,
+) (string, bool) {
+	completed, syntheticClosers, ok := completeJSONFragment(fragment, wrapObject)
 	if !ok {
 		return "", false
 	}
-	return sanitized[:len(sanitized)-1], true
-}
-
-func (redactor *Redactor) marshalJSONObjectMembers(fragment string) (string, bool) {
-	var value map[string]any
-	if err := json.Unmarshal([]byte("{"+fragment), &value); err != nil {
+	var value any
+	if err := json.Unmarshal([]byte(completed), &value); err != nil {
 		return "", false
 	}
 	sanitized, err := json.Marshal(redactor.Value("", value))
 	if err != nil || len(sanitized) < 2 {
 		return "", false
 	}
-	return string(sanitized[1:]), true
+	start := 0
+	if wrapObject {
+		if sanitized[0] != '{' {
+			return "", false
+		}
+		start = 1
+	}
+	end := len(sanitized) - syntheticClosers
+	if end < start {
+		return "", false
+	}
+	return string(sanitized[start:end]), true
+}
+
+func completeJSONFragment(fragment string, wrapObject bool) (string, int, bool) {
+	var stack [maxJSONSkipperDepth]byte
+	depth := 0
+	if wrapObject {
+		stack[0] = '}'
+		depth = 1
+	}
+	inString := false
+	escaped := false
+	for index := 0; index < len(fragment); index++ {
+		character := fragment[index]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch character {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch character {
+		case '"':
+			inString = true
+		case '{':
+			if depth >= len(stack) {
+				return "", 0, false
+			}
+			stack[depth] = '}'
+			depth++
+		case '[':
+			if depth >= len(stack) {
+				return "", 0, false
+			}
+			stack[depth] = ']'
+			depth++
+		case '}', ']':
+			if depth == 0 || stack[depth-1] != character {
+				return "", 0, false
+			}
+			depth--
+		}
+	}
+	if inString || escaped {
+		return "", 0, false
+	}
+
+	var completed strings.Builder
+	if wrapObject {
+		completed.WriteByte('{')
+	}
+	completed.WriteString(fragment)
+	for index := depth - 1; index >= 0; index-- {
+		completed.WriteByte(stack[index])
+	}
+	return completed.String(), depth, true
 }
 
 const maxJSONSkipperDepth = 64
