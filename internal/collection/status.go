@@ -9,6 +9,7 @@ const (
 	reasonCollectionError = "collection_error"
 	reasonIssuesReported  = "issues_reported"
 	reasonMissingReport   = "missing_report"
+	reasonMissingArtifact = "missing_artifact"
 )
 
 // KubernetesCoverage derives coverage from a completed Kubernetes collection.

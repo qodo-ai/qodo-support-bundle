@@ -34,8 +34,6 @@ const (
 	maxCustomerContextLength            = 4096
 	maxCommandTimeout                   = 30 * time.Minute
 	defaultProbeTimeout                 = 15 * time.Second
-	collectionStatusComplete            = "complete"
-	collectionStatusPartial             = "partial"
 	defaultOutputDirectory              = "qodo-support-bundles"
 	defaultOutputResolveHome            = "resolve home directory"
 	defaultOutputCreateDirectory        = "create default output directory"
@@ -259,45 +257,26 @@ func runCollect(
 	}
 	_, _ = fmt.Fprintln(stderr, "Using kubectl: resolved executable")
 	runner := kubernetes.ExecRunner{Binary: resolvedKubectl}
-	kubernetesReport, kubernetesErr := kubernetes.Collect(
-		ctx,
-		kubernetes.Config{
-			Namespaces:              selectedNamespaces,
-			AllNamespaces:           *allNamespaces,
-			ExcludeSystemNamespaces: *excludeSystemNamespaces,
-			Selector:                *selector,
-			Context:                 *kubeContext,
-			Kubeconfig:              *kubeconfig,
-			Since:                   *since,
-			Timeout:                 *timeout,
-			MaxMetadataBytes:        *maxMetadataBytes,
-			MaxLogBytes:             *maxLogBytes,
-			MaxTotalLogBytes:        *maxTotalLogBytes,
-			LogWorkers:              *logWorkers,
-			Progress: func(progress kubernetes.Progress) {
-				writeCollectionProgress(stderr, redactor, progress)
-			},
+	kubernetesConfig := kubernetes.Config{
+		Namespaces:              selectedNamespaces,
+		AllNamespaces:           *allNamespaces,
+		ExcludeSystemNamespaces: *excludeSystemNamespaces,
+		Selector:                *selector,
+		Context:                 *kubeContext,
+		Kubeconfig:              *kubeconfig,
+		Since:                   *since,
+		Timeout:                 *timeout,
+		MaxMetadataBytes:        *maxMetadataBytes,
+		MaxLogBytes:             *maxLogBytes,
+		MaxTotalLogBytes:        *maxTotalLogBytes,
+		LogWorkers:              *logWorkers,
+		Progress: func(progress kubernetes.Progress) {
+			writeCollectionProgress(stderr, redactor, progress)
 		},
-		runner,
-		builder,
-		redactor,
-	)
-	if ctx.Err() != nil {
-		_, _ = fmt.Fprintln(stderr, "Collection canceled; no bundle was published.")
-		return 1
 	}
-	if kubernetesErr != nil {
-		kubernetesReport.Issues = append(kubernetesReport.Issues, kubernetes.Issue{
-			Operation: "collect Kubernetes diagnostics",
-			Message:   redactor.Text(kubernetesErr.Error()),
-		})
-	}
-
-	var connectivityReport *zitadel.Report
-	var connectivityFailure string
+	var zitadelConfig *zitadel.Config
 	if *checkZitadel {
-		_, _ = fmt.Fprintln(stderr, "Checking Platform-to-Zitadel connectivity...")
-		outcome := zitadel.Collect(ctx, zitadel.Config{
+		zitadelConfig = &zitadel.Config{
 			Namespace:    *platformNamespace,
 			Pod:          *platformPod,
 			Container:    *platformContainer,
@@ -305,102 +284,33 @@ func runCollect(
 			Kubeconfig:   *kubeconfig,
 			QueryTimeout: *timeout,
 			ProbeTimeout: *probeTimeout,
-		}, runner, redactor)
-		connectivityReport = outcome.Report
-		connectivityFailure = outcome.Reason
-		switch {
-		case outcome.Reason != "":
-			kubernetesReport.Issues = append(kubernetesReport.Issues, kubernetes.Issue{
-				Operation: "collect Zitadel connectivity probe",
-				Resource: redactor.Text(
-					*platformNamespace + "/" + *platformPod + "/" + *platformContainer,
-				),
-				Message: outcome.Reason,
-			})
-			_, _ = fmt.Fprintf(stderr, "Zitadel connectivity probe unavailable: %s\n", outcome.Reason)
-		case outcome.Report.FailedChecks() > 0:
-			if err := builder.Add("connectivity/zitadel.json", outcome.Data); err != nil {
-				_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
-				return 1
-			}
-			_, _ = fmt.Fprintln(stderr, "Zitadel connectivity: diagnostic failure recorded.")
-		default:
-			if err := builder.Add("connectivity/zitadel.json", outcome.Data); err != nil {
-				_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
-				return 1
-			}
-			_, _ = fmt.Fprintln(stderr, "Zitadel connectivity: passed.")
 		}
 	}
-
-	collectionStatus := collectionStatusComplete
-	if kubernetesErr != nil || len(kubernetesReport.Issues) > 0 || connectivityFailure != "" {
-		collectionStatus = collectionStatusPartial
-	}
-	issuesData, err := collection.MarshalIssues(kubernetesReport.Issues)
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
-		return 1
-	}
-	if len(issuesData) > 0 {
-		if err := builder.Add("collection-issues.jsonl", issuesData); err != nil {
-			_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
-			return 1
-		}
-	}
-
-	generatedAt := currentTime().UTC()
-	customerContext := collection.BuildCustomerContext(*activity, *problem, redactor)
-	summary := collection.BuildSummary(
-		generatedAt,
-		collectionStatus,
-		kubernetesReport,
-		customerContext,
-		*checkZitadel,
-		connectivityReport,
-		connectivityFailure,
-	)
-	if err := builder.Add("summary.md", []byte(summary)); err != nil {
-		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
-		return 1
-	}
-	connectivityMetadata := collection.BuildConnectivityMetadata(
-		*checkZitadel,
-		*platformNamespace,
-		*platformPod,
-		*platformContainer,
-		*probeTimeout,
-		zitadel.Outcome{
-			Report: connectivityReport,
-			Reason: connectivityFailure,
+	result, err := collection.Execute(
+		ctx,
+		collection.Request{
+			CollectorVersion: Version,
+			GeneratedAt:      currentTime().UTC(),
+			Activity:         *activity,
+			Problem:          *problem,
+			Kubernetes:       kubernetesConfig,
+			Zitadel:          zitadelConfig,
+			Progress: func(event collection.Event) {
+				writeCollectionEvent(stderr, event)
+			},
 		},
+		runner,
+		builder,
 		redactor,
+		collection.DefaultCollectors(),
 	)
-	ruleset := redactor.Ruleset()
-	archivePath, err := builder.FinalizeContext(ctx, bundle.Manifest{
-		CollectorVersion: Version,
-		GeneratedAt:      generatedAt,
-		Redaction: map[string]string{
-			"version": ruleset.Version,
-			"sha256":  ruleset.SHA256,
-		},
-		CustomerContext: customerContext,
-		Collection: collection.BuildCollectionManifest(
-			collectionStatus,
-			selectedNamespaces,
-			*allNamespaces,
-			*excludeSystemNamespaces,
-			*selector,
-			*since,
-			*maxMetadataBytes,
-			kubernetesReport,
-			connectivityMetadata,
-			redactor,
-		),
-	})
+	if result.CanceledBeforeBundle {
+		_, _ = fmt.Fprintln(stderr, "Collection canceled; no bundle was published.")
+		return 1
+	}
 	if err != nil {
 		if errors.Is(err, bundle.ErrCleanup) {
-			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", archivePath)
+			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
 			_, _ = fmt.Fprintln(stderr, "Bundle created, but temporary data cleanup failed.")
 			return 1
 		}
@@ -409,18 +319,18 @@ func runCollect(
 	}
 	cleanupPending = false
 
-	_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", archivePath)
+	_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
 	_, _ = fmt.Fprintf(
 		stdout,
 		"Kubernetes scope: %d/%d namespaces, %d pods, %d containers (%d init, %d ephemeral)\n",
-		len(kubernetesReport.Namespaces),
-		kubernetesReport.NamespacesRequested,
-		kubernetesReport.Pods,
-		kubernetesReport.Containers,
-		kubernetesReport.InitContainers,
-		kubernetesReport.EphemeralContainers,
+		len(result.KubernetesReport.Namespaces),
+		result.KubernetesReport.NamespacesRequested,
+		result.KubernetesReport.Pods,
+		result.KubernetesReport.Containers,
+		result.KubernetesReport.InitContainers,
+		result.KubernetesReport.EphemeralContainers,
 	)
-	if collectionStatus == collectionStatusPartial {
+	if result.Status == collection.CoveragePartial.String() {
 		_, _ = fmt.Fprintln(
 			stderr,
 			"Warning: collection was partial; inspect collection-issues.jsonl.",
@@ -679,6 +589,26 @@ func terminalText(redactor *redact.Redactor, value string) string {
 		}
 		return character
 	}, redactor.Text(value))
+}
+
+func writeCollectionEvent(writer io.Writer, event collection.Event) {
+	switch event.Kind {
+	case collection.EventZitadelStarted:
+		_, _ = fmt.Fprintln(writer, "Checking Platform-to-Zitadel connectivity...")
+	case collection.EventZitadelUnavailable:
+		_, _ = fmt.Fprintf(
+			writer,
+			"Zitadel connectivity probe unavailable: %s\n",
+			event.Reason,
+		)
+	case collection.EventZitadelDiagnosticFailure:
+		_, _ = fmt.Fprintln(
+			writer,
+			"Zitadel connectivity: diagnostic failure recorded.",
+		)
+	case collection.EventZitadelPassed:
+		_, _ = fmt.Fprintln(writer, "Zitadel connectivity: passed.")
+	}
 }
 
 func writeCollectionProgress(
