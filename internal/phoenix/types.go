@@ -297,20 +297,19 @@ type Report struct {
 	Artifacts       []Artifact  `json:"artifacts,omitempty"`
 }
 
-// Project is the safe project identity retained in each trace record.
+// Project is the non-reversible project surrogate retained in each trace record.
 type Project struct {
 	ID string `json:"id"`
 }
 
 // Span is the normalized safe span model.
 type Span struct {
-	SpanID     string            `json:"span_id"`
-	ParentID   string            `json:"parent_id,omitempty"`
-	SpanKind   string            `json:"span_kind"`
-	StatusCode string            `json:"status_code"`
-	Start      string            `json:"start"`
-	End        string            `json:"end"`
-	Attributes map[string]string `json:"attributes,omitempty"`
+	SpanID     string `json:"span_id"`
+	ParentID   string `json:"parent_id,omitempty"`
+	SpanKind   string `json:"span_kind"`
+	StatusCode string `json:"status_code"`
+	Start      string `json:"start"`
+	End        string `json:"end"`
 }
 
 // Record is one deterministic project/trace group.

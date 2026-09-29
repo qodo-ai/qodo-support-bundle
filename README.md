@@ -201,12 +201,12 @@ used when the namespaces differ.
 
 Phoenix requests use fixed deadlines, pagination bounds, project/trace/span
 limits, response limits, and per-trace and total retained-byte budgets. Output
-contains normalized project, trace, and span fields plus an allowlist of
-redacted attributes; raw responses, events, status messages, credentials, and
-arbitrary attributes are not retained. A successful no-data response is
-complete coverage and may omit `phoenix/traces.jsonl`. Discovery, forwarding,
-HTTP, schema, pagination, or retention-limit failures produce a usable partial
-bundle with stable reason codes in `phoenix/coverage.json` and
+contains normalized trace and span fields plus a non-reversible project
+surrogate; raw project identifiers, responses, attributes, names, events,
+status messages, and credentials are not retained. A successful no-data
+response is complete coverage and may omit `phoenix/traces.jsonl`. Discovery,
+forwarding, HTTP, schema, pagination, or retention-limit failures produce a
+usable partial bundle with stable reason codes in `phoenix/coverage.json` and
 `collection-issues.jsonl`. Cancellation and artifact staging failures publish
 no bundle.
 

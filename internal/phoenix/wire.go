@@ -10,21 +10,9 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 )
 
 var errInvalidResponse = errors.New("invalid Phoenix response")
-
-var retainedAttributeKeys = map[string]struct{}{
-	"service.name":           {},
-	"service.version":        {},
-	"deployment.environment": {},
-	"domain_module":          {},
-	"qodo.workflow.type":     {},
-	"vcs.provider":           {},
-	"vcs.event.type":         {},
-}
 
 var allowedSpanKinds = map[string]struct{}{
 	"LLM":       {},
@@ -71,7 +59,7 @@ type wireSpan struct {
 	EndTime       string                  `json:"end_time"`
 	StatusCode    string                  `json:"status_code"`
 	StatusMessage discardedNullableString `json:"status_message"`
-	Attributes    safeAttributes          `json:"attributes"`
+	Attributes    discardedJSONObject     `json:"attributes"`
 	Events        discardedJSONArray      `json:"events"`
 }
 
@@ -120,7 +108,6 @@ func decodeProjects(data []byte) ([]Project, string, error) {
 func decodeSpans(
 	data []byte,
 	config Config,
-	redactor *redact.Redactor,
 ) ([]normalizedSpan, string, int, error) {
 	var envelope spansEnvelope
 	if err := decodeStrict(data, &envelope); err != nil {
@@ -134,7 +121,7 @@ func decodeSpans(
 	}
 	spans := make([]normalizedSpan, 0, len(wireSpans))
 	for _, raw := range wireSpans {
-		span, keep, err := normalizeSpan(raw, config, redactor)
+		span, keep, err := normalizeSpan(raw, config)
 		if err != nil {
 			return nil, "", 0, errInvalidResponse
 		}
@@ -152,7 +139,6 @@ func decodeSpans(
 func normalizeSpan(
 	raw wireSpan,
 	config Config,
-	redactor *redact.Redactor,
 ) (normalizedSpan, bool, error) {
 	if !validBoundedText(raw.Context.TraceID, 32) ||
 		!validBoundedText(raw.Context.SpanID, 16) ||
@@ -204,16 +190,6 @@ func normalizeSpan(
 			return normalizedSpan{}, false, errInvalidResponse
 		}
 	}
-	attributes := make(map[string]string)
-	for key, value := range raw.Attributes.values {
-		if _, approved := retainedAttributeKeys[key]; !approved || redact.IsSensitiveKey(key) {
-			continue
-		}
-		attributes[key] = redactor.Text(value)
-	}
-	if len(attributes) == 0 {
-		attributes = nil
-	}
 	return normalizedSpan{
 		traceID: traceID,
 		start:   start,
@@ -221,11 +197,10 @@ func normalizeSpan(
 		span: Span{
 			SpanID:     spanID,
 			ParentID:   parentID,
-			SpanKind:   redactor.Text(raw.SpanKind),
-			StatusCode: redactor.Text(raw.StatusCode),
+			SpanKind:   raw.SpanKind,
+			StatusCode: raw.StatusCode,
 			Start:      start.Format(time.RFC3339Nano),
 			End:        end.Format(time.RFC3339Nano),
-			Attributes: attributes,
 		},
 	}, true, nil
 }
@@ -290,50 +265,30 @@ func (value *discardedJSONArray) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-type safeAttributes struct {
+type discardedJSONObject struct {
 	present bool
-	values  map[string]string
 }
 
-func (attributes *safeAttributes) UnmarshalJSON(data []byte) error {
+func (value *discardedJSONObject) UnmarshalJSON(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	token, err := decoder.Token()
 	if err != nil || token != json.Delim('{') {
 		return errInvalidResponse
 	}
-	values := make(map[string]string)
 	for decoder.More() {
-		keyToken, err := decoder.Token()
-		if err != nil {
+		if _, err := decoder.Token(); err != nil {
 			return errInvalidResponse
 		}
-		key, ok := keyToken.(string)
-		if !ok {
+		if err := consumeJSONValue(decoder, 0); err != nil {
 			return errInvalidResponse
-		}
-		valueToken, err := decoder.Token()
-		if err != nil {
-			return errInvalidResponse
-		}
-		if _, retained := retainedAttributeKeys[key]; retained {
-			if text, ok := valueToken.(string); ok {
-				values[key] = text
-				continue
-			}
-		}
-		if delimiter, structured := valueToken.(json.Delim); structured {
-			if err := consumeJSONContainer(decoder, delimiter, 0); err != nil {
-				return errInvalidResponse
-			}
 		}
 	}
 	closing, err := decoder.Token()
 	if err != nil || closing != json.Delim('}') || requireJSONEOF(decoder) != nil {
 		return errInvalidResponse
 	}
-	attributes.present = true
-	attributes.values = values
+	value.present = true
 	return nil
 }
 

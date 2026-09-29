@@ -3,8 +3,10 @@ package phoenix
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -145,7 +147,6 @@ func Collect(
 		client,
 		baseURL,
 		config,
-		redactor,
 		&report.Coverage,
 	)
 	cancellation := collectionContextError(ctx, overallCtx)
@@ -153,13 +154,15 @@ func Collect(
 		collectReason = reasonCanceled
 		collectDiagnostic = "context_ended"
 	}
-	if tunnelErr := tunnel.Err(); tunnelErr != nil {
+	if tunnelErr := tunnel.Err(); cancellation == nil && tunnelErr != nil {
 		collectReason = reasonTunnelUnavailable
 		collectDiagnostic = "tunnel_unavailable"
 	}
 	if closeErr := tunnel.Close(); closeErr != nil {
-		collectReason = reasonCleanup
-		collectDiagnostic = "tunnel_cleanup"
+		if cancellation == nil {
+			collectReason = reasonCleanup
+			collectDiagnostic = "tunnel_cleanup"
+		}
 	}
 	tunnelCancel()
 
@@ -213,7 +216,6 @@ func collectGroups(
 	client *http.Client,
 	baseURL *url.URL,
 	config Config,
-	redactor *redact.Redactor,
 	coverage *Coverage,
 ) ([]*traceGroup, string, string) {
 	projects, reason, diagnostic := collectProjects(
@@ -249,7 +251,7 @@ func collectGroups(
 				return sortedGroups(groups), result.reason, result.diagnostic
 			}
 			coverage.PagesRead++
-			spans, nextCursor, found, err := decodeSpans(result.body, config, redactor)
+			spans, nextCursor, found, err := decodeSpans(result.body, config)
 			result.body = nil
 			if err != nil {
 				return sortedGroups(groups), reasonMalformed, "spans_rejected"
@@ -284,7 +286,7 @@ func collectGroups(
 						SchemaVersion:   recordSchemaVersion,
 						ContractVersion: ContractVersion,
 						Project: Project{
-							ID: redactor.Text(project.ID),
+							ID: projectSurrogate(project.ID),
 						},
 						TraceID:     span.traceID,
 						Start:       span.start.Format(time.RFC3339Nano),
@@ -431,6 +433,11 @@ func spanParameters(config Config, cursor string) url.Values {
 
 func spansPath(projectID string) string {
 	return "/v1/projects/" + url.PathEscape(projectID) + "/spans"
+}
+
+func projectSurrogate(projectID string) string {
+	digest := sha256.Sum256([]byte(projectID))
+	return "sha256:" + fmt.Sprintf("%x", digest)
 }
 
 func correlation(config Config) string {

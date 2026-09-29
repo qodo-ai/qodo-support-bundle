@@ -135,6 +135,18 @@ func TestConfigDefaultsValidationAndTraceNormalization(t *testing.T) {
 	}
 }
 
+func TestProjectSurrogateDoesNotRetainFreeFormIdentifier(t *testing.T) {
+	t.Parallel()
+	projectID := "Alice Smith oncology"
+	surrogate := projectSurrogate(projectID)
+	if surrogate == projectID ||
+		strings.Contains(surrogate, "Alice") ||
+		!strings.HasPrefix(surrogate, "sha256:") ||
+		len(surrogate) != len("sha256:")+64 {
+		t.Fatalf("projectSurrogate(%q) = %q", projectID, surrogate)
+	}
+}
+
 func TestCollectWindowStagesDeterministicRedactedArtifacts(t *testing.T) {
 	t.Parallel()
 	config := testConfig().WithDefaults()
@@ -226,7 +238,7 @@ func TestCollectWindowStagesDeterministicRedactedArtifacts(t *testing.T) {
 	}
 	records := decodeJSONLines(t, sink.files[TracesArtifactPath])
 	if len(records) != 2 ||
-		records[0].Project.ID != "project-a" ||
+		records[0].Project.ID != projectSurrogate("project-a") ||
 		records[0].TraceID != testTraceA ||
 		records[1].TraceID != testTraceB ||
 		records[0].Correlation != "surrounding" ||
@@ -249,13 +261,17 @@ func TestCollectWindowStagesDeterministicRedactedArtifacts(t *testing.T) {
 		"completion",
 		"http://",
 		"?token=",
+		"project-a",
+		"project-b",
+		"service.version",
+		"1.2.3",
 	} {
 		if strings.Contains(tracesText, forbidden) || strings.Contains(coverageText, forbidden) {
 			t.Fatalf("artifact contains forbidden value %q", forbidden)
 		}
 	}
-	if !strings.Contains(tracesText, redact.Replacement) {
-		t.Fatal("expected retained strings to be redacted")
+	if strings.Contains(tracesText, `"attributes"`) {
+		t.Fatal("trace artifact retained attributes")
 	}
 	mu.Lock()
 	if len(requests) != 5 {
@@ -377,7 +393,7 @@ func TestStrictWireRejectionsAndWindowDrop(t *testing.T) {
 	for name, data := range cases {
 		name, data := name, data
 		t.Run(name, func(t *testing.T) {
-			if _, _, _, err := decodeSpans(data, config, redact.New()); !errors.Is(err, errInvalidResponse) {
+			if _, _, _, err := decodeSpans(data, config); !errors.Is(err, errInvalidResponse) {
 				t.Fatalf("decodeSpans() error = %v", err)
 			}
 		})
@@ -393,7 +409,7 @@ func TestStrictWireRejectionsAndWindowDrop(t *testing.T) {
 		config.End.Format(time.RFC3339Nano),
 		config.End.Add(time.Second).Format(time.RFC3339Nano),
 	))
-	spans, _, found, err := decodeSpans(outside, config, redact.New())
+	spans, _, found, err := decodeSpans(outside, config)
 	if err != nil || found != 1 || len(spans) != 0 {
 		t.Fatalf("outside decode: spans=%+v found=%d err=%v", spans, found, err)
 	}
@@ -408,7 +424,7 @@ func TestStrictWireRejectionsAndWindowDrop(t *testing.T) {
 		config.End.Add(-time.Second).Format(time.RFC3339Nano),
 		config.End.Add(time.Second).Format(time.RFC3339Nano),
 	))
-	spans, _, found, err = decodeSpans(crossing, config, redact.New())
+	spans, _, found, err = decodeSpans(crossing, config)
 	if err != nil || found != 1 || len(spans) != 1 {
 		t.Fatalf("crossing decode: spans=%+v found=%d err=%v", spans, found, err)
 	}
@@ -637,6 +653,48 @@ func TestFailuresStageCoverageAndArtifactFailureIsFatal(t *testing.T) {
 			t.Fatalf("report=%+v err=%v", report, err)
 		}
 	})
+
+	t.Run("cancellation after tunnel opens", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		requestStarted := make(chan struct{})
+		serverURL, stop := startIPv4Server(t, http.HandlerFunc(func(
+			writer http.ResponseWriter,
+			request *http.Request,
+		) {
+			if request.URL.Path == projectsPath {
+				writeJSON(t, writer, map[string]any{
+					"data": []any{map[string]any{"id": "p", "name": "project"}},
+				})
+				return
+			}
+			close(requestStarted)
+			<-request.Context().Done()
+		}))
+		defer stop()
+		go func() {
+			<-requestStarted
+			cancel()
+		}()
+
+		sink := &fakeSink{}
+		report, err := Collect(
+			ctx,
+			testConfig(),
+			&fakeRunner{},
+			&fakeForwarder{baseURL: serverURL},
+			sink,
+			redact.New(),
+		)
+		if !errors.Is(err, context.Canceled) ||
+			report.State != ReportFailed ||
+			report.Coverage.State != CoverageFailed ||
+			report.Reason != reasonCanceled ||
+			report.Diagnostic != "context_ended" ||
+			len(sink.files[CoverageArtifactPath]) == 0 {
+			t.Fatalf("report=%+v err=%v", report, err)
+		}
+	})
 }
 
 func TestRetentionBudgetsTruncateAtRecordBoundaries(t *testing.T) {
@@ -657,8 +715,8 @@ func TestRetentionBudgetsTruncateAtRecordBoundaries(t *testing.T) {
 			},
 			{
 				SpanID: testSpanB, SpanKind: "CHAIN", StatusCode: "OK",
-				Attributes: map[string]string{"service.name": strings.Repeat("x", 1000)},
-				Start:      config.Start.Add(time.Second).Format(time.RFC3339Nano), End: config.Start.Add(2 * time.Second).Format(time.RFC3339Nano),
+				Start: config.Start.Add(time.Second).Format(time.RFC3339Nano),
+				End:   config.Start.Add(2 * time.Second).Format(time.RFC3339Nano),
 			},
 		},
 	}
@@ -708,7 +766,7 @@ func TestRetentionBudgetsTruncateAtRecordBoundaries(t *testing.T) {
 func TestAggregationStopsBeforeRetainedMemoryBudget(t *testing.T) {
 	t.Parallel()
 	config := testConfig().WithDefaults()
-	config.MaxRetainedBytesPerTrace = 4 << 10
+	config.MaxRetainedBytesPerTrace = 2500
 	config.MaxTotalRetainedBytes = 8 << 10
 	serverURL, stop := startIPv4Server(t, http.HandlerFunc(func(
 		writer http.ResponseWriter,
@@ -727,7 +785,7 @@ func TestAggregationStopsBeforeRetainedMemoryBudget(t *testing.T) {
 				config.Start.Add(2*time.Minute),
 			)
 			span["attributes"] = map[string]any{
-				"service.name": strings.Repeat("x", 4<<10),
+				"service.name": "Alice Smith oncology",
 			}
 			writeJSON(t, writer, map[string]any{"data": []any{span}})
 		default:
