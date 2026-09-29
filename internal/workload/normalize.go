@@ -145,18 +145,22 @@ func decodeDeployments(data []byte, normalizer *normalizer) ([]Workload, error) 
 	if err := validateListKind(list.Kind, DeploymentKind); err != nil {
 		return nil, err
 	}
+	if !list.Items.set {
+		return nil, errors.New("DeploymentList items are required")
+	}
+	items := list.Items.values
 	normalizer.observeListContinuation(list.Metadata)
 	validator := normalizer.validator()
-	for index := range list.Items {
-		if _, err := normalizeDeploymentItem(validator, list.Items[index], index); err != nil {
+	for index := range items {
+		if _, err := normalizeDeploymentItem(validator, items[index], index); err != nil {
 			return nil, err
 		}
 	}
-	count := normalizer.boundedLength(len(list.Items), maxWorkloads)
-	normalizer.recordsFound = len(list.Items)
+	count := normalizer.boundedLength(len(items), maxWorkloads)
+	normalizer.recordsFound = len(items)
 	output := make([]Workload, 0, count)
 	for index := 0; index < count; index++ {
-		workload, err := normalizeDeploymentItem(normalizer, list.Items[index], index)
+		workload, err := normalizeDeploymentItem(normalizer, items[index], index)
 		if err != nil {
 			return nil, err
 		}
@@ -204,18 +208,22 @@ func decodeStatefulSets(data []byte, normalizer *normalizer) ([]Workload, error)
 	if err := validateListKind(list.Kind, StatefulSetKind); err != nil {
 		return nil, err
 	}
+	if !list.Items.set {
+		return nil, errors.New("StatefulSetList items are required")
+	}
+	items := list.Items.values
 	normalizer.observeListContinuation(list.Metadata)
 	validator := normalizer.validator()
-	for index := range list.Items {
-		if _, err := normalizeStatefulSetItem(validator, list.Items[index], index); err != nil {
+	for index := range items {
+		if _, err := normalizeStatefulSetItem(validator, items[index], index); err != nil {
 			return nil, err
 		}
 	}
-	count := normalizer.boundedLength(len(list.Items), maxWorkloads)
-	normalizer.recordsFound = len(list.Items)
+	count := normalizer.boundedLength(len(items), maxWorkloads)
+	normalizer.recordsFound = len(items)
 	output := make([]Workload, 0, count)
 	for index := 0; index < count; index++ {
-		workload, err := normalizeStatefulSetItem(normalizer, list.Items[index], index)
+		workload, err := normalizeStatefulSetItem(normalizer, items[index], index)
 		if err != nil {
 			return nil, err
 		}
@@ -263,18 +271,22 @@ func decodeDaemonSets(data []byte, normalizer *normalizer) ([]Workload, error) {
 	if err := validateListKind(list.Kind, DaemonSetKind); err != nil {
 		return nil, err
 	}
+	if !list.Items.set {
+		return nil, errors.New("DaemonSetList items are required")
+	}
+	items := list.Items.values
 	normalizer.observeListContinuation(list.Metadata)
 	validator := normalizer.validator()
-	for index := range list.Items {
-		if _, err := normalizeDaemonSetItem(validator, list.Items[index], index); err != nil {
+	for index := range items {
+		if _, err := normalizeDaemonSetItem(validator, items[index], index); err != nil {
 			return nil, err
 		}
 	}
-	count := normalizer.boundedLength(len(list.Items), maxWorkloads)
-	normalizer.recordsFound = len(list.Items)
+	count := normalizer.boundedLength(len(items), maxWorkloads)
+	normalizer.recordsFound = len(items)
 	output := make([]Workload, 0, count)
 	for index := 0; index < count; index++ {
-		workload, err := normalizeDaemonSetItem(normalizer, list.Items[index], index)
+		workload, err := normalizeDaemonSetItem(normalizer, items[index], index)
 		if err != nil {
 			return nil, err
 		}
@@ -322,18 +334,22 @@ func decodeJobs(data []byte, normalizer *normalizer) ([]Workload, error) {
 	if err := validateListKind(list.Kind, JobKind); err != nil {
 		return nil, err
 	}
+	if !list.Items.set {
+		return nil, errors.New("JobList items are required")
+	}
+	items := list.Items.values
 	normalizer.observeListContinuation(list.Metadata)
 	validator := normalizer.validator()
-	for index := range list.Items {
-		if _, err := normalizeJobItem(validator, list.Items[index], index); err != nil {
+	for index := range items {
+		if _, err := normalizeJobItem(validator, items[index], index); err != nil {
 			return nil, err
 		}
 	}
-	count := normalizer.boundedLength(len(list.Items), maxWorkloads)
-	normalizer.recordsFound = len(list.Items)
+	count := normalizer.boundedLength(len(items), maxWorkloads)
+	normalizer.recordsFound = len(items)
 	output := make([]Workload, 0, count)
 	for index := 0; index < count; index++ {
-		workload, err := normalizeJobItem(normalizer, list.Items[index], index)
+		workload, err := normalizeJobItem(normalizer, items[index], index)
 		if err != nil {
 			return nil, err
 		}
@@ -381,18 +397,22 @@ func decodeCronJobs(data []byte, normalizer *normalizer) ([]Workload, error) {
 	if err := validateListKind(list.Kind, CronJobKind); err != nil {
 		return nil, err
 	}
+	if !list.Items.set {
+		return nil, errors.New("CronJobList items are required")
+	}
+	items := list.Items.values
 	normalizer.observeListContinuation(list.Metadata)
 	validator := normalizer.validator()
-	for index := range list.Items {
-		if _, err := normalizeCronJobItem(validator, list.Items[index], index); err != nil {
+	for index := range items {
+		if _, err := normalizeCronJobItem(validator, items[index], index); err != nil {
 			return nil, err
 		}
 	}
-	count := normalizer.boundedLength(len(list.Items), maxWorkloads)
-	normalizer.recordsFound = len(list.Items)
+	count := normalizer.boundedLength(len(items), maxWorkloads)
+	normalizer.recordsFound = len(items)
 	output := make([]Workload, 0, count)
 	for index := 0; index < count; index++ {
-		workload, err := normalizeCronJobItem(normalizer, list.Items[index], index)
+		workload, err := normalizeCronJobItem(normalizer, items[index], index)
 		if err != nil {
 			return nil, err
 		}
@@ -696,6 +716,12 @@ func (normalizer *normalizer) scheduling(input rawPodSpec) (Scheduling, error) {
 	topologySpread := make([]TopologySpread, 0, spreadCount)
 	for index := 0; index < spreadCount; index++ {
 		item := input.TopologySpreadConstraints[index]
+		if item.MaxSkew <= 0 {
+			return Scheduling{}, fmt.Errorf("topology spread %d max skew must be positive", index)
+		}
+		if item.MinDomains != nil && *item.MinDomains <= 0 {
+			return Scheduling{}, fmt.Errorf("topology spread %d min domains must be positive", index)
+		}
 		selector, err := normalizer.labelSelector(item.LabelSelector)
 		if err != nil {
 			return Scheduling{}, fmt.Errorf("topology spread %d selector: %w", index, err)
@@ -735,6 +761,12 @@ func (normalizer *normalizer) affinity(input *rawAffinity) (*Affinity, error) {
 		output.PreferredNode = make([]WeightedSelectorTerm, 0, count)
 		for index := 0; index < count; index++ {
 			item := input.NodeAffinity.Preferred[index]
+			if item.Weight < 1 || item.Weight > 100 {
+				return nil, fmt.Errorf(
+					"preferred node term %d weight must be between 1 and 100",
+					index,
+				)
+			}
 			term, err := normalizer.selectorTerm(item.Preference)
 			if err != nil {
 				return nil, fmt.Errorf("preferred node term %d: %w", index, err)
@@ -836,6 +868,9 @@ func (normalizer *normalizer) weightedPodAffinityTerms(
 	count := normalizer.boundedLength(len(input), maxAffinityTerms)
 	output := make([]WeightedPodAffinity, 0, count)
 	for index := 0; index < count; index++ {
+		if input[index].Weight < 1 || input[index].Weight > 100 {
+			return nil, fmt.Errorf("term %d weight must be between 1 and 100", index)
+		}
 		term, err := normalizer.podAffinityTerm(input[index].PodAffinityTerm)
 		if err != nil {
 			return nil, fmt.Errorf("term %d: %w", index, err)

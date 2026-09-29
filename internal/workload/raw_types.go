@@ -217,9 +217,9 @@ type rawCondition struct {
 }
 
 type rawDeploymentList struct {
-	Kind     string          `json:"kind"`
-	Metadata rawListMetadata `json:"metadata"`
-	Items    []rawDeployment `json:"items"`
+	Kind     string                          `json:"kind"`
+	Metadata rawListMetadata                 `json:"metadata"`
+	Items    rawRequiredSlice[rawDeployment] `json:"items"`
 }
 
 type rawDeployment struct {
@@ -247,9 +247,9 @@ type rawControllerStatus struct {
 }
 
 type rawStatefulSetList struct {
-	Kind     string           `json:"kind"`
-	Metadata rawListMetadata  `json:"metadata"`
-	Items    []rawStatefulSet `json:"items"`
+	Kind     string                           `json:"kind"`
+	Metadata rawListMetadata                  `json:"metadata"`
+	Items    rawRequiredSlice[rawStatefulSet] `json:"items"`
 }
 
 type rawStatefulSet struct {
@@ -274,9 +274,9 @@ type rawStatefulSetStatus struct {
 }
 
 type rawDaemonSetList struct {
-	Kind     string          `json:"kind"`
-	Metadata rawListMetadata `json:"metadata"`
-	Items    []rawDaemonSet  `json:"items"`
+	Kind     string                         `json:"kind"`
+	Metadata rawListMetadata                `json:"metadata"`
+	Items    rawRequiredSlice[rawDaemonSet] `json:"items"`
 }
 
 type rawDaemonSet struct {
@@ -300,9 +300,9 @@ type rawDaemonSetStatus struct {
 }
 
 type rawJobList struct {
-	Kind     string          `json:"kind"`
-	Metadata rawListMetadata `json:"metadata"`
-	Items    []rawJob        `json:"items"`
+	Kind     string                   `json:"kind"`
+	Metadata rawListMetadata          `json:"metadata"`
+	Items    rawRequiredSlice[rawJob] `json:"items"`
 }
 
 type rawJob struct {
@@ -325,9 +325,9 @@ type rawJobStatus struct {
 }
 
 type rawCronJobList struct {
-	Kind     string          `json:"kind"`
-	Metadata rawListMetadata `json:"metadata"`
-	Items    []rawCronJob    `json:"items"`
+	Kind     string                       `json:"kind"`
+	Metadata rawListMetadata              `json:"metadata"`
+	Items    rawRequiredSlice[rawCronJob] `json:"items"`
 }
 
 type rawCronJob struct {

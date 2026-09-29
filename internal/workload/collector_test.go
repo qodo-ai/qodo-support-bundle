@@ -77,6 +77,8 @@ func testCollectorConfig(namespaces ...string) Config {
 		MaxResponseBytes: DefaultMaxResponseBytes,
 		MaxSourceBytes:   DefaultMaxSourceBytes,
 		MaxTotalBytes:    DefaultMaxTotalBytes,
+		MaxNamespaces:    DefaultMaxNamespaces,
+		MaxDuration:      DefaultMaxCollectionDuration,
 	}
 }
 
@@ -426,6 +428,74 @@ func TestCollectEnforcesExactSourceAndTotalArtifactBudgets(t *testing.T) {
 		secondNamespaceDeployment.State != CoverageSkipped ||
 		secondNamespaceDeployment.Reason != reasonSourceBudgetExhausted {
 		t.Fatalf("unexpected source-budget coverage: %+v", secondNamespaceDeployment)
+	}
+}
+
+func TestCollectBoundsNamespaceRequestsWithExplicitCoverage(t *testing.T) {
+	t.Parallel()
+	config := testCollectorConfig("alpha", "beta")
+	config.MaxNamespaces = 1
+	runner := successfulCollectorRunner(t)
+	report, err := Collect(
+		context.Background(),
+		config,
+		runner,
+		&collectorSink{},
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 9 || len(report.Coverage) != 18 || !report.Truncated {
+		t.Fatalf("namespace request bound was not enforced: calls=%d report=%+v", len(runner.calls), report)
+	}
+	for _, coverage := range report.Coverage[9:] {
+		if coverage.Namespace != "beta" ||
+			coverage.State != CoverageSkipped ||
+			coverage.Reason != reasonNamespaceLimit ||
+			!coverage.Truncated {
+			t.Fatalf("bounded namespace coverage is incomplete: %+v", coverage)
+		}
+	}
+}
+
+func TestCollectBoundsAggregateDurationWithExplicitCoverage(t *testing.T) {
+	t.Parallel()
+	config := testCollectorConfig("platform")
+	config.MaxDuration = 10 * time.Millisecond
+	runner := &collectorRunner{
+		run: func(
+			ctx context.Context,
+			_ int64,
+			_ []string,
+		) (kubernetes.CommandResult, error) {
+			<-ctx.Done()
+			return kubernetes.CommandResult{}, ctx.Err()
+		},
+	}
+	report, err := Collect(
+		context.Background(),
+		config,
+		runner,
+		&collectorSink{},
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 || len(report.Coverage) != 9 || !report.Truncated {
+		t.Fatalf("aggregate deadline was not enforced: calls=%d report=%+v", len(runner.calls), report)
+	}
+	if report.Coverage[0].State != CoverageFailed ||
+		report.Coverage[0].Reason != reasonCollectionDeadline {
+		t.Fatalf("in-flight deadline coverage is wrong: %+v", report.Coverage[0])
+	}
+	for _, coverage := range report.Coverage[1:] {
+		if coverage.State != CoverageSkipped ||
+			coverage.Reason != reasonCollectionDeadline ||
+			!coverage.Truncated {
+			t.Fatalf("post-deadline coverage is incomplete: %+v", coverage)
+		}
 	}
 }
 

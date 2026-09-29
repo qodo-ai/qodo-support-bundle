@@ -136,6 +136,39 @@ func TestNormalizeListJSONSupportsAllWorkloadKinds(t *testing.T) {
 	}
 }
 
+func TestNormalizeListJSONRequiresListItemsButAllowsEmptyArrays(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []Kind{
+		DeploymentKind,
+		StatefulSetKind,
+		DaemonSetKind,
+		JobKind,
+		CronJobKind,
+	} {
+		kind := kind
+		t.Run(string(kind), func(t *testing.T) {
+			t.Parallel()
+			listKind := string(kind) + "List"
+			for _, input := range []string{
+				fmt.Sprintf(`{"kind":%q}`, listKind),
+				fmt.Sprintf(`{"kind":%q,"items":null}`, listKind),
+			} {
+				if _, err := NormalizeListJSON(kind, []byte(input), redact.New()); err == nil {
+					t.Fatalf("missing/null items accepted: %s", input)
+				}
+			}
+			result, err := NormalizeListJSON(
+				kind,
+				[]byte(fmt.Sprintf(`{"kind":%q,"items":[]}`, listKind)),
+				redact.New(),
+			)
+			if err != nil || len(result.Workloads) != 0 || result.RecordsFound != 0 {
+				t.Fatalf("valid empty list result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
 func TestNormalizeListJSONRejectsNegativeControllerAndJobCounts(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -224,6 +257,61 @@ func TestNormalizeListJSONRejectsInvalidExplicitProbeTiming(t *testing.T) {
 				redact.New(),
 			); err == nil {
 				t.Fatal("invalid explicit probe timing was accepted")
+			}
+		})
+	}
+}
+
+func TestNormalizeListJSONRejectsInvalidSchedulingNumbers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		scheduling string
+	}{
+		{
+			name: "zero topology max skew",
+			scheduling: `"topologySpreadConstraints":[{
+				"maxSkew":0,"topologyKey":"zone","whenUnsatisfiable":"DoNotSchedule"
+			}]`,
+		},
+		{
+			name: "zero topology min domains",
+			scheduling: `"topologySpreadConstraints":[{
+				"maxSkew":1,"minDomains":0,"topologyKey":"zone",
+				"whenUnsatisfiable":"DoNotSchedule"
+			}]`,
+		},
+		{
+			name: "node affinity weight above maximum",
+			scheduling: `"affinity":{"nodeAffinity":{
+				"preferredDuringSchedulingIgnoredDuringExecution":[{
+					"weight":101,"preference":{"matchExpressions":[]}
+				}]
+			}}`,
+		},
+		{
+			name: "pod affinity weight below minimum",
+			scheduling: `"affinity":{"podAffinity":{
+				"preferredDuringSchedulingIgnoredDuringExecution":[{
+					"weight":0,"podAffinityTerm":{"topologyKey":"zone"}
+				}]
+			}}`,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			input := fmt.Sprintf(`{"kind":"DeploymentList","items":[{
+				"kind":"Deployment","metadata":{"name":"api","namespace":"platform"},
+				"spec":{"template":{"spec":{"containers":[],%s}}}
+			}]}`, test.scheduling)
+			if _, err := NormalizeListJSON(
+				DeploymentKind,
+				[]byte(input),
+				redact.New(),
+			); err == nil {
+				t.Fatal("invalid scheduling number was accepted")
 			}
 		})
 	}
@@ -536,6 +624,24 @@ func TestNormalizeListJSONValidatesElementsBeyondOutputLimits(t *testing.T) {
 		podSpec["nodeSelector"] = nodeSelector
 		if err := normalize(t, []map[string]any{item}); err == nil {
 			t.Fatal("truncated map entries bypassed sanitized-key collision validation")
+		}
+	})
+
+	t.Run("topology spread after limit has invalid max skew", func(t *testing.T) {
+		item := validItem("api")
+		constraints := make([]any, maxTopologySpread+1)
+		for index := range constraints {
+			constraints[index] = map[string]any{
+				"maxSkew":           1,
+				"topologyKey":       "zone",
+				"whenUnsatisfiable": "DoNotSchedule",
+			}
+		}
+		constraints[maxTopologySpread].(map[string]any)["maxSkew"] = 0
+		podSpec := item["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+		podSpec["topologySpreadConstraints"] = constraints
+		if err := normalize(t, []map[string]any{item}); err == nil {
+			t.Fatal("truncated topology spread bypassed numeric validation")
 		}
 	})
 

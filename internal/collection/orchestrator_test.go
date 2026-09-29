@@ -643,7 +643,9 @@ func TestExecuteDerivesWorkloadConfigForExplicitAndAllNamespaceScopes(t *testing
 				received.Timeout != 17*time.Second ||
 				received.MaxResponseBytes != workload.DefaultMaxResponseBytes ||
 				received.MaxSourceBytes != workload.DefaultMaxSourceBytes ||
-				received.MaxTotalBytes != workload.DefaultMaxTotalBytes {
+				received.MaxTotalBytes != workload.DefaultMaxTotalBytes ||
+				received.MaxNamespaces != workload.DefaultMaxNamespaces ||
+				received.MaxDuration != workload.DefaultMaxCollectionDuration {
 				t.Fatalf("unexpected workload config: %+v", received)
 			}
 			if _, exists := archive.files[workload.WorkloadsArtifactPath]; !exists {

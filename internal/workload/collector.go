@@ -23,10 +23,16 @@ const (
 	DefaultMaxSourceBytes int64 = 4 << 20
 	// DefaultMaxTotalBytes bounds all normalized workload-context JSONL artifacts.
 	DefaultMaxTotalBytes int64 = 16 << 20
+	// DefaultMaxNamespaces bounds namespace source matrices requested per bundle.
+	DefaultMaxNamespaces = 100
+	// DefaultMaxCollectionDuration bounds all workload API requests together.
+	DefaultMaxCollectionDuration = 5 * time.Minute
 
-	MaximumResponseBytes int64 = 64 << 20
-	MaximumSourceBytes   int64 = 64 << 20
-	MaximumTotalBytes    int64 = 256 << 20
+	MaximumResponseBytes      int64 = 64 << 20
+	MaximumSourceBytes        int64 = 64 << 20
+	MaximumTotalBytes         int64 = 256 << 20
+	MaximumNamespaces               = 1000
+	MaximumCollectionDuration       = 30 * time.Minute
 
 	apiRecordLimit = 101
 )
@@ -56,6 +62,8 @@ type Config struct {
 	MaxResponseBytes int64
 	MaxSourceBytes   int64
 	MaxTotalBytes    int64
+	MaxNamespaces    int
+	MaxDuration      time.Duration
 }
 
 // CoverageState describes one namespace/resource API collection result.
@@ -79,6 +87,8 @@ const (
 	reasonTotalBudget           = "total_artifact_budget_exceeded"
 	reasonTotalBudgetExhausted  = "total_artifact_budget_exhausted"
 	reasonArtifactStaging       = "artifact_staging_failed"
+	reasonNamespaceLimit        = "namespace_request_limit_exceeded"
+	reasonCollectionDeadline    = "collection_deadline_exceeded"
 )
 
 // Coverage records deterministic retained counts and truncation for one API response.
@@ -111,6 +121,8 @@ type Report struct {
 	MaxResponseBytes int64      `json:"max_response_bytes"`
 	MaxSourceBytes   int64      `json:"max_source_bytes"`
 	MaxTotalBytes    int64      `json:"max_total_bytes"`
+	MaxNamespaces    int        `json:"max_namespaces"`
+	MaxDuration      string     `json:"max_duration"`
 	RetainedRecords  int        `json:"retained_records"`
 	RetainedBytes    int64      `json:"retained_bytes"`
 	Truncated        bool       `json:"truncated"`
@@ -143,6 +155,8 @@ func Collect(
 	if err != nil {
 		return report, err
 	}
+	collectionCtx, cancel := context.WithTimeout(ctx, config.MaxDuration)
+	defer cancel()
 
 	specs := sourceSpecs()
 	sourceRemaining := make(map[string]int64, len(specs))
@@ -152,7 +166,7 @@ func Collect(
 	totalRemaining := config.MaxTotalBytes
 	recordsByArtifact := make(map[string][]normalizedRecord, 4)
 
-	for _, namespace := range namespaces {
+	for namespaceIndex, namespace := range namespaces {
 		for _, spec := range specs {
 			if err := ctx.Err(); err != nil {
 				return report, err
@@ -161,6 +175,22 @@ func Collect(
 				Namespace:    namespace,
 				Source:       spec.name,
 				ArtifactPath: spec.artifactPath,
+			}
+			if namespaceIndex >= config.MaxNamespaces {
+				coverage.State = CoverageSkipped
+				coverage.Truncated = true
+				coverage.Reason = reasonNamespaceLimit
+				report.Coverage = append(report.Coverage, coverage)
+				report.Truncated = true
+				continue
+			}
+			if collectionCtx.Err() != nil {
+				coverage.State = CoverageSkipped
+				coverage.Truncated = true
+				coverage.Reason = reasonCollectionDeadline
+				report.Coverage = append(report.Coverage, coverage)
+				report.Truncated = true
+				continue
 			}
 			if sourceRemaining[spec.name] == 0 {
 				coverage.State = CoverageSkipped
@@ -179,10 +209,23 @@ func Collect(
 				continue
 			}
 
-			result, runErr := runAPIRequest(ctx, config, runner, spec.apiPath(namespace))
+			result, runErr := runAPIRequest(
+				collectionCtx,
+				config,
+				runner,
+				spec.apiPath(namespace),
+			)
 			coverage.ResponseBytes = int64(len(result.Stdout))
 			if err := ctx.Err(); err != nil {
 				return report, err
+			}
+			if collectionCtx.Err() != nil {
+				coverage.State = CoverageFailed
+				coverage.Truncated = true
+				coverage.Reason = reasonCollectionDeadline
+				report.Coverage = append(report.Coverage, coverage)
+				report.Truncated = true
+				continue
 			}
 			if result.Truncated {
 				coverage.State = CoverageFailed
@@ -277,6 +320,8 @@ func validateCollection(
 		MaxResponseBytes: config.MaxResponseBytes,
 		MaxSourceBytes:   config.MaxSourceBytes,
 		MaxTotalBytes:    config.MaxTotalBytes,
+		MaxNamespaces:    config.MaxNamespaces,
+		MaxDuration:      config.MaxDuration.String(),
 	}
 	switch {
 	case ctx == nil:
@@ -308,6 +353,16 @@ func validateCollection(
 		)
 	case config.MaxSourceBytes > config.MaxTotalBytes:
 		return report, nil, errors.New("max source bytes must not exceed max total bytes")
+	case config.MaxNamespaces <= 0 || config.MaxNamespaces > MaximumNamespaces:
+		return report, nil, fmt.Errorf(
+			"max namespaces must be between 1 and %d",
+			MaximumNamespaces,
+		)
+	case config.MaxDuration <= 0 || config.MaxDuration > MaximumCollectionDuration:
+		return report, nil, fmt.Errorf(
+			"max collection duration must be between 1ns and %s",
+			MaximumCollectionDuration,
+		)
 	}
 
 	namespaces, err := normalizedNamespaces(config.Namespaces)

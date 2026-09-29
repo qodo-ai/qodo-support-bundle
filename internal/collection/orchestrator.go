@@ -166,6 +166,8 @@ func Execute(
 			MaxResponseBytes: workload.DefaultMaxResponseBytes,
 			MaxSourceBytes:   workload.DefaultMaxSourceBytes,
 			MaxTotalBytes:    workload.DefaultMaxTotalBytes,
+			MaxNamespaces:    workload.DefaultMaxNamespaces,
+			MaxDuration:      workload.DefaultMaxCollectionDuration,
 		},
 		runner,
 		archive,
