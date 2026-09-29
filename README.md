@@ -238,6 +238,7 @@ and the four normalized JSONL artifacts:
 
 ```bash
 (
+  set -e
   cd "$TEST_DIR/extracted"
   shasum -a 256 -c checksums.sha256
   jq -e '.schema_version == "4"' manifest.json
@@ -254,7 +255,7 @@ and the four normalized JSONL artifacts:
     kubernetes/storage.jsonl
   do
     if [ -f "$artifact" ]; then
-      jq -e -s 'all(.[]; type == "object")' "$artifact"
+      jq -e -s 'all(.[]; type == "object")' "$artifact" || exit 1
     fi
   done
 )
