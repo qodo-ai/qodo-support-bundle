@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/qodo-ai/qodo-support-bundle/internal/collection"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
@@ -494,7 +495,7 @@ func TestParseNamespacesUsesExplicitDeploymentScope(t *testing.T) {
 func TestConnectivityFailureIsSummarizedWithoutChangingStatus(t *testing.T) {
 	t.Parallel()
 	status := 503
-	summary := buildSummary(
+	summary := collection.BuildSummary(
 		time.Date(2026, 9, 27, 8, 0, 0, 0, time.UTC),
 		collectionStatusComplete,
 		kubernetes.Report{},
