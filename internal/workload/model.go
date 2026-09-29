@@ -3,6 +3,8 @@
 package workload
 
 import (
+	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
@@ -10,11 +12,22 @@ import (
 
 // Resource identifies one Kubernetes object without retaining its raw metadata.
 type Resource struct {
-	Kind              string            `json:"kind"`
-	Namespace         string            `json:"namespace"`
-	Name              string            `json:"name"`
-	CreationTimestamp *time.Time        `json:"creation_timestamp,omitempty"`
-	Labels            map[string]string `json:"labels,omitempty"`
+	Kind              string          `json:"kind"`
+	Namespace         string          `json:"namespace"`
+	Name              string          `json:"name"`
+	CreationTimestamp *time.Time      `json:"creation_timestamp,omitempty"`
+	Labels            *IdentityLabels `json:"labels,omitempty"`
+}
+
+// IdentityLabels contains only allowlisted, redacted workload identity labels.
+// Its values are private so raw Kubernetes labels cannot be assigned directly.
+type IdentityLabels struct {
+	values map[string]string
+}
+
+// MarshalJSON emits the normalized label map.
+func (labels IdentityLabels) MarshalJSON() ([]byte, error) {
+	return json.Marshal(labels.values)
 }
 
 // Workload records approved controller, pod-template, and rollout fields.
@@ -226,18 +239,24 @@ type Storage struct {
 	VolumeMode        string   `json:"volume_mode,omitempty"`
 }
 
-// IdentityLabels returns a fresh map containing only approved identity labels.
-func IdentityLabels(
+// NewIdentityLabels returns approved, redacted identity labels.
+func NewIdentityLabels(
 	labels map[string]string,
 	redactor *redact.Redactor,
-) map[string]string {
+) (*IdentityLabels, error) {
+	if redactor == nil {
+		return nil, errors.New("redactor is required")
+	}
 	selected := make(map[string]string)
 	for key, value := range labels {
 		if identityLabelAllowed(key) {
 			selected[key] = redactor.Text(value)
 		}
 	}
-	return selected
+	if len(selected) == 0 {
+		return nil, nil
+	}
+	return &IdentityLabels{values: selected}, nil
 }
 
 func identityLabelAllowed(key string) bool {

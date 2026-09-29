@@ -15,6 +15,13 @@ func TestNormalizedModelsExcludeForbiddenFields(t *testing.T) {
 	replicas := int32(2)
 	createdAt := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
 	storageClass := "standard"
+	labels, err := NewIdentityLabels(
+		map[string]string{"app.kubernetes.io/name": "platform"},
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	records := []any{
 		Workload{
 			Resource: Resource{
@@ -22,7 +29,7 @@ func TestNormalizedModelsExcludeForbiddenFields(t *testing.T) {
 				Namespace:         "qodo",
 				Name:              "platform",
 				CreationTimestamp: &createdAt,
-				Labels:            map[string]string{"app.kubernetes.io/name": "platform"},
+				Labels:            labels,
 			},
 			ServiceAccountName: "platform",
 			Replicas:           Replicas{Desired: &replicas},
@@ -226,16 +233,20 @@ func TestNormalizedJSONFieldAllowlists(t *testing.T) {
 		},
 	}
 
-	for model, allowed := range expected {
-		model := model
-		allowed := allowed
-		t.Run(model.Name(), func(t *testing.T) {
-			t.Parallel()
-			actual := exportedJSONFields(model)
-			if !reflect.DeepEqual(actual, allowed) {
-				t.Fatalf("JSON fields changed: got=%v want=%v", actual, allowed)
-			}
-		})
+	discovered := make(map[reflect.Type]bool)
+	for _, root := range []reflect.Type{
+		reflect.TypeOf(Workload{}),
+		reflect.TypeOf(Service{}),
+		reflect.TypeOf(EndpointSlice{}),
+		reflect.TypeOf(Autoscaler{}),
+		reflect.TypeOf(Storage{}),
+	} {
+		validateJSONContract(t, root, expected, discovered)
+	}
+	for model := range expected {
+		if !discovered[model] {
+			t.Fatalf("allowlisted model %s is unreachable from artifact roots", model)
+		}
 	}
 }
 
@@ -313,35 +324,44 @@ func TestIdentityLabelsAllowlistAndRedaction(t *testing.T) {
 		"token":                       secret,
 	}
 
-	first := IdentityLabels(input, redact.New())
-	second := IdentityLabels(input, redact.New())
+	first, err := NewIdentityLabels(input, redact.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewIdentityLabels(input, redact.New())
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	if first["app.kubernetes.io/name"] != "platform" ||
-		first["app.kubernetes.io/component"] != "api" {
+	if first.values["app.kubernetes.io/name"] != "platform" ||
+		first.values["app.kubernetes.io/component"] != "api" {
 		t.Fatalf("approved labels were not retained: %+v", first)
 	}
-	if strings.Contains(first["app"], secret) ||
-		!strings.Contains(first["app"], redact.Replacement) {
+	if strings.Contains(first.values["app"], secret) ||
+		!strings.Contains(first.values["app"], redact.Replacement) {
 		t.Fatalf("approved label value was not redacted: %+v", first)
 	}
-	if _, exists := first["customer.internal/id"]; exists {
+	if _, exists := first.values["customer.internal/id"]; exists {
 		t.Fatalf("unapproved customer label was retained: %+v", first)
 	}
-	if _, exists := first["token"]; exists {
+	if _, exists := first.values["token"]; exists {
 		t.Fatalf("unapproved sensitive label was retained: %+v", first)
 	}
 
-	first["app.kubernetes.io/name"] = "mutated"
-	if second["app.kubernetes.io/name"] != "platform" {
+	first.values["app.kubernetes.io/name"] = "mutated"
+	if second.values["app.kubernetes.io/name"] != "platform" {
 		t.Fatalf("label result maps share mutable state: %+v", second)
 	}
 }
 
-func TestIdentityLabelsReturnsNonNilEmptyMap(t *testing.T) {
+func TestIdentityLabelsOmitsEmptySetAndRequiresRedactor(t *testing.T) {
 	t.Parallel()
-	labels := IdentityLabels(nil, redact.New())
-	if labels == nil || len(labels) != 0 {
+	labels, err := NewIdentityLabels(nil, redact.New())
+	if err != nil || labels != nil {
 		t.Fatalf("unexpected empty label set: %#v", labels)
+	}
+	if _, err := NewIdentityLabels(nil, nil); err == nil {
+		t.Fatal("expected missing redactor error")
 	}
 }
 
@@ -358,4 +378,37 @@ func exportedJSONFields(model reflect.Type) []string {
 		fields = append(fields, name)
 	}
 	return fields
+}
+
+func validateJSONContract(
+	t *testing.T,
+	model reflect.Type,
+	expected map[reflect.Type][]string,
+	discovered map[reflect.Type]bool,
+) {
+	t.Helper()
+	for model.Kind() == reflect.Pointer ||
+		model.Kind() == reflect.Slice ||
+		model.Kind() == reflect.Array ||
+		model.Kind() == reflect.Map {
+		model = model.Elem()
+	}
+	if model.Kind() != reflect.Struct ||
+		model == reflect.TypeOf(time.Time{}) ||
+		model == reflect.TypeOf(IdentityLabels{}) ||
+		discovered[model] {
+		return
+	}
+	allowed, exists := expected[model]
+	if !exists {
+		t.Fatalf("nested JSON model %s has no explicit field allowlist", model)
+	}
+	actual := exportedJSONFields(model)
+	if !reflect.DeepEqual(actual, allowed) {
+		t.Fatalf("%s JSON fields changed: got=%v want=%v", model, actual, allowed)
+	}
+	discovered[model] = true
+	for index := 0; index < model.NumField(); index++ {
+		validateJSONContract(t, model.Field(index).Type, expected, discovered)
+	}
 }
