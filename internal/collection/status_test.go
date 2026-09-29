@@ -1,0 +1,184 @@
+package collection
+
+import (
+	"errors"
+	"reflect"
+	"testing"
+
+	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
+)
+
+func TestKubernetesCoverage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		report kubernetes.Report
+		err    error
+		want   Coverage
+	}{
+		{
+			name: "clean collection is complete",
+			want: Coverage{State: CoverageComplete},
+		},
+		{
+			name: "reported issue is partial",
+			report: kubernetes.Report{Issues: []kubernetes.Issue{{
+				Operation: "list pods",
+				Message:   "forbidden",
+			}}},
+			want: Coverage{State: CoveragePartial, Reason: "issues_reported"},
+		},
+		{
+			name: "collection error is partial with stable reason",
+			err:  errors.New("raw sensitive error details"),
+			want: Coverage{State: CoveragePartial, Reason: "collection_error"},
+		},
+		{
+			name: "collection error takes precedence over issues",
+			report: kubernetes.Report{Issues: []kubernetes.Issue{{
+				Operation: "list pods",
+				Message:   "forbidden",
+			}}},
+			err:  errors.New("raw sensitive error details"),
+			want: Coverage{State: CoveragePartial, Reason: "collection_error"},
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := KubernetesCoverage(test.report, test.err); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("KubernetesCoverage() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestZitadelCoverage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		enabled bool
+		outcome zitadel.Outcome
+		want    Coverage
+	}{
+		{
+			name: "disabled is not requested",
+			outcome: zitadel.Outcome{
+				Reason: zitadel.ReasonTimeout,
+			},
+			want: Coverage{State: CoverageNotRequested},
+		},
+		{
+			name:    "report with failed diagnostic check is complete",
+			enabled: true,
+			outcome: zitadel.Outcome{Report: &zitadel.Report{
+				SchemaVersion: 1,
+				Checks: []zitadel.Check{{
+					Name:   "discovery",
+					Status: zitadel.StatusFailed,
+					Reason: zitadel.ReasonTimeout,
+				}},
+			}},
+			want: Coverage{State: CoverageComplete},
+		},
+		{
+			name:    "bounded collection reason is partial",
+			enabled: true,
+			outcome: zitadel.Outcome{
+				Reason: zitadel.ReasonExecTimeout,
+			},
+			want: Coverage{State: CoveragePartial, Reason: zitadel.ReasonExecTimeout},
+		},
+		{
+			name:    "missing report is unavailable",
+			enabled: true,
+			want:    Coverage{State: CoverageUnavailable, Reason: "missing_report"},
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ZitadelCoverage(test.enabled, test.outcome); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("ZitadelCoverage() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestDerivedCoverageLeavesReservedSourcesNotRequested(t *testing.T) {
+	t.Parallel()
+
+	coverage := InitializeCoverage([]Source{SourceKubernetes, SourceZitadel})
+	coverage[SourceKubernetes] = KubernetesCoverage(kubernetes.Report{}, nil)
+	coverage[SourceZitadel] = ZitadelCoverage(true, zitadel.Outcome{
+		Report: &zitadel.Report{SchemaVersion: 1},
+	})
+
+	for _, source := range []Source{SourceWorkload, SourcePrometheus, SourcePhoenix} {
+		if got := coverage[source].State; got != CoverageNotRequested {
+			t.Errorf("%s state = %q, want %q", source, got, CoverageNotRequested)
+		}
+	}
+}
+
+func TestAggregateStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		coverage map[Source]Coverage
+		want     string
+	}{
+		{
+			name: "complete and not requested aggregate complete",
+			coverage: map[Source]Coverage{
+				SourceKubernetes: {State: CoverageComplete},
+				SourceZitadel:    {State: CoverageNotRequested},
+			},
+			want: "complete",
+		},
+		{
+			name: "partial aggregates partial",
+			coverage: map[Source]Coverage{
+				SourceKubernetes: {State: CoveragePartial},
+			},
+			want: "partial",
+		},
+		{
+			name: "unavailable aggregates partial",
+			coverage: map[Source]Coverage{
+				SourceKubernetes: {State: CoverageUnavailable},
+			},
+			want: "partial",
+		},
+		{
+			name: "invalid state aggregates partial",
+			coverage: map[Source]Coverage{
+				SourceKubernetes: {State: CoverageState("invalid")},
+			},
+			want: "partial",
+		},
+		{
+			name:     "empty coverage is vacuously complete",
+			coverage: map[Source]Coverage{},
+			want:     "complete",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := AggregateStatus(test.coverage); got != test.want {
+				t.Fatalf("AggregateStatus() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
