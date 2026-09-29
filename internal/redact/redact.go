@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"regexp"
 	"sort"
@@ -563,12 +564,8 @@ func (redactor *Redactor) completeAndSanitizeJSONFragment(
 	if !ok {
 		return "", false
 	}
-	var value any
-	if err := json.Unmarshal([]byte(completed), &value); err != nil {
-		return "", false
-	}
-	sanitized, err := json.Marshal(redactor.Value("", value))
-	if err != nil || len(sanitized) < 2 {
+	sanitized, ok := redactor.sanitizeJSONPreservingOrder(completed)
+	if !ok || len(sanitized) < 2 {
 		return "", false
 	}
 	start := 0
@@ -582,7 +579,154 @@ func (redactor *Redactor) completeAndSanitizeJSONFragment(
 	if end < start {
 		return "", false
 	}
-	return string(sanitized[start:end]), true
+	return sanitized[start:end], true
+}
+
+func (redactor *Redactor) sanitizeJSONPreservingOrder(raw string) (string, bool) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var output strings.Builder
+	if !redactor.writeSanitizedJSONValue(decoder, &output, "", 0) {
+		return "", false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return "", false
+	}
+	return output.String(), true
+}
+
+func (redactor *Redactor) writeSanitizedJSONValue(
+	decoder *json.Decoder,
+	output *strings.Builder,
+	key string,
+	depth int,
+) bool {
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	delimiter, structured := token.(json.Delim)
+	if !structured {
+		value := token
+		if text, ok := token.(string); ok {
+			if isURLKey(key) {
+				value = redactor.URL(text)
+			} else {
+				value = redactor.Text(text)
+			}
+		}
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			return false
+		}
+		output.Write(encoded)
+		return true
+	}
+	if depth >= maxJSONSkipperDepth {
+		return false
+	}
+
+	switch delimiter {
+	case '{':
+		output.WriteByte('{')
+		first := true
+		for decoder.More() {
+			keyToken, keyErr := decoder.Token()
+			rawKey, keyOK := keyToken.(string)
+			if keyErr != nil || !keyOK {
+				return false
+			}
+			var value strings.Builder
+			if IsSensitiveKey(rawKey) {
+				if !skipJSONDecoderValue(decoder, depth+1) {
+					return false
+				}
+				encoded, _ := json.Marshal(Replacement)
+				value.Write(encoded)
+			} else if !redactor.writeSanitizedJSONValue(decoder, &value, rawKey, depth+1) {
+				return false
+			}
+			sanitizedKey := redactor.Text(rawKey)
+			if sanitizedKey == "" {
+				continue
+			}
+			encodedKey, marshalErr := json.Marshal(sanitizedKey)
+			if marshalErr != nil {
+				return false
+			}
+			if !first {
+				output.WriteByte(',')
+			}
+			first = false
+			output.Write(encodedKey)
+			output.WriteByte(':')
+			output.WriteString(value.String())
+		}
+		closing, closeErr := decoder.Token()
+		if closeErr != nil || closing != json.Delim('}') {
+			return false
+		}
+		output.WriteByte('}')
+		return true
+	case '[':
+		output.WriteByte('[')
+		first := true
+		for decoder.More() {
+			if !first {
+				output.WriteByte(',')
+			}
+			first = false
+			if !redactor.writeSanitizedJSONValue(decoder, output, "", depth+1) {
+				return false
+			}
+		}
+		closing, closeErr := decoder.Token()
+		if closeErr != nil || closing != json.Delim(']') {
+			return false
+		}
+		output.WriteByte(']')
+		return true
+	default:
+		return false
+	}
+}
+
+func skipJSONDecoderValue(decoder *json.Decoder, depth int) bool {
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	delimiter, structured := token.(json.Delim)
+	if !structured {
+		return true
+	}
+	if depth >= maxJSONSkipperDepth {
+		return false
+	}
+	switch delimiter {
+	case '{':
+		for decoder.More() {
+			if _, keyErr := decoder.Token(); keyErr != nil {
+				return false
+			}
+			if !skipJSONDecoderValue(decoder, depth+1) {
+				return false
+			}
+		}
+		closing, closeErr := decoder.Token()
+		return closeErr == nil && closing == json.Delim('}')
+	case '[':
+		for decoder.More() {
+			if !skipJSONDecoderValue(decoder, depth+1) {
+				return false
+			}
+		}
+		closing, closeErr := decoder.Token()
+		return closeErr == nil && closing == json.Delim(']')
+	default:
+		return false
+	}
 }
 
 func completeJSONFragment(fragment string, wrapObject bool) (string, int, bool) {

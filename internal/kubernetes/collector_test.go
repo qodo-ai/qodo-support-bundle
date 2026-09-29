@@ -1667,6 +1667,80 @@ func TestCollectStructuredFragmentRegressions(t *testing.T) {
 	}
 }
 
+func TestSanitizeLogPreservesIncompleteFrontierOrder(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"object": "{\n" +
+			"  \"z\":\"safe-value\",\"a\":{\n" +
+			"    \"url\":\"https://example.test/#opaque-value\",\n" +
+			"    \"password\":\"secret\"\n" +
+			"  },\n" +
+			"  \"request_id\":\"req-object\"\n" +
+			"}\n",
+		"nested array": "{\n" +
+			"  \"z\":\"safe-value\",\"a\":[{\n" +
+			"    \"url\":\"https://example.test/#opaque-value\",\n" +
+			"    \"password\":\"secret\"\n" +
+			"  }],\n" +
+			"  \"request_id\":\"req-array\"\n" +
+			"}\n",
+	}
+	for name, input := range tests {
+		name, input := name, input
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output := string(mustSanitizeLog(t, []byte(input)))
+			for _, forbidden := range []string{"opaque-value", "secret"} {
+				if strings.Contains(output, forbidden) {
+					t.Fatalf("incomplete frontier leaked %q: %s", forbidden, output)
+				}
+			}
+			for _, expected := range []string{"safe-value", "request_id", "req-" + strings.TrimPrefix(name, "nested ")} {
+				if !strings.Contains(output, expected) {
+					t.Fatalf("incomplete frontier lost %q: %s", expected, output)
+				}
+			}
+		})
+	}
+}
+
+func TestCollectPreservesIncompleteFrontierOrder(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"object": "{\n" +
+			"  \"z\":\"safe-value\",\"a\":{\n" +
+			"    \"url\":\"https://example.test/#opaque-value\",\n" +
+			"    \"password\":\"secret\"\n" +
+			"  },\n" +
+			"  \"request_id\":\"req-object\"\n" +
+			"}\n",
+		"nested array": "{\n" +
+			"  \"z\":\"safe-value\",\"a\":[{\n" +
+			"    \"url\":\"https://example.test/#opaque-value\",\n" +
+			"    \"password\":\"secret\"\n" +
+			"  }],\n" +
+			"  \"request_id\":\"req-array\"\n" +
+			"}\n",
+	}
+	for name, input := range tests {
+		name, input := name, input
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output := collectCurrentLog(t, input)
+			for _, forbidden := range []string{"opaque-value", "secret"} {
+				if strings.Contains(output, forbidden) {
+					t.Fatalf("collector incomplete frontier leaked %q: %s", forbidden, output)
+				}
+			}
+			for _, expected := range []string{"safe-value", "request_id", "req-" + strings.TrimPrefix(name, "nested ")} {
+				if !strings.Contains(output, expected) {
+					t.Fatalf("collector incomplete frontier lost %q: %s", expected, output)
+				}
+			}
+		})
+	}
+}
+
 func TestSanitizeLogRedactsSplitURLValue(t *testing.T) {
 	t.Parallel()
 	input := []byte("{\n  \"url\":\n  \"https://example.test/#opaque-value\",\n  \"request_id\": \"req-123\"\n}\n")

@@ -367,6 +367,46 @@ func TestJSONObjectFragmentHandlesNestedIncompleteStructures(t *testing.T) {
 	}
 }
 
+func TestJSONObjectFragmentPreservesIncompleteFrontierOrder(t *testing.T) {
+	t.Parallel()
+	redactor := New()
+	tests := map[string]struct {
+		input string
+		tail  string
+	}{
+		"object": {
+			input: `"z":"safe-value","url":"https://example.test/#opaque-value","password":"secret","a":{`,
+			tail:  `"a":{`,
+		},
+		"nested object": {
+			input: `"z":"safe-value","a":{"nested":{`,
+			tail:  `"a":{"nested":{`,
+		},
+		"nested array": {
+			input: `"z":"safe-value","a":[{`,
+			tail:  `"a":[{`,
+		},
+	}
+	for name, test := range tests {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			output, ok := redactor.JSONObjectFragment(test.input)
+			if !ok {
+				t.Fatalf("valid incomplete frontier was rejected: %q", test.input)
+			}
+			for _, forbidden := range []string{"opaque-value", "secret"} {
+				if strings.Contains(output, forbidden) {
+					t.Fatalf("incomplete frontier leaked %q: %s", forbidden, output)
+				}
+			}
+			if !strings.Contains(output, "safe-value") || !strings.HasSuffix(output, test.tail) {
+				t.Fatalf("incomplete frontier was reordered or truncated: %s", output)
+			}
+		})
+	}
+}
+
 func TestJSONObjectFragmentRejectsMalformedContinuation(t *testing.T) {
 	t.Parallel()
 	output, ok := New().JSONObjectFragment(
