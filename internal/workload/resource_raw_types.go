@@ -42,10 +42,10 @@ type rawEndpointSliceList struct {
 }
 
 type rawEndpointSlice struct {
-	Kind        string                         `json:"kind"`
-	Metadata    *rawMetadata                   `json:"metadata"`
-	AddressType rawRequiredString              `json:"addressType"`
-	Endpoints   rawRequiredSlice[*rawEndpoint] `json:"endpoints"`
+	Kind        string               `json:"kind"`
+	Metadata    *rawMetadata         `json:"metadata"`
+	AddressType rawRequiredString    `json:"addressType"`
+	Endpoints   rawRequiredEndpoints `json:"endpoints"`
 }
 
 type rawEndpoint struct {
@@ -164,11 +164,65 @@ type rawStorageQuantity struct {
 }
 
 func (quantity *rawStorageQuantity) UnmarshalJSON(data []byte) error {
-	var decoded map[string]string
+	if bytes.Equal(data, []byte("null")) {
+		return errors.New("storage quantity must not be null")
+	}
+	var decoded map[string]json.RawMessage
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	quantity.storage = decoded["storage"]
+	rawStorage, exists := decoded["storage"]
+	if !exists {
+		quantity.storage = ""
+		return nil
+	}
+	if bytes.Equal(rawStorage, []byte("null")) {
+		return errors.New("storage quantity value must not be null")
+	}
+	var storage string
+	if err := json.Unmarshal(rawStorage, &storage); err != nil {
+		return fmt.Errorf("decode storage quantity: %w", err)
+	}
+	if storage == "" {
+		return errors.New("storage quantity value must not be empty")
+	}
+	quantity.storage = storage
+	return nil
+}
+
+type rawRequiredEndpoints struct {
+	values []*rawEndpoint
+	set    bool
+}
+
+func (endpoints *rawRequiredEndpoints) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(data, []byte("null")) {
+		return errors.New("required endpoint list must not be null")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != json.Delim('[') {
+		return errors.New("endpoints must be an array")
+	}
+	values := make([]*rawEndpoint, 0)
+	for decoder.More() {
+		if len(values) >= maxSliceEndpoints {
+			return fmt.Errorf("endpoint count exceeds %d", maxSliceEndpoints)
+		}
+		var endpoint *rawEndpoint
+		if err := decoder.Decode(&endpoint); err != nil {
+			return err
+		}
+		values = append(values, endpoint)
+	}
+	if _, err := decoder.Token(); err != nil {
+		return err
+	}
+	endpoints.values = values
+	endpoints.set = true
 	return nil
 }
 
@@ -221,6 +275,9 @@ func validateEndpointAddresses(decoder *json.Decoder) (int, error) {
 	}
 	count := 0
 	for decoder.More() {
+		if count >= maxEndpointAddrs {
+			return 0, fmt.Errorf("endpoint address count exceeds %d", maxEndpointAddrs)
+		}
 		var address string
 		if err := decoder.Decode(&address); err != nil {
 			return 0, fmt.Errorf("decode endpoint address %d: %w", count, err)

@@ -13,6 +13,8 @@ const (
 	maxStorageClaims  = 100
 	maxServicePorts   = 32
 	maxAccessModes    = 16
+	maxSliceEndpoints = 1000
+	maxEndpointAddrs  = 100
 )
 
 // ServiceNormalizationResult contains bounded normalized Services.

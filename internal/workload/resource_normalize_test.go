@@ -900,7 +900,7 @@ func TestNormalizeEndpointSliceRequiredFields(t *testing.T) {
 		{
 			name:      "endpoints null",
 			fields:    validMetadata + `,"addressType":"IPv4","endpoints":null`,
-			wantError: "required list must not be null",
+			wantError: "required endpoint list must not be null",
 		},
 		{
 			name:      "endpoint addresses missing",
@@ -1025,6 +1025,75 @@ func TestNormalizeHorizontalPodAutoscalerReplicaValidation(t *testing.T) {
 			_, err := NormalizeHorizontalPodAutoscalerListJSON([]byte(input), redact.New())
 			if err == nil || !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("expected error containing %q, got %v", test.wantError, err)
+			}
+		})
+	}
+}
+
+func TestNormalizeEndpointSliceRejectsOversizedNestedCollections(t *testing.T) {
+	t.Parallel()
+	t.Run("endpoints", func(t *testing.T) {
+		endpoints := make([]any, maxSliceEndpoints+1)
+		for index := range endpoints {
+			endpoints[index] = map[string]any{"addresses": []string{"10.0.0.1"}}
+		}
+		data, err := json.Marshal(map[string]any{
+			"kind": "EndpointSliceList",
+			"items": []any{map[string]any{
+				"kind":        "EndpointSlice",
+				"metadata":    map[string]any{"name": "api-a", "namespace": "platform"},
+				"addressType": "IPv4",
+				"endpoints":   endpoints,
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = NormalizeEndpointSliceListJSON(data, redact.New())
+		if err == nil || !strings.Contains(err.Error(), "endpoint count exceeds") {
+			t.Fatalf("expected endpoint count error, got %v", err)
+		}
+	})
+	t.Run("addresses", func(t *testing.T) {
+		addresses := make([]string, maxEndpointAddrs+1)
+		for index := range addresses {
+			addresses[index] = fmt.Sprintf("10.0.0.%d", index+1)
+		}
+		data, err := json.Marshal(map[string]any{
+			"kind": "EndpointSliceList",
+			"items": []any{map[string]any{
+				"kind":        "EndpointSlice",
+				"metadata":    map[string]any{"name": "api-a", "namespace": "platform"},
+				"addressType": "IPv4",
+				"endpoints":   []any{map[string]any{"addresses": addresses}},
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = NormalizeEndpointSliceListJSON(data, redact.New())
+		if err == nil || !strings.Contains(err.Error(), "endpoint address count exceeds") {
+			t.Fatalf("expected endpoint address count error, got %v", err)
+		}
+	})
+}
+
+func TestNormalizePersistentVolumeClaimRejectsNullStorageQuantities(t *testing.T) {
+	t.Parallel()
+	for name, fields := range map[string]string{
+		"request object":  `"spec":{"resources":{"requests":null}}`,
+		"request value":   `"spec":{"resources":{"requests":{"storage":null}}}`,
+		"capacity object": `"spec":{},"status":{"capacity":null}`,
+		"capacity value":  `"spec":{},"status":{"capacity":{"storage":null}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := `{"kind":"PersistentVolumeClaimList","items":[{` +
+				`"kind":"PersistentVolumeClaim",` +
+				`"metadata":{"name":"data","namespace":"platform"},` +
+				fields + `}]}`
+			_, err := NormalizePersistentVolumeClaimListJSON([]byte(input), redact.New())
+			if err == nil || !strings.Contains(err.Error(), "must not be null") {
+				t.Fatalf("expected null storage quantity error, got %v", err)
 			}
 		})
 	}
