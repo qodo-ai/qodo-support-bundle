@@ -37,7 +37,7 @@ type Event struct {
 // Request contains validated inputs for one collection.
 type Request struct {
 	CollectorVersion string
-	GeneratedAt      time.Time
+	CurrentTime      func() time.Time
 	Activity         string
 	Problem          string
 	Kubernetes       kubernetes.Config
@@ -108,6 +108,7 @@ func Execute(
 		archive,
 		redactor,
 		collectors,
+		request.CurrentTime,
 		request.Zitadel != nil,
 	); err != nil {
 		return Result{}, err
@@ -230,13 +231,14 @@ func Execute(
 		}
 	}
 
+	generatedAt := request.CurrentTime().UTC()
 	customerContext := BuildCustomerContext(
 		request.Activity,
 		request.Problem,
 		redactor,
 	)
 	summary := BuildSummary(
-		request.GeneratedAt,
+		generatedAt,
 		result.Status,
 		kubernetesReport,
 		customerContext,
@@ -267,7 +269,7 @@ func Execute(
 	}
 	result.ArchivePath, err = archive.FinalizeContext(ctx, bundle.Manifest{
 		CollectorVersion: request.CollectorVersion,
-		GeneratedAt:      request.GeneratedAt,
+		GeneratedAt:      generatedAt,
 		Redaction: map[string]string{
 			"version": ruleset.Version,
 			"sha256":  ruleset.SHA256,
@@ -295,6 +297,7 @@ func validateDependencies(
 	archive Archive,
 	redactor *redact.Redactor,
 	collectors Collectors,
+	currentTime func() time.Time,
 	requireZitadel bool,
 ) error {
 	switch {
@@ -306,6 +309,8 @@ func validateDependencies(
 		return errors.New("bundle archive is required")
 	case redactor == nil:
 		return errors.New("redactor is required")
+	case currentTime == nil:
+		return errors.New("current time source is required")
 	case collectors.Kubernetes == nil:
 		return errors.New("Kubernetes collector is required")
 	case requireZitadel && collectors.Zitadel == nil:

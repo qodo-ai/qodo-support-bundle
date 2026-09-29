@@ -50,6 +50,7 @@ func TestExecutePublishesCompleteKubernetesCollection(t *testing.T) {
 	t.Parallel()
 	archive := &recordingArchive{}
 	generatedAt := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
+	collectorFinished := false
 	report := kubernetes.Report{
 		Namespaces:          []string{"qodo"},
 		NamespacesRequested: 1,
@@ -61,8 +62,13 @@ func TestExecutePublishesCompleteKubernetesCollection(t *testing.T) {
 		context.Background(),
 		Request{
 			CollectorVersion: "test",
-			GeneratedAt:      generatedAt,
-			Activity:         "deploying",
+			CurrentTime: func() time.Time {
+				if !collectorFinished {
+					t.Fatal("capture time sampled before collection finished")
+				}
+				return generatedAt
+			},
+			Activity: "deploying",
 			Kubernetes: kubernetes.Config{
 				Namespace:        "qodo",
 				Since:            time.Hour,
@@ -80,6 +86,7 @@ func TestExecutePublishesCompleteKubernetesCollection(t *testing.T) {
 				kubernetes.Sink,
 				*redact.Redactor,
 			) (kubernetes.Report, error) {
+				collectorFinished = true
 				return report, nil
 			},
 			Zitadel: func(
@@ -148,7 +155,7 @@ func TestExecuteTreatsCollectedZitadelFailureAsComplete(t *testing.T) {
 	result, err := Execute(
 		context.Background(),
 		Request{
-			GeneratedAt: time.Now(),
+			CurrentTime: time.Now,
 			Kubernetes: kubernetes.Config{
 				Namespaces:       []string{"qodo"},
 				Since:            time.Hour,
@@ -206,7 +213,7 @@ func TestExecuteFailsClosedWhenRequestedProbeHasNoReport(t *testing.T) {
 	result, err := Execute(
 		context.Background(),
 		Request{
-			GeneratedAt: time.Now(),
+			CurrentTime: time.Now,
 			Kubernetes: kubernetes.Config{
 				Namespaces:       []string{"qodo"},
 				Since:            time.Hour,
@@ -257,7 +264,7 @@ func TestExecuteRejectsZitadelReportWithoutArtifact(t *testing.T) {
 	result, err := Execute(
 		context.Background(),
 		Request{
-			GeneratedAt: time.Now(),
+			CurrentTime: time.Now,
 			Kubernetes: kubernetes.Config{
 				Namespace:        "qodo",
 				Since:            time.Hour,
@@ -314,7 +321,7 @@ func TestExecuteSanitizesCollectorFailureReason(t *testing.T) {
 	result, err := Execute(
 		context.Background(),
 		Request{
-			GeneratedAt: time.Now(),
+			CurrentTime: time.Now,
 			Kubernetes: kubernetes.Config{
 				Namespace:        "qodo",
 				Since:            time.Hour,
@@ -367,7 +374,10 @@ func TestExecuteSanitizesCollectorFailureReason(t *testing.T) {
 
 func TestExecuteValidatesRequiredDependencies(t *testing.T) {
 	t.Parallel()
-	request := Request{Zitadel: &zitadel.Config{}}
+	request := Request{
+		CurrentTime: time.Now,
+		Zitadel:     &zitadel.Config{},
+	}
 	validCollectors := Collectors{
 		Kubernetes: successfulKubernetesCollector,
 		Zitadel: func(
@@ -424,6 +434,16 @@ func TestExecuteValidatesRequiredDependencies(t *testing.T) {
 			}
 		})
 	}
+	if _, err := Execute(
+		context.Background(),
+		Request{Zitadel: &zitadel.Config{}},
+		unusedRunner{},
+		&recordingArchive{},
+		redact.New(),
+		validCollectors,
+	); err == nil {
+		t.Fatal("expected current time dependency validation error")
+	}
 }
 
 func TestExecuteStopsBeforeProbeAndFinalizationAfterCancellation(t *testing.T) {
@@ -434,8 +454,9 @@ func TestExecuteStopsBeforeProbeAndFinalizationAfterCancellation(t *testing.T) {
 	result, err := Execute(
 		ctx,
 		Request{
-			Kubernetes: kubernetes.Config{},
-			Zitadel:    &zitadel.Config{},
+			CurrentTime: time.Now,
+			Kubernetes:  kubernetes.Config{},
+			Zitadel:     &zitadel.Config{},
 		},
 		unusedRunner{},
 		archive,

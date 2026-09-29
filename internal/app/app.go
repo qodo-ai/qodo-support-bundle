@@ -271,7 +271,7 @@ func runCollect(
 		ctx,
 		collection.Request{
 			CollectorVersion: Version,
-			GeneratedAt:      currentTime().UTC(),
+			CurrentTime:      currentTime,
 			Activity:         *activity,
 			Problem:          *problem,
 			Kubernetes:       kubernetesConfig,
