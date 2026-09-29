@@ -177,12 +177,11 @@ func TestBuildCollectionManifestExactShape(t *testing.T) {
 				"max_metadata_bytes":        int64(1024),
 				"kubernetes":                report,
 				"connectivity":              connectivity,
+				"coverage":                  InitializeCoverage(nil),
+				"prometheus":                map[string]any{"enabled": false},
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("BuildCollectionManifest() = %#v, want %#v", got, want)
-			}
-			if _, exists := got["coverage"]; exists {
-				t.Fatal("manifest collection unexpectedly contains coverage")
 			}
 			if _, exists := got["coverages"]; exists {
 				t.Fatal("manifest collection unexpectedly contains coverages")

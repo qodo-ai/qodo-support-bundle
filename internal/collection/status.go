@@ -1,16 +1,22 @@
 package collection
 
 import (
+	"time"
+
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/prometheus"
 	"github.com/qodo-ai/qodo-support-bundle/internal/workload"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
 )
 
 const (
-	reasonCollectionError = "collection_error"
-	reasonIssuesReported  = "issues_reported"
-	reasonMissingReport   = "missing_report"
-	reasonMissingArtifact = "missing_artifact"
+	reasonCollectionError              = "collection_error"
+	reasonIssuesReported               = "issues_reported"
+	reasonMissingReport                = "missing_report"
+	reasonMissingArtifact              = "missing_artifact"
+	reasonPrometheusInvalidReport      = "invalid_report"
+	reasonPrometheusUnavailable        = "collection_unavailable"
+	reasonPrometheusCoverageIncomplete = "query_coverage_incomplete"
 )
 
 // KubernetesCoverage derives coverage from a completed Kubernetes collection.
@@ -56,6 +62,56 @@ func WorkloadCoverage(report workload.Report, collectionErr error) Coverage {
 	return coverage
 }
 
+// PrometheusCoverage derives source coverage from the collector's sanitized
+// report. Raw collector errors and diagnostics never become coverage reasons.
+func PrometheusCoverage(report prometheus.Report, collectionErr error) Coverage {
+	coverage := Coverage{
+		RequestedStart: prometheusReportTime(report.RequestedStart),
+		RequestedEnd:   prometheusReportTime(report.RequestedEnd),
+		ActualStart:    prometheusReportTime(report.ActualStart),
+		ActualEnd:      prometheusReportTime(report.ActualEnd),
+		RetainedBytes:  max(report.RetainedBytes, 0),
+		RecordCount:    int64(max(report.RetainedRecords, 0)),
+		Truncated:      report.Truncated,
+	}
+	completeErr := prometheus.ValidateCompleteCoverage(report)
+	if collectionErr == nil && completeErr == nil {
+		coverage.State = CoverageComplete
+		return coverage
+	}
+
+	switch {
+	case report.State == prometheus.ReportPartial:
+		coverage.State = CoveragePartial
+	case report.State == prometheus.ReportFailed:
+		coverage.State = CoverageUnavailable
+	case collectionErr != nil && report.RetainedRecords <= 0:
+		coverage.State = CoverageUnavailable
+	case report.Truncated || prometheusReportHasIncompleteQuery(report):
+		coverage.State = CoveragePartial
+	case report.RetainedRecords <= 0:
+		coverage.State = CoverageUnavailable
+	default:
+		coverage.State = CoveragePartial
+	}
+
+	switch {
+	case collectionErr != nil:
+		coverage.Reason = reasonCollectionError
+	case stablePrometheusReason(report.Reason) != "":
+		coverage.Reason = stablePrometheusReason(report.Reason)
+	case stablePrometheusCoverageReason(report) != "":
+		coverage.Reason = stablePrometheusCoverageReason(report)
+	case report.State == prometheus.ReportComplete && completeErr != nil:
+		coverage.Reason = reasonPrometheusInvalidReport
+	case coverage.State == CoveragePartial:
+		coverage.Reason = reasonPrometheusCoverageIncomplete
+	default:
+		coverage.Reason = reasonPrometheusUnavailable
+	}
+	return coverage
+}
+
 // ZitadelCoverage derives coverage from the optional Zitadel probe. A probe
 // report is complete even when it contains failed diagnostic checks because
 // those checks are collected evidence. An enabled probe with no result is
@@ -79,7 +135,7 @@ func ZitadelCoverage(enabled bool, outcome zitadel.Outcome) Coverage {
 	}
 }
 
-// AggregateStatus returns the schema-3 manifest collection status. Coverage
+// AggregateStatus returns the schema-4 manifest collection status. Coverage
 // must contain exactly every supported source; missing or unsupported sources
 // fail closed as partial. Invalid, partial, and unavailable states also make the
 // aggregate partial.
@@ -101,4 +157,63 @@ func AggregateStatus(coverage map[Source]Coverage) string {
 		}
 	}
 	return CoverageComplete.String()
+}
+
+func prometheusReportTime(value string) *time.Time {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return nil
+	}
+	utc := parsed.UTC()
+	return &utc
+}
+
+func prometheusReportHasIncompleteQuery(report prometheus.Report) bool {
+	for _, query := range report.Coverage {
+		switch query.State {
+		case prometheus.CoverageCollected, prometheus.CoverageNoData:
+			if query.Truncated {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+func stablePrometheusCoverageReason(report prometheus.Report) string {
+	for _, query := range report.Coverage {
+		if reason := stablePrometheusReason(query.Reason); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+func stablePrometheusReason(reason string) string {
+	switch reason {
+	case "query_limit_exceeded",
+		"series_limit_exceeded",
+		"sample_limit_exceeded",
+		"per_query_byte_budget_exceeded",
+		"total_byte_budget_exceeded",
+		"response_byte_limit_exceeded",
+		"invalid_response",
+		"http_status_error",
+		"request_failed",
+		"request_deadline_exceeded",
+		"idle_deadline_exceeded",
+		"discovery_failed",
+		"forward_failed",
+		"invalid_tunnel_endpoint",
+		"tunnel_unavailable",
+		"tunnel_cleanup_failed",
+		"artifact_staging_failed",
+		"collection_canceled",
+		reasonPrometheusCoverageIncomplete:
+		return reason
+	default:
+		return ""
+	}
 }

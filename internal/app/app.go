@@ -11,7 +11,9 @@ import (
 	"github.com/qodo-ai/qodo-support-bundle/internal/bundle"
 	"github.com/qodo-ai/qodo-support-bundle/internal/collection"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/prometheus"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
+	"github.com/qodo-ai/qodo-support-bundle/internal/telemetry"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
 )
 
@@ -35,6 +37,7 @@ const (
 	defaultOutputGenerateFilename       = "generate output filename"
 	defaultOutputMustBeDirectory        = "default output directory must be a real directory"
 	defaultOutputAbsoluteHome           = "absolute home path is required"
+	defaultForwardOutputLimit     int64 = 8 << 10
 )
 
 var Version = "dev"
@@ -67,6 +70,7 @@ func runCollect(
 	stdout io.Writer,
 	stderr io.Writer,
 ) (exitCode int) {
+	collectionTime := currentTime().UTC()
 	flags := flag.NewFlagSet("collect", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	namespace := flags.String("namespace", "", "Specific Kubernetes namespace to collect")
@@ -106,6 +110,16 @@ func runCollect(
 		"check-zitadel",
 		false,
 		"Probe Platform-to-Zitadel connectivity in an existing container",
+	)
+	collectPrometheus := flags.Bool(
+		"collect-prometheus",
+		false,
+		"Collect bounded Prometheus telemetry",
+	)
+	prometheusNamespace := flags.String(
+		"prometheus-namespace",
+		"",
+		"Namespace hosting the Prometheus service",
 	)
 	platformNamespace := flags.String(
 		"platform-namespace",
@@ -196,10 +210,41 @@ func runCollect(
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
+	if err := validatePrometheusFlags(
+		*collectPrometheus,
+		visited,
+		selectedNamespaces,
+		*allNamespaces,
+		prometheusNamespace,
+	); err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 2
+	}
+	var prometheusConfig *prometheus.Config
+	if *collectPrometheus {
+		config := buildPrometheusConfig(
+			*prometheusNamespace,
+			selectedNamespaces,
+			*allNamespaces,
+			*kubeContext,
+			*kubeconfig,
+			collectionTime,
+			*since,
+		)
+		if *since > config.MaxWindow {
+			_, _ = fmt.Fprintf(
+				stderr,
+				"--since must not exceed %s when --collect-prometheus is enabled\n",
+				config.MaxWindow,
+			)
+			return 2
+		}
+		prometheusConfig = &config
+	}
 	usedDefaultOutput := false
 	if *output == "" {
 		usedDefaultOutput = true
-		*output, err = defaultOutputPath()
+		*output, err = defaultOutputPathAt(collectionTime)
 		if err != nil {
 			_, _ = fmt.Fprintln(stderr, err)
 			return 1
@@ -238,6 +283,20 @@ func runCollect(
 	}
 	_, _ = fmt.Fprintln(stderr, "Using kubectl: resolved executable")
 	runner := kubernetes.ExecRunner{Binary: resolvedKubectl}
+	collectors := collection.DefaultCollectors()
+	if prometheusConfig != nil {
+		collectors.Forwarder, err = buildPrometheusForwarder(
+			resolvedKubectl,
+			*prometheusConfig,
+			func(binary string, config telemetry.ForwardConfig) (telemetry.Forwarder, error) {
+				return telemetry.NewKubectlForwarder(binary, config)
+			},
+		)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
+			return 1
+		}
+	}
 	kubernetesConfig := kubernetes.Config{
 		Namespaces:              selectedNamespaces,
 		AllNamespaces:           *allNamespaces,
@@ -271,11 +330,14 @@ func runCollect(
 		ctx,
 		collection.Request{
 			CollectorVersion: Version,
-			CurrentTime:      currentTime,
-			Activity:         *activity,
-			Problem:          *problem,
-			Kubernetes:       kubernetesConfig,
-			Zitadel:          zitadelConfig,
+			CurrentTime: func() time.Time {
+				return collectionTime
+			},
+			Activity:   *activity,
+			Problem:    *problem,
+			Kubernetes: kubernetesConfig,
+			Prometheus: prometheusConfig,
+			Zitadel:    zitadelConfig,
 			Progress: func(event collection.Event) {
 				writeCollectionEvent(stderr, event)
 			},
@@ -283,7 +345,7 @@ func runCollect(
 		runner,
 		builder,
 		redactor,
-		collection.DefaultCollectors(),
+		collectors,
 	)
 	if result.CanceledBeforeBundle {
 		_, _ = fmt.Fprintln(stderr, "Collection canceled; no bundle was published.")
@@ -319,6 +381,55 @@ func runCollect(
 		return 3
 	}
 	return 0
+}
+
+type telemetryForwarderFactory func(
+	string,
+	telemetry.ForwardConfig,
+) (telemetry.Forwarder, error)
+
+func buildPrometheusConfig(
+	namespace string,
+	namespaces []string,
+	allNamespaces bool,
+	kubeContext string,
+	kubeconfig string,
+	end time.Time,
+	since time.Duration,
+) prometheus.Config {
+	config := prometheus.DefaultConfig()
+	config.Namespace = namespace
+	config.Namespaces = append([]string(nil), namespaces...)
+	config.AllNamespaces = allNamespaces
+	config.Context = kubeContext
+	config.Kubeconfig = kubeconfig
+	config.End = end.UTC()
+	config.Start = config.End.Add(-since)
+	return config
+}
+
+func buildPrometheusForwarder(
+	resolvedKubectl string,
+	config prometheus.Config,
+	factory telemetryForwarderFactory,
+) (telemetry.Forwarder, error) {
+	if factory == nil {
+		return nil, errors.New("create Prometheus telemetry forwarder: invalid factory")
+	}
+	forwarder, err := factory(resolvedKubectl, telemetry.ForwardConfig{
+		Namespace:        config.Namespace,
+		Context:          config.Context,
+		Kubeconfig:       config.Kubeconfig,
+		ReadinessTimeout: config.ReadinessTimeout,
+		MaxOutputBytes:   defaultForwardOutputLimit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create Prometheus telemetry forwarder: %w", err)
+	}
+	if forwarder == nil {
+		return nil, errors.New("create Prometheus telemetry forwarder: invalid result")
+	}
+	return forwarder, nil
 }
 
 func printUsage(writer io.Writer) {

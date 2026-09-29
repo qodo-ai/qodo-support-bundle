@@ -10,6 +10,33 @@ import (
 
 var dnsLabelPattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
 
+func validatePrometheusFlags(
+	enabled bool,
+	visited map[string]bool,
+	namespaces []string,
+	allNamespaces bool,
+	prometheusNamespace *string,
+) error {
+	if !enabled {
+		if visited["prometheus-namespace"] {
+			return errors.New("--prometheus-namespace requires --collect-prometheus")
+		}
+		return nil
+	}
+	if *prometheusNamespace == "" {
+		if allNamespaces || len(namespaces) != 1 {
+			return errors.New(
+				"--prometheus-namespace is required when --collect-prometheus uses multiple or all namespaces",
+			)
+		}
+		*prometheusNamespace = namespaces[0]
+	}
+	if !validDNSLabel(*prometheusNamespace) {
+		return errors.New("--prometheus-namespace must be a Kubernetes DNS label")
+	}
+	return nil
+}
+
 func validateProbeFlags(
 	enabled bool,
 	visited map[string]bool,

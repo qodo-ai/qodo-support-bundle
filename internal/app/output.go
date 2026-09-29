@@ -28,6 +28,10 @@ var (
 )
 
 func defaultOutputPath() (string, error) {
+	return defaultOutputPathAt(currentTime().UTC())
+}
+
+func defaultOutputPathAt(capturedAt time.Time) (string, error) {
 	home, err := homeDirectory()
 	if err != nil {
 		return "", defaultOutputError(defaultOutputResolveHome, err)
@@ -50,7 +54,7 @@ func defaultOutputPath() (string, error) {
 	if err := os.Chmod(directory, 0o700); err != nil {
 		return "", defaultOutputError(defaultOutputSecureDirectory, err)
 	}
-	timestamp := currentTime().UTC().Format("20060102T150405Z")
+	timestamp := capturedAt.UTC().Format("20060102T150405Z")
 	suffix, err := randomOutputSuffix()
 	if err != nil {
 		return "", defaultOutputError(defaultOutputGenerateFilename, err)

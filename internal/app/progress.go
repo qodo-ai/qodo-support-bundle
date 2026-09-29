@@ -11,6 +11,14 @@ import (
 
 func writeCollectionEvent(writer io.Writer, event collection.Event) {
 	switch event.Kind {
+	case collection.EventPrometheusStarted:
+		_, _ = fmt.Fprintln(writer, "Collecting Prometheus telemetry...")
+	case collection.EventPrometheusComplete:
+		_, _ = fmt.Fprintln(writer, "Prometheus telemetry: complete.")
+	case collection.EventPrometheusPartial:
+		_, _ = fmt.Fprintln(writer, "Prometheus telemetry: partial collection recorded.")
+	case collection.EventPrometheusUnavailable:
+		_, _ = fmt.Fprintln(writer, "Prometheus telemetry: unavailable; diagnostic recorded.")
 	case collection.EventZitadelStarted:
 		_, _ = fmt.Fprintln(writer, "Checking Platform-to-Zitadel connectivity...")
 	case collection.EventZitadelUnavailable:
