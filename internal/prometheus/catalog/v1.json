@@ -85,7 +85,7 @@
       "id": "workload_cpu_throttling_saturation",
       "category": "queue_saturation",
       "description": "Container CPU throttled periods divided by scheduled periods.",
-      "promql": "sum by (namespace, pod, container) (rate(container_cpu_cfs_throttled_periods_total{namespace=~\"{{namespace_regex}}\",container!=\"\",pod!=\"\"}[5m])) / clamp_min(sum by (namespace, pod, container) (rate(container_cpu_cfs_periods_total{namespace=~\"{{namespace_regex}}\",container!=\"\",pod!=\"\"}[5m])), 1)",
+      "promql": "(sum by (namespace, pod, container) (rate(container_cpu_cfs_throttled_periods_total{namespace=~\"{{namespace_regex}}\",container!=\"\",pod!=\"\"}[5m])) / sum by (namespace, pod, container) (rate(container_cpu_cfs_periods_total{namespace=~\"{{namespace_regex}}\",container!=\"\",pod!=\"\"}[5m]))) and on (namespace, pod, container) (sum by (namespace, pod, container) (rate(container_cpu_cfs_periods_total{namespace=~\"{{namespace_regex}}\",container!=\"\",pod!=\"\"}[5m])) > 0)",
       "step_seconds": 60,
       "retain_labels": ["container", "namespace", "pod"]
     }

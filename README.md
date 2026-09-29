@@ -51,10 +51,17 @@ rules:
 For the optional probe, add `create` on `pods/exec` only in the selected
 Platform namespace and remove temporary bindings after collection.
 
-For optional Prometheus collection, add this rule only to a Role in the
-Prometheus service namespace and remove temporary bindings after collection:
+For optional Prometheus collection, bind the baseline Service and EndpointSlice
+read permissions in the Prometheus service namespace and add this rule there.
+Remove temporary bindings after collection:
 
 ```yaml
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list"]
 - apiGroups: [""]
   resources: ["pods/portforward"]
   verbs: ["create"]

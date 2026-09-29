@@ -122,6 +122,71 @@ func TestDefaultCollectorsWireInjectablePrometheusCollector(t *testing.T) {
 	}
 }
 
+func TestExecuteScopesPrometheusToDiscoveredApplicationNamespaces(t *testing.T) {
+	t.Parallel()
+	config := prometheusConfig()
+	config.Namespaces = nil
+	config.AllNamespaces = true
+	var captured prometheus.Config
+
+	collectors := Collectors{
+		Kubernetes: func(
+			context.Context,
+			kubernetes.Config,
+			kubernetes.Runner,
+			kubernetes.Sink,
+			*redact.Redactor,
+		) (kubernetes.Report, error) {
+			return kubernetes.Report{
+				Namespaces:           []string{"team-a", "team-b"},
+				CollectionNamespaces: []string{"team-a", "team-b"},
+				ExcludedNamespaces:   []string{"kube-system"},
+				NamespacesRequested:  2,
+			}, nil
+		},
+		Workload: successfulWorkloadCollector,
+		Prometheus: func(
+			_ context.Context,
+			got prometheus.Config,
+			_ kubernetes.Runner,
+			_ telemetry.Forwarder,
+			_ kubernetes.Sink,
+			_ *redact.Redactor,
+		) (prometheus.Report, error) {
+			captured = got
+			return failedPrometheusReport(
+				config.Start,
+				config.End,
+				"discovery_failed",
+			), nil
+		},
+		Forwarder: &unusedForwarder{},
+	}
+
+	_, err := Execute(
+		context.Background(),
+		Request{
+			CurrentTime: time.Now,
+			Kubernetes: kubernetes.Config{
+				AllNamespaces:           true,
+				ExcludeSystemNamespaces: true,
+			},
+			Prometheus: config,
+		},
+		unusedRunner{},
+		&recordingArchive{},
+		redact.New(),
+		collectors,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if captured.AllNamespaces ||
+		!reflect.DeepEqual(captured.Namespaces, []string{"team-a", "team-b"}) {
+		t.Fatalf("Prometheus scope was not restricted to discovered application namespaces: %+v", captured)
+	}
+}
+
 func TestExecuteCollectsPrometheusBetweenWorkloadAndZitadel(t *testing.T) {
 	t.Parallel()
 	archive := &recordingArchive{}

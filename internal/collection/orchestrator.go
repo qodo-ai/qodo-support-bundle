@@ -219,9 +219,14 @@ func Execute(
 
 	if request.Prometheus != nil {
 		reportEvent(request.Progress, Event{Kind: EventPrometheusStarted})
+		prometheusConfig := effectivePrometheusConfig(
+			*request.Prometheus,
+			request.Kubernetes,
+			kubernetesReport,
+		)
 		prometheusReport, prometheusErr := collectors.Prometheus(
 			ctx,
-			*request.Prometheus,
+			prometheusConfig,
 			runner,
 			collectors.Forwarder,
 			archive,
@@ -490,6 +495,22 @@ func workloadCollectionNamespaces(
 		return []string{config.Namespace}
 	}
 	return nil
+}
+
+func effectivePrometheusConfig(
+	config prometheus.Config,
+	kubernetesConfig kubernetes.Config,
+	report kubernetes.Report,
+) prometheus.Config {
+	if kubernetesConfig.AllNamespaces &&
+		kubernetesConfig.ExcludeSystemNamespaces {
+		config.Namespaces = append(
+			[]string(nil),
+			report.CollectionNamespaces...,
+		)
+		config.AllNamespaces = false
+	}
+	return config
 }
 
 func workloadCollectionIssues(

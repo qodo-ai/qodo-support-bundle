@@ -14,7 +14,7 @@ import (
 
 func TestBuiltinCatalogV1Contract(t *testing.T) {
 	t.Parallel()
-	const goldenSHA256 = "cbf9d2de97a2f055eda836c1dee38e2846a47fdaa6d0c3afb15d473b34765b22"
+	const goldenSHA256 = "455904deb7e3a099e250338d63d90ac313d7ea5f69f7542ca1d21c309d7f301a"
 	if digest := fmt.Sprintf("%x", sha256.Sum256(catalogV1JSON)); digest != goldenSHA256 {
 		t.Fatalf("catalog golden hash = %s, want %s", digest, goldenSHA256)
 	}
@@ -196,6 +196,25 @@ func TestAllNamespacesUsesFixedSafeRegex(t *testing.T) {
 	if !strings.Contains(rendered, `namespace=~".*"`) ||
 		strings.Contains(rendered, namespaceRegexToken) {
 		t.Fatalf("rendered all-namespace query = %q", rendered)
+	}
+}
+
+func TestCPUThrottlingRatioPreservesSubOneDenominators(t *testing.T) {
+	t.Parallel()
+	var expression string
+	for _, query := range BuiltinCatalog().Queries {
+		if query.ID == "workload_cpu_throttling_saturation" {
+			expression = query.PromQL
+			break
+		}
+	}
+	if expression == "" {
+		t.Fatal("CPU throttling query is missing")
+	}
+	if strings.Contains(expression, "clamp_min") ||
+		!strings.Contains(expression, "and on (namespace, pod, container)") ||
+		!strings.Contains(expression, "> 0)") {
+		t.Fatalf("CPU throttling query does not preserve positive sub-one period rates: %q", expression)
 	}
 }
 
