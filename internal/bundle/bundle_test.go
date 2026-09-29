@@ -65,7 +65,7 @@ func TestFinalizeCreatesRestrictedChecksummedArchive(t *testing.T) {
 	if err := json.Unmarshal(files["manifest.json"], &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.SchemaVersion != "3" ||
+	if manifest.SchemaVersion != schemaVersion ||
 		len(manifest.Artifacts) != 1 ||
 		manifest.Artifacts[0].Path != "kubernetes/pods.jsonl" ||
 		manifest.Artifacts[0].Size != int64(len("{\"kind\":\"Pod\"}\n")) ||
