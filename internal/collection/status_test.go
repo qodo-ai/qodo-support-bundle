@@ -137,12 +137,34 @@ func TestAggregateStatus(t *testing.T) {
 		want     string
 	}{
 		{
-			name: "complete and not requested aggregate complete",
+			name: "all supported complete or not requested aggregate complete",
 			coverage: map[Source]Coverage{
 				SourceKubernetes: {State: CoverageComplete},
 				SourceZitadel:    {State: CoverageNotRequested},
+				SourceWorkload:   {State: CoverageNotRequested},
+				SourcePrometheus: {State: CoverageComplete},
+				SourcePhoenix:    {State: CoverageNotRequested},
 			},
 			want: "complete",
+		},
+		{
+			name: "one complete source is missing evidence",
+			coverage: map[Source]Coverage{
+				SourceKubernetes: {State: CoverageComplete},
+			},
+			want: "partial",
+		},
+		{
+			name: "unsupported complete source fails closed",
+			coverage: map[Source]Coverage{
+				SourceKubernetes:      {State: CoverageComplete},
+				SourceZitadel:         {State: CoverageNotRequested},
+				SourceWorkload:        {State: CoverageNotRequested},
+				SourcePrometheus:      {State: CoverageNotRequested},
+				SourcePhoenix:         {State: CoverageNotRequested},
+				Source("unsupported"): {State: CoverageComplete},
+			},
+			want: "partial",
 		},
 		{
 			name: "partial aggregates partial",

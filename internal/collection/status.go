@@ -52,15 +52,20 @@ func ZitadelCoverage(enabled bool, outcome zitadel.Outcome) Coverage {
 	}
 }
 
-// AggregateStatus returns the schema-3 manifest collection status. Missing
-// coverage evidence fails closed as partial. For non-empty coverage, any state
-// other than complete or not_requested, including an invalid state, also makes
-// the aggregate partial.
+// AggregateStatus returns the schema-3 manifest collection status. Coverage
+// must contain exactly every supported source; missing or unsupported sources
+// fail closed as partial. Invalid, partial, and unavailable states also make the
+// aggregate partial.
 func AggregateStatus(coverage map[Source]Coverage) string {
-	if len(coverage) == 0 {
+	supported := SupportedSources()
+	if len(coverage) != len(supported) {
 		return CoveragePartial.String()
 	}
-	for _, sourceCoverage := range coverage {
+	for _, source := range supported {
+		sourceCoverage, exists := coverage[source]
+		if !exists {
+			return CoveragePartial.String()
+		}
 		switch sourceCoverage.State {
 		case CoverageComplete, CoverageNotRequested:
 			continue
