@@ -8,7 +8,9 @@ import (
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/bundle"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/prometheus"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
+	"github.com/qodo-ai/qodo-support-bundle/internal/telemetry"
 	"github.com/qodo-ai/qodo-support-bundle/internal/workload"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
 )
@@ -24,6 +26,11 @@ const (
 type EventKind string
 
 const (
+	EventPrometheusStarted     EventKind = "prometheus_started"
+	EventPrometheusComplete    EventKind = "prometheus_complete"
+	EventPrometheusPartial     EventKind = "prometheus_partial"
+	EventPrometheusUnavailable EventKind = "prometheus_unavailable"
+
 	EventZitadelStarted           EventKind = "zitadel_started"
 	EventZitadelUnavailable       EventKind = "zitadel_unavailable"
 	EventZitadelDiagnosticFailure EventKind = "zitadel_diagnostic_failure"
@@ -43,6 +50,7 @@ type Request struct {
 	Activity         string
 	Problem          string
 	Kubernetes       kubernetes.Config
+	Prometheus       *prometheus.Config
 	Zitadel          *zitadel.Config
 	Progress         func(Event)
 }
@@ -54,6 +62,7 @@ type Result struct {
 	Coverage             map[Source]Coverage
 	KubernetesReport     kubernetes.Report
 	WorkloadReport       *workload.Report
+	PrometheusReport     *prometheus.Report
 	ConnectivityReport   *zitadel.Report
 	ConnectivityFailure  string
 	CanceledBeforeBundle bool
@@ -83,6 +92,16 @@ type WorkloadCollector func(
 	*redact.Redactor,
 ) (workload.Report, error)
 
+// PrometheusCollector collects and stages bounded Prometheus telemetry.
+type PrometheusCollector func(
+	context.Context,
+	prometheus.Config,
+	kubernetes.Runner,
+	telemetry.Forwarder,
+	kubernetes.Sink,
+	*redact.Redactor,
+) (prometheus.Report, error)
+
 // ZitadelCollector executes the optional Platform-to-Zitadel probe.
 type ZitadelCollector func(
 	context.Context,
@@ -95,6 +114,8 @@ type ZitadelCollector func(
 type Collectors struct {
 	Kubernetes KubernetesCollector
 	Workload   WorkloadCollector
+	Prometheus PrometheusCollector
+	Forwarder  telemetry.Forwarder
 	Zitadel    ZitadelCollector
 }
 
@@ -103,6 +124,7 @@ func DefaultCollectors() Collectors {
 	return Collectors{
 		Kubernetes: kubernetes.Collect,
 		Workload:   workload.Collect,
+		Prometheus: prometheus.Collect,
 		Zitadel:    zitadel.Collect,
 	}
 }
@@ -123,11 +145,15 @@ func Execute(
 		redactor,
 		collectors,
 		request.CurrentTime,
+		request.Prometheus != nil,
 		request.Zitadel != nil,
 	); err != nil {
 		return Result{}, err
 	}
 	requested := []Source{SourceKubernetes, SourceWorkload}
+	if request.Prometheus != nil {
+		requested = append(requested, SourcePrometheus)
+	}
 	if request.Zitadel != nil {
 		requested = append(requested, SourceZitadel)
 	}
@@ -190,6 +216,54 @@ func Execute(
 		kubernetesReport.Issues,
 		workloadCollectionIssues(workloadReport, workloadErr, redactor)...,
 	)
+
+	if request.Prometheus != nil {
+		reportEvent(request.Progress, Event{Kind: EventPrometheusStarted})
+		prometheusConfig := effectivePrometheusConfig(
+			*request.Prometheus,
+			request.Kubernetes,
+		)
+		prometheusReport, prometheusErr := collectors.Prometheus(
+			ctx,
+			prometheusConfig,
+			runner,
+			collectors.Forwarder,
+			archive,
+			redactor,
+		)
+		result.PrometheusReport = &prometheusReport
+		if ctx.Err() != nil {
+			result.CanceledBeforeBundle = true
+			return result, ctx.Err()
+		}
+		if errors.Is(prometheusErr, prometheus.ErrArtifactStaging) {
+			return result, prometheusErr
+		}
+		prometheusCoverage := PrometheusCoverage(prometheusReport, prometheusErr)
+		result.Coverage[SourcePrometheus] = prometheusCoverage
+		switch prometheusCoverage.State {
+		case CoverageComplete:
+			reportEvent(request.Progress, Event{Kind: EventPrometheusComplete})
+		case CoveragePartial:
+			kubernetesReport.Issues = append(
+				kubernetesReport.Issues,
+				prometheusCollectionIssue(prometheusCoverage),
+			)
+			reportEvent(request.Progress, Event{
+				Kind:   EventPrometheusPartial,
+				Reason: prometheusCoverage.Reason,
+			})
+		default:
+			kubernetesReport.Issues = append(
+				kubernetesReport.Issues,
+				prometheusCollectionIssue(prometheusCoverage),
+			)
+			reportEvent(request.Progress, Event{
+				Kind:   EventPrometheusUnavailable,
+				Reason: prometheusCoverage.Reason,
+			})
+		}
+	}
 
 	var outcome zitadel.Outcome
 	if request.Zitadel != nil {
@@ -294,6 +368,11 @@ func Execute(
 		request.Zitadel != nil,
 		result.ConnectivityReport,
 		result.ConnectivityFailure,
+		PrometheusSummary{
+			Requested: request.Prometheus != nil,
+			Coverage:  result.Coverage[SourcePrometheus],
+			Report:    result.PrometheusReport,
+		},
 	)
 	if err := archive.Add(summaryArtifactPath, []byte(summary)); err != nil {
 		return result, err
@@ -309,6 +388,12 @@ func Execute(
 			Report: result.ConnectivityReport,
 			Reason: result.ConnectivityFailure,
 		},
+		redactor,
+	)
+	prometheusMetadata := BuildPrometheusMetadata(
+		request.Prometheus,
+		result.PrometheusReport,
+		result.Coverage[SourcePrometheus],
 		redactor,
 	)
 	ruleset := redactor.Ruleset()
@@ -335,6 +420,10 @@ func Execute(
 			kubernetesReport,
 			connectivityMetadata,
 			redactor,
+			CollectionManifestOptions{
+				Coverage:   result.Coverage,
+				Prometheus: prometheusMetadata,
+			},
 		),
 	})
 	return result, err
@@ -347,6 +436,7 @@ func validateDependencies(
 	redactor *redact.Redactor,
 	collectors Collectors,
 	currentTime func() time.Time,
+	requirePrometheus bool,
 	requireZitadel bool,
 ) error {
 	switch {
@@ -364,6 +454,10 @@ func validateDependencies(
 		return errors.New("Kubernetes collector is required")
 	case collectors.Workload == nil:
 		return errors.New("workload collector is required")
+	case requirePrometheus && collectors.Prometheus == nil:
+		return errors.New("Prometheus collector is required")
+	case requirePrometheus && collectors.Forwarder == nil:
+		return errors.New("telemetry forwarder is required")
 	case requireZitadel && collectors.Zitadel == nil:
 		return errors.New("Zitadel collector is required")
 	default:
@@ -402,6 +496,17 @@ func workloadCollectionNamespaces(
 	return nil
 }
 
+func effectivePrometheusConfig(
+	config prometheus.Config,
+	kubernetesConfig kubernetes.Config,
+) prometheus.Config {
+	if kubernetesConfig.AllNamespaces {
+		config.ExcludeSystemNamespaces =
+			kubernetesConfig.ExcludeSystemNamespaces
+	}
+	return config
+}
+
 func workloadCollectionIssues(
 	report workload.Report,
 	collectionErr error,
@@ -434,6 +539,14 @@ func workloadCollectionIssues(
 		})
 	}
 	return issues
+}
+
+func prometheusCollectionIssue(coverage Coverage) kubernetes.Issue {
+	return kubernetes.Issue{
+		Operation: "collect Prometheus telemetry",
+		Message: "Prometheus telemetry " +
+			coverage.State.String() + ": " + coverage.Reason,
+	}
 }
 
 func zitadelNamespace(config *zitadel.Config) string {

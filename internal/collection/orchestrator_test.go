@@ -17,6 +17,7 @@ import (
 
 type recordingArchive struct {
 	files         map[string][]byte
+	addCalls      map[string]int
 	manifest      bundle.Manifest
 	finalizeCalls int
 }
@@ -35,6 +36,10 @@ func (archive *recordingArchive) Add(path string, data []byte) error {
 	if archive.files == nil {
 		archive.files = make(map[string][]byte)
 	}
+	if archive.addCalls == nil {
+		archive.addCalls = make(map[string]int)
+	}
+	archive.addCalls[path]++
 	archive.files[path] = append([]byte(nil), data...)
 	return nil
 }

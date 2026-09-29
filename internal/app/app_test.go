@@ -17,13 +17,24 @@ import (
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/collection"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/prometheus"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
+	"github.com/qodo-ai/qodo-support-bundle/internal/telemetry"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
 )
 
 type failingCloser struct {
 	calls int
 	err   error
+}
+
+type unusedTelemetryForwarder struct{}
+
+func (*unusedTelemetryForwarder) Forward(
+	context.Context,
+	telemetry.Target,
+) (*telemetry.Tunnel, error) {
+	return nil, errors.New("unexpected forwarder call")
 }
 
 func (closer *failingCloser) Close() error {
@@ -308,6 +319,349 @@ func TestProbeFlagCouplingAndNamespaceInference(t *testing.T) {
 				t.Fatalf("namespace=%q error=%v", namespace, err)
 			}
 		})
+	}
+}
+
+func TestPrometheusFlagCouplingAndNamespaceInference(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		enabled    bool
+		visited    map[string]bool
+		namespaces []string
+		all        bool
+		namespace  string
+		wantNS     string
+		wantError  string
+	}{
+		{
+			name:       "single explicit workload namespace is inferred",
+			enabled:    true,
+			namespaces: []string{"qodo"},
+			wantNS:     "qodo",
+		},
+		{
+			name:       "explicit service namespace is independent of workload scope",
+			enabled:    true,
+			namespaces: []string{"qodo", "zitadel"},
+			namespace:  "monitoring",
+			wantNS:     "monitoring",
+		},
+		{
+			name:       "multiple namespaces require service namespace",
+			enabled:    true,
+			namespaces: []string{"qodo", "zitadel"},
+			wantError:  "--prometheus-namespace is required when --collect-prometheus uses multiple or all namespaces",
+		},
+		{
+			name:      "all namespaces require service namespace",
+			enabled:   true,
+			all:       true,
+			wantError: "--prometheus-namespace is required when --collect-prometheus uses multiple or all namespaces",
+		},
+		{
+			name:      "target rejected while disabled",
+			visited:   map[string]bool{"prometheus-namespace": true},
+			namespace: "monitoring",
+			wantError: "--prometheus-namespace requires --collect-prometheus",
+		},
+		{
+			name:       "invalid service namespace is rejected",
+			enabled:    true,
+			namespaces: []string{"qodo"},
+			namespace:  "Monitoring",
+			wantError:  "--prometheus-namespace must be a Kubernetes DNS label",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			namespace := test.namespace
+			err := validatePrometheusFlags(
+				test.enabled,
+				test.visited,
+				test.namespaces,
+				test.all,
+				&namespace,
+			)
+			if test.wantError != "" {
+				if err == nil || err.Error() != test.wantError {
+					t.Fatalf("error=%v want=%q", err, test.wantError)
+				}
+				return
+			}
+			if err != nil || namespace != test.wantNS {
+				t.Fatalf("namespace=%q error=%v", namespace, err)
+			}
+		})
+	}
+}
+
+func TestCollectRejectsInvalidPrometheusFlagCombinations(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		arguments []string
+		message   string
+	}{
+		{
+			name: "target while disabled",
+			arguments: []string{
+				"collect",
+				"--namespace", "qodo",
+				"--prometheus-namespace", "monitoring",
+			},
+			message: "--prometheus-namespace requires --collect-prometheus",
+		},
+		{
+			name: "multiple namespaces without target",
+			arguments: []string{
+				"collect",
+				"--namespaces", "qodo,zitadel",
+				"--collect-prometheus",
+			},
+			message: "--prometheus-namespace is required when --collect-prometheus uses multiple or all namespaces",
+		},
+		{
+			name: "all namespaces without target",
+			arguments: []string{
+				"collect",
+				"--all-namespaces",
+				"--collect-prometheus",
+			},
+			message: "--prometheus-namespace is required when --collect-prometheus uses multiple or all namespaces",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var stderr bytes.Buffer
+			code := Run(
+				context.Background(),
+				test.arguments,
+				&bytes.Buffer{},
+				&stderr,
+			)
+			if code != 2 || strings.TrimSpace(stderr.String()) != test.message {
+				t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+			}
+		})
+	}
+}
+
+func TestBuildPrometheusConfigUsesDefaultsBoundsAndSeparateScope(t *testing.T) {
+	t.Parallel()
+	end := time.Date(2026, 9, 29, 14, 15, 16, 0, time.FixedZone("test", 2*60*60))
+	namespaces := []string{"qodo", "zitadel"}
+	got := buildPrometheusConfig(
+		"monitoring",
+		namespaces,
+		false,
+		false,
+		"customer",
+		"/tmp/customer.kubeconfig",
+		end,
+		45*time.Minute,
+	)
+	namespaces[0] = "mutated"
+
+	want := prometheus.DefaultConfig()
+	want.Namespace = "monitoring"
+	want.Namespaces = []string{"qodo", "zitadel"}
+	want.Context = "customer"
+	want.Kubeconfig = "/tmp/customer.kubeconfig"
+	want.End = end.UTC()
+	want.Start = want.End.Add(-45 * time.Minute)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("config=%+v want=%+v", got, want)
+	}
+	if got.Namespace == got.Namespaces[0] {
+		t.Fatalf("service namespace was conflated with workload scope: %+v", got)
+	}
+
+	all := buildPrometheusConfig(
+		"monitoring",
+		nil,
+		true,
+		true,
+		"",
+		"",
+		end,
+		time.Hour,
+	)
+	if !all.AllNamespaces ||
+		!all.ExcludeSystemNamespaces ||
+		len(all.Namespaces) != 0 {
+		t.Fatalf("all-namespace scope was broadened incorrectly: %+v", all)
+	}
+}
+
+func TestBuildPrometheusForwarderUsesResolvedBinaryAndSafeConfig(t *testing.T) {
+	t.Parallel()
+	config := prometheus.DefaultConfig()
+	config.Namespace = "monitoring"
+	config.Context = "customer"
+	config.Kubeconfig = "/tmp/customer.kubeconfig"
+	resolvedKubectl := "/opt/bin/kubectl"
+	var gotBinary string
+	var gotConfig telemetry.ForwardConfig
+	expectedForwarder := &unusedTelemetryForwarder{}
+
+	gotForwarder, err := buildPrometheusForwarder(
+		resolvedKubectl,
+		config,
+		func(
+			binary string,
+			forwardConfig telemetry.ForwardConfig,
+		) (telemetry.Forwarder, error) {
+			gotBinary = binary
+			gotConfig = forwardConfig
+			return expectedForwarder, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantConfig := telemetry.ForwardConfig{
+		Namespace:        "monitoring",
+		Context:          "customer",
+		Kubeconfig:       "/tmp/customer.kubeconfig",
+		ReadinessTimeout: prometheus.DefaultReadinessTimeout,
+		MaxOutputBytes:   defaultForwardOutputLimit,
+	}
+	if gotForwarder != expectedForwarder ||
+		gotBinary != resolvedKubectl ||
+		!reflect.DeepEqual(gotConfig, wantConfig) {
+		t.Fatalf(
+			"forwarder=%T binary=%q config=%+v",
+			gotForwarder,
+			gotBinary,
+			gotConfig,
+		)
+	}
+}
+
+func TestCollectPrometheusUsesSingleCapturedTimeAndRequestedScope(t *testing.T) {
+	root := t.TempDir()
+	kubectl := fakeKubectl(t, root, "")
+	output := filepath.Join(root, "bundle.tar.gz")
+	capturedAt := time.Date(
+		2026,
+		9,
+		29,
+		14,
+		15,
+		16,
+		0,
+		time.FixedZone("test", 2*60*60),
+	)
+	oldTime := currentTime
+	timeCalls := 0
+	currentTime = func() time.Time {
+		timeCalls++
+		return capturedAt
+	}
+	t.Cleanup(func() { currentTime = oldTime })
+
+	var stderr bytes.Buffer
+	code := Run(
+		context.Background(),
+		[]string{
+			"collect",
+			"--namespace", "qodo",
+			"--collect-prometheus",
+			"--prometheus-namespace", "monitoring",
+			"--since", "45m",
+			"--kubectl", kubectl,
+			"--output", output,
+		},
+		&bytes.Buffer{},
+		&stderr,
+	)
+	if code != 3 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	if timeCalls != 1 {
+		t.Fatalf("current time sampled %d times", timeCalls)
+	}
+	manifest := string(readArchive(t, output)["manifest.json"])
+	for _, expected := range []string{
+		`"enabled": true`,
+		`"namespace": "monitoring"`,
+		`"namespaces": [`,
+		`"qodo"`,
+		`"all_namespaces": false`,
+		`"configured_start": "2026-09-29T11:30:16Z"`,
+		`"configured_end": "2026-09-29T12:15:16Z"`,
+	} {
+		if !strings.Contains(manifest, expected) {
+			t.Fatalf("manifest missing %q: %s", expected, manifest)
+		}
+	}
+	if !strings.Contains(stderr.String(), "Collecting Prometheus telemetry...") ||
+		!strings.Contains(stderr.String(), "Prometheus telemetry: unavailable; diagnostic recorded.") {
+		t.Fatalf("missing Prometheus progress: %s", stderr.String())
+	}
+}
+
+func TestCollectLeavesPrometheusDisabledByDefault(t *testing.T) {
+	root := t.TempDir()
+	kubectl := fakeKubectl(t, root, "")
+	output := filepath.Join(root, "bundle.tar.gz")
+	var stderr bytes.Buffer
+	code := Run(
+		context.Background(),
+		[]string{
+			"collect",
+			"--namespace", "qodo",
+			"--kubectl", kubectl,
+			"--output", output,
+		},
+		&bytes.Buffer{},
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	manifest := string(readArchive(t, output)["manifest.json"])
+	if !strings.Contains(manifest, `"prometheus": {`) ||
+		!strings.Contains(manifest, `"enabled": false`) {
+		t.Fatalf("Prometheus was not disabled in manifest: %s", manifest)
+	}
+	if strings.Contains(stderr.String(), "Prometheus telemetry") {
+		t.Fatalf("disabled Prometheus emitted progress: %s", stderr.String())
+	}
+}
+
+func TestPrometheusProgressDoesNotRenderEventReason(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		kind collection.EventKind
+		want string
+	}{
+		{collection.EventPrometheusStarted, "Collecting Prometheus telemetry...\n"},
+		{collection.EventPrometheusComplete, "Prometheus telemetry: complete.\n"},
+		{
+			collection.EventPrometheusPartial,
+			"Prometheus telemetry: partial collection recorded.\n",
+		},
+		{
+			collection.EventPrometheusUnavailable,
+			"Prometheus telemetry: unavailable; diagnostic recorded.\n",
+		},
+	}
+	for _, test := range tests {
+		var output bytes.Buffer
+		writeCollectionEvent(&output, collection.Event{
+			Kind:   test.kind,
+			Reason: "password=private-progress-canary",
+		})
+		if output.String() != test.want ||
+			strings.Contains(output.String(), "private-progress-canary") {
+			t.Fatalf("kind=%s output=%q", test.kind, output.String())
+		}
 	}
 }
 

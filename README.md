@@ -2,8 +2,9 @@
 
 `qodo-support-bundle` is a portable, read-only CLI for collecting bounded and
 redacted Kubernetes diagnostics. It collects pod metadata, events, current and
-previous container logs, normalized namespace-scoped workload context, and an
-optional Platform-to-Zitadel connectivity report.
+previous container logs, normalized namespace-scoped workload context, optional
+namespace-scoped Prometheus telemetry, and an optional Platform-to-Zitadel
+connectivity report.
 
 ## Prerequisites and scope
 
@@ -13,6 +14,8 @@ optional Platform-to-Zitadel connectivity report.
   in each collected namespace.
 - Cluster-scoped `list` access to namespaces only when automatic discovery or
   `--all-namespaces` is used.
+- `create` on `pods/portforward` in the Prometheus service namespace only when
+  `--collect-prometheus` is requested.
 - `pods/exec` permission only when `--check-zitadel` is requested.
 
 The collector never requests Secrets or ConfigMaps. Workload artifacts omit raw
@@ -47,6 +50,22 @@ rules:
 
 For the optional probe, add `create` on `pods/exec` only in the selected
 Platform namespace and remove temporary bindings after collection.
+
+For optional Prometheus collection, bind the baseline Service and EndpointSlice
+read permissions in the Prometheus service namespace and add this rule there.
+Remove temporary bindings after collection:
+
+```yaml
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/portforward"]
+  verbs: ["create"]
+```
 
 ## Collect
 
@@ -113,6 +132,34 @@ are removed before files are staged.
 Exit code `0` means collection completed. Exit code `3` means a usable partial
 bundle was created; inspect `collection-issues.jsonl`. Fatal setup, cancellation,
 or archive failures return `1`; invalid CLI usage returns `2`.
+
+## Optional Prometheus telemetry
+
+Prometheus collection is opt-in and uses a temporary loopback-only
+`kubectl port-forward`:
+
+```bash
+qodo-support-bundle collect \
+  --namespace qodo-onprem \
+  --collect-prometheus \
+  --prometheus-namespace prometheus
+```
+
+`--prometheus-namespace` identifies only the namespace hosting the Prometheus
+service. With exactly one explicit workload namespace it may be omitted and is
+inferred; it is required for multi-namespace, automatic, or all-namespace
+collection. The telemetry queries remain restricted to the selected workload
+namespace scope. The target service is discovered from fixed application labels
+and port `9090`; arbitrary URLs, ports, labels, and PromQL are not accepted.
+
+The versioned built-in catalog covers CPU, memory, restarts and OOMs, replica
+availability, request rate, error rate, latency, CPU-throttling saturation, and
+PVC capacity pressure. Collection uses the same `--since` window as logs and
+enforces fixed deadlines and bounds on query count, response bytes, retained
+bytes, series, and samples. Missing metrics are recorded as complete query
+coverage with no data. Discovery, forwarding, or query failures produce a
+usable partial bundle with sanitized coverage; cancellation and artifact
+staging failures publish no bundle.
 
 ## Optional Zitadel connectivity probe
 
@@ -194,6 +241,8 @@ kubernetes/services.jsonl                  # present when records are retained
 kubernetes/autoscalers.jsonl               # present when records are retained
 kubernetes/storage.jsonl                   # present when records are retained
 kubernetes/workload-coverage.json
+prometheus/metrics.jsonl                  # optional; present when records exist
+prometheus/coverage.json                  # present when Prometheus is requested
 connectivity/zitadel.json                 # optional
 collection-issues.jsonl                   # partial collection only
 ```
@@ -269,6 +318,53 @@ the coverage file remains authoritative for whether its API requests succeeded.
 Review normalized artifacts before sharing; they must not contain raw
 manifests, Secrets, ConfigMaps, endpoint addresses, environment values,
 commands, arguments, annotations, or volume contents.
+
+### Manual Prometheus smoke test
+
+Choose one workload namespace and the namespace hosting its Prometheus service:
+
+```bash
+NAMESPACE=qodo-onprem
+PROMETHEUS_NAMESPACE=prometheus
+make build VERSION=manual
+
+TEST_DIR="$(mktemp -d)"
+ARCHIVE="$TEST_DIR/bundle.tar.gz"
+./dist/qodo-support-bundle collect \
+  --namespace "$NAMESPACE" \
+  --collect-prometheus \
+  --prometheus-namespace "$PROMETHEUS_NAMESPACE" \
+  --since 30m \
+  --output "$ARCHIVE"
+
+mkdir "$TEST_DIR/extracted"
+tar -xzf "$ARCHIVE" -C "$TEST_DIR/extracted"
+(
+  set -e
+  cd "$TEST_DIR/extracted"
+  shasum -a 256 -c checksums.sha256
+  jq -e '.schema_version == "4"' manifest.json
+  jq -e \
+    --arg namespace "$NAMESPACE" \
+    '.requested_start < .requested_end and
+     (.coverage | length > 0) and
+     all(.coverage[]; .state == "collected" or
+                      .state == "no_data" or
+                      .state == "partial" or
+                      .state == "failed" or
+                      .state == "skipped")' \
+    prometheus/coverage.json
+  if [ -f prometheus/metrics.jsonl ]; then
+    jq -e -s --arg namespace "$NAMESPACE" \
+      'all(.[]; type == "object" and .labels.namespace == $namespace)' \
+      prometheus/metrics.jsonl
+  fi
+)
+```
+
+Inspect `prometheus/coverage.json` even when `metrics.jsonl` is absent. Verify
+that retained labels contain only the selected workload namespace and that no
+`kubectl port-forward` child remains after the command exits.
 
 Checksums detect corruption but do not authenticate provenance. Treat bundles
 as sensitive, review them before sharing, and use an approved authenticated
