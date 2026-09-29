@@ -78,11 +78,11 @@ type rawProbe struct {
 	TCPSocket           *rawTCPSocketAction `json:"tcpSocket"`
 	GRPC                *rawGRPCAction      `json:"grpc"`
 	Exec                *struct{}           `json:"exec"`
-	InitialDelaySeconds int32               `json:"initialDelaySeconds"`
-	PeriodSeconds       int32               `json:"periodSeconds"`
-	TimeoutSeconds      int32               `json:"timeoutSeconds"`
-	SuccessThreshold    int32               `json:"successThreshold"`
-	FailureThreshold    int32               `json:"failureThreshold"`
+	InitialDelaySeconds *int32              `json:"initialDelaySeconds"`
+	PeriodSeconds       *int32              `json:"periodSeconds"`
+	TimeoutSeconds      *int32              `json:"timeoutSeconds"`
+	SuccessThreshold    *int32              `json:"successThreshold"`
+	FailureThreshold    *int32              `json:"failureThreshold"`
 }
 
 type rawHTTPGetAction struct {
@@ -213,7 +213,6 @@ type rawCondition struct {
 	Type               string `json:"type"`
 	Status             string `json:"status"`
 	Reason             string `json:"reason"`
-	Message            string `json:"message"`
 	LastTransitionTime string `json:"lastTransitionTime"`
 }
 

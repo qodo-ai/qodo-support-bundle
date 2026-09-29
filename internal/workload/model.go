@@ -183,7 +183,6 @@ type Condition struct {
 	Type               string     `json:"type"`
 	Status             string     `json:"status"`
 	Reason             string     `json:"reason,omitempty"`
-	Message            string     `json:"message,omitempty"`
 	LastTransitionTime *time.Time `json:"last_transition_time,omitempty"`
 }
 

@@ -63,10 +63,9 @@ func TestNormalizedModelsExcludeForbiddenFields(t *testing.T) {
 				},
 			},
 			Conditions: []Condition{{
-				Type:    "Available",
-				Status:  "True",
-				Reason:  "MinimumReplicasAvailable",
-				Message: "deployment is available",
+				Type:   "Available",
+				Status: "True",
+				Reason: "MinimumReplicasAvailable",
 			}},
 		},
 		Service{
@@ -204,7 +203,7 @@ func TestNormalizedJSONFieldAllowlists(t *testing.T) {
 			"weight", "pod_affinity_term",
 		},
 		reflect.TypeOf(Condition{}): {
-			"type", "status", "reason", "message", "last_transition_time",
+			"type", "status", "reason", "last_transition_time",
 		},
 		reflect.TypeOf(Service{}): {
 			"kind", "namespace", "name", "creation_timestamp", "labels",

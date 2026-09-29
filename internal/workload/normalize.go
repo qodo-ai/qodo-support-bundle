@@ -173,17 +173,21 @@ func normalizeDeploymentItem(
 	if err := validateItemKind(item.Kind, DeploymentKind, index); err != nil {
 		return Workload{}, err
 	}
+	replicas := Replicas{
+		Desired:   copyInt32(item.Spec.Replicas),
+		Current:   copyInt32(item.Status.Replicas),
+		Ready:     copyInt32(item.Status.ReadyReplicas),
+		Available: copyInt32(item.Status.AvailableReplicas),
+	}
+	if err := validateReplicas(replicas); err != nil {
+		return Workload{}, fmt.Errorf("normalize Deployment item %d: %w", index, err)
+	}
 	workload, err := normalizer.controllerWorkload(
 		DeploymentKind,
 		item.Metadata,
 		item.Spec.Template,
 		item.Spec.Strategy.Type,
-		Replicas{
-			Desired:   copyInt32(item.Spec.Replicas),
-			Current:   copyInt32(item.Status.Replicas),
-			Ready:     copyInt32(item.Status.ReadyReplicas),
-			Available: copyInt32(item.Status.AvailableReplicas),
-		},
+		replicas,
 		item.Status.Conditions,
 	)
 	if err != nil {
@@ -228,17 +232,21 @@ func normalizeStatefulSetItem(
 	if err := validateItemKind(item.Kind, StatefulSetKind, index); err != nil {
 		return Workload{}, err
 	}
+	replicas := Replicas{
+		Desired:   copyInt32(item.Spec.Replicas),
+		Current:   copyInt32(item.Status.CurrentReplicas),
+		Ready:     copyInt32(item.Status.ReadyReplicas),
+		Available: copyInt32(item.Status.AvailableReplicas),
+	}
+	if err := validateReplicas(replicas); err != nil {
+		return Workload{}, fmt.Errorf("normalize StatefulSet item %d: %w", index, err)
+	}
 	workload, err := normalizer.controllerWorkload(
 		StatefulSetKind,
 		item.Metadata,
 		item.Spec.Template,
 		item.Spec.UpdateStrategy.Type,
-		Replicas{
-			Desired:   copyInt32(item.Spec.Replicas),
-			Current:   copyInt32(item.Status.CurrentReplicas),
-			Ready:     copyInt32(item.Status.ReadyReplicas),
-			Available: copyInt32(item.Status.AvailableReplicas),
-		},
+		replicas,
 		item.Status.Conditions,
 	)
 	if err != nil {
@@ -283,17 +291,21 @@ func normalizeDaemonSetItem(
 	if err := validateItemKind(item.Kind, DaemonSetKind, index); err != nil {
 		return Workload{}, err
 	}
+	replicas := Replicas{
+		Desired:   copyInt32(item.Status.DesiredNumberScheduled),
+		Current:   copyInt32(item.Status.CurrentNumberScheduled),
+		Ready:     copyInt32(item.Status.NumberReady),
+		Available: copyInt32(item.Status.NumberAvailable),
+	}
+	if err := validateReplicas(replicas); err != nil {
+		return Workload{}, fmt.Errorf("normalize DaemonSet item %d: %w", index, err)
+	}
 	workload, err := normalizer.controllerWorkload(
 		DaemonSetKind,
 		item.Metadata,
 		item.Spec.Template,
 		item.Spec.UpdateStrategy.Type,
-		Replicas{
-			Desired:   copyInt32(item.Status.DesiredNumberScheduled),
-			Current:   copyInt32(item.Status.CurrentNumberScheduled),
-			Ready:     copyInt32(item.Status.NumberReady),
-			Available: copyInt32(item.Status.NumberAvailable),
-		},
+		replicas,
 		item.Status.Conditions,
 	)
 	if err != nil {
@@ -337,6 +349,9 @@ func normalizeJobItem(
 ) (Workload, error) {
 	if err := validateItemKind(item.Kind, JobKind, index); err != nil {
 		return Workload{}, err
+	}
+	if item.Status.Active < 0 || item.Status.Succeeded < 0 || item.Status.Failed < 0 {
+		return Workload{}, fmt.Errorf("normalize Job item %d: status counts must be nonnegative", index)
 	}
 	workload, err := normalizer.controllerWorkload(
 		JobKind,
@@ -597,13 +612,29 @@ func (normalizer *normalizer) probe(input *rawProbe) (*Probe, error) {
 	if handlers != 1 {
 		return nil, fmt.Errorf("exactly one probe handler is required, got %d", handlers)
 	}
+	if input.InitialDelaySeconds != nil && *input.InitialDelaySeconds < 0 {
+		return nil, errors.New("probe initial delay must be nonnegative")
+	}
+	for _, field := range []struct {
+		name  string
+		value *int32
+	}{
+		{"period", input.PeriodSeconds},
+		{"timeout", input.TimeoutSeconds},
+		{"success threshold", input.SuccessThreshold},
+		{"failure threshold", input.FailureThreshold},
+	} {
+		if field.value != nil && *field.value <= 0 {
+			return nil, fmt.Errorf("probe %s must be positive", field.name)
+		}
+	}
 
 	output := &Probe{
-		InitialDelaySeconds: input.InitialDelaySeconds,
-		PeriodSeconds:       input.PeriodSeconds,
-		TimeoutSeconds:      input.TimeoutSeconds,
-		SuccessThreshold:    input.SuccessThreshold,
-		FailureThreshold:    input.FailureThreshold,
+		InitialDelaySeconds: int32Value(input.InitialDelaySeconds),
+		PeriodSeconds:       int32Value(input.PeriodSeconds),
+		TimeoutSeconds:      int32Value(input.TimeoutSeconds),
+		SuccessThreshold:    int32Value(input.SuccessThreshold),
+		FailureThreshold:    int32Value(input.FailureThreshold),
 	}
 	switch {
 	case input.HTTPGet != nil:
@@ -870,7 +901,6 @@ func (normalizer *normalizer) conditions(input []rawCondition) ([]Condition, err
 			Type:               normalizer.string(item.Type),
 			Status:             normalizer.string(item.Status),
 			Reason:             normalizer.string(item.Reason),
-			Message:            normalizer.string(item.Message),
 			LastTransitionTime: transitionTime,
 		})
 	}
@@ -957,6 +987,30 @@ func copyInt32(value *int32) *int32 {
 	}
 	copy := *value
 	return &copy
+}
+
+func int32Value(value *int32) int32 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func validateReplicas(replicas Replicas) error {
+	for _, field := range []struct {
+		name  string
+		value *int32
+	}{
+		{"desired", replicas.Desired},
+		{"current", replicas.Current},
+		{"ready", replicas.Ready},
+		{"available", replicas.Available},
+	} {
+		if field.value != nil && *field.value < 0 {
+			return fmt.Errorf("%s replicas must be nonnegative", field.name)
+		}
+	}
+	return nil
 }
 
 func copyInt64(value *int64) *int64 {

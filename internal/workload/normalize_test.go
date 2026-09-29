@@ -26,7 +26,7 @@ func TestNormalizeListJSONSupportsAllWorkloadKinds(t *testing.T) {
 			input:         deploymentFixture,
 			wantName:      "api",
 			wantStrategy:  "RollingUpdate",
-			wantTruncated: true,
+			wantTruncated: false,
 			assert: func(t *testing.T, workload Workload) {
 				t.Helper()
 				assertInt32Pointer(t, workload.Replicas.Desired, 0)
@@ -136,6 +136,99 @@ func TestNormalizeListJSONSupportsAllWorkloadKinds(t *testing.T) {
 	}
 }
 
+func TestNormalizeListJSONRejectsNegativeControllerAndJobCounts(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		kind  Kind
+		input string
+	}{
+		{
+			name: "deployment replicas",
+			kind: DeploymentKind,
+			input: `{"kind":"DeploymentList","items":[{
+				"kind":"Deployment","metadata":{"name":"api","namespace":"platform"},
+				"spec":{"replicas":-1,"template":{"spec":{"containers":[]}}}
+			}]}`,
+		},
+		{
+			name: "statefulset current replicas",
+			kind: StatefulSetKind,
+			input: `{"kind":"StatefulSetList","items":[{
+				"kind":"StatefulSet","metadata":{"name":"db","namespace":"platform"},
+				"spec":{"template":{"spec":{"containers":[]}}},
+				"status":{"currentReplicas":-1}
+			}]}`,
+		},
+		{
+			name: "daemonset available replicas",
+			kind: DaemonSetKind,
+			input: `{"kind":"DaemonSetList","items":[{
+				"kind":"DaemonSet","metadata":{"name":"agent","namespace":"platform"},
+				"spec":{"template":{"spec":{"containers":[]}}},
+				"status":{"numberAvailable":-1}
+			}]}`,
+		},
+		{
+			name: "job failed count",
+			kind: JobKind,
+			input: `{"kind":"JobList","items":[{
+				"kind":"Job","metadata":{"name":"migration","namespace":"platform"},
+				"spec":{"template":{"spec":{"containers":[]}}},
+				"status":{"failed":-1}
+			}]}`,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := NormalizeListJSON(
+				test.kind,
+				[]byte(test.input),
+				redact.New(),
+			); err == nil || !strings.Contains(err.Error(), "nonnegative") {
+				t.Fatalf("negative count error = %v", err)
+			}
+		})
+	}
+}
+
+func TestNormalizeListJSONRejectsInvalidExplicitProbeTiming(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		field string
+	}{
+		{"negative initial delay", `"initialDelaySeconds":-1`},
+		{"zero period", `"periodSeconds":0`},
+		{"negative period", `"periodSeconds":-1`},
+		{"zero timeout", `"timeoutSeconds":0`},
+		{"zero success threshold", `"successThreshold":0`},
+		{"negative failure threshold", `"failureThreshold":-1`},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			input := fmt.Sprintf(`{"kind":"DeploymentList","items":[{
+				"kind":"Deployment","metadata":{"name":"api","namespace":"platform"},
+				"spec":{"template":{"spec":{"containers":[{
+					"name":"api","image":"api:latest",
+					"livenessProbe":{"httpGet":{"port":8080},%s}
+				}]}}}
+			}]}`, test.field)
+			if _, err := NormalizeListJSON(
+				DeploymentKind,
+				[]byte(input),
+				redact.New(),
+			); err == nil {
+				t.Fatal("invalid explicit probe timing was accepted")
+			}
+		})
+	}
+}
+
 func TestNormalizeListJSONAllowlistsRedactsAndNormalizesNestedFields(t *testing.T) {
 	t.Parallel()
 	result, err := NormalizeListJSON(
@@ -146,8 +239,8 @@ func TestNormalizeListJSONAllowlistsRedactsAndNormalizesNestedFields(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Truncated {
-		t.Fatal("control-character removal did not report truncation")
+	if result.Truncated {
+		t.Fatal("omitted free-form condition message should not affect retained-field truncation")
 	}
 	workload := result.Workloads[0]
 	if workload.ServiceAccountName != "password="+redact.Replacement {
@@ -203,9 +296,9 @@ func TestNormalizeListJSONAllowlistsRedactsAndNormalizesNestedFields(t *testing.
 		t.Fatalf("affinity selector presence was lost: %+v", scheduling.Affinity)
 	}
 	if len(workload.Conditions) != 1 ||
-		workload.Conditions[0].Message != "password="+redact.Replacement ||
+		workload.Conditions[0].Reason != "MinimumReplicasAvailable" ||
 		workload.Conditions[0].LastTransitionTime == nil {
-		t.Fatalf("condition was not sanitized: %+v", workload.Conditions)
+		t.Fatalf("structured condition fields were not retained: %+v", workload.Conditions)
 	}
 
 	encoded, err := json.Marshal(workload)
@@ -225,6 +318,7 @@ func TestNormalizeListJSONAllowlistsRedactsAndNormalizesNestedFields(t *testing.
 		"forbidden-volume-secret",
 		"forbidden-mount-secret",
 		"forbidden-node-secret",
+		"raw-condition-secret",
 		`"annotations"`,
 		`"env"`,
 		`"command"`,
@@ -234,6 +328,7 @@ func TestNormalizeListJSONAllowlistsRedactsAndNormalizesNestedFields(t *testing.
 		`"volumes"`,
 		`"volumeMounts"`,
 		`"nodeName"`,
+		`"message"`,
 	} {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("normalized output retained %q: %s", forbidden, output)
