@@ -2,6 +2,7 @@ package collection
 
 import (
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/workload"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
 )
 
@@ -28,6 +29,31 @@ func KubernetesCoverage(report kubernetes.Report, collectionErr error) Coverage 
 		}
 	}
 	return Coverage{State: CoverageComplete}
+}
+
+// WorkloadCoverage derives source coverage from normalized workload artifacts
+// and their per-resource coverage entries.
+func WorkloadCoverage(report workload.Report, collectionErr error) Coverage {
+	coverage := Coverage{
+		RetainedBytes: int64(report.RetainedBytes),
+		RecordCount:   int64(report.RetainedRecords),
+		Truncated:     report.Truncated,
+	}
+	if collectionErr != nil {
+		coverage.State = CoverageUnavailable
+		if report.RetainedRecords > 0 {
+			coverage.State = CoveragePartial
+		}
+		coverage.Reason = reasonCollectionError
+		return coverage
+	}
+	if err := workload.ValidateCompleteCoverage(report); err != nil {
+		coverage.State = CoveragePartial
+		coverage.Reason = reasonIssuesReported
+		return coverage
+	}
+	coverage.State = CoverageComplete
+	return coverage
 }
 
 // ZitadelCoverage derives coverage from the optional Zitadel probe. A probe

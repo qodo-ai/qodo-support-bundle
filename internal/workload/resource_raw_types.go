@@ -13,8 +13,9 @@ import (
 // support-bundle artifacts. They must not grow into general Kubernetes types.
 
 type rawServiceList struct {
-	Kind  string                       `json:"kind"`
-	Items rawRequiredSlice[rawService] `json:"items"`
+	Kind     string                       `json:"kind"`
+	Metadata rawListMetadata              `json:"metadata"`
+	Items    rawRequiredSlice[rawService] `json:"items"`
 }
 
 type rawService struct {
@@ -37,8 +38,9 @@ type rawServicePort struct {
 }
 
 type rawEndpointSliceList struct {
-	Kind  string                             `json:"kind"`
-	Items rawRequiredSlice[rawEndpointSlice] `json:"items"`
+	Kind     string                             `json:"kind"`
+	Metadata rawListMetadata                    `json:"metadata"`
+	Items    rawRequiredSlice[rawEndpointSlice] `json:"items"`
 }
 
 type rawEndpointSlice struct {
@@ -103,8 +105,9 @@ type rawEndpointConditions struct {
 }
 
 type rawHorizontalPodAutoscalerList struct {
-	Kind  string                                       `json:"kind"`
-	Items rawRequiredSlice[rawHorizontalPodAutoscaler] `json:"items"`
+	Kind     string                                       `json:"kind"`
+	Metadata rawListMetadata                              `json:"metadata"`
+	Items    rawRequiredSlice[rawHorizontalPodAutoscaler] `json:"items"`
 }
 
 type rawHorizontalPodAutoscaler struct {
@@ -132,8 +135,9 @@ type rawCrossVersionObjectReference struct {
 }
 
 type rawPersistentVolumeClaimList struct {
-	Kind  string                                     `json:"kind"`
-	Items rawRequiredSlice[rawPersistentVolumeClaim] `json:"items"`
+	Kind     string                                     `json:"kind"`
+	Metadata rawListMetadata                            `json:"metadata"`
+	Items    rawRequiredSlice[rawPersistentVolumeClaim] `json:"items"`
 }
 
 type rawPersistentVolumeClaim struct {

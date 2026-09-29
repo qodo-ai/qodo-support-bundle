@@ -19,6 +19,10 @@ type Resource struct {
 	Labels            *IdentityLabels `json:"labels,omitempty"`
 }
 
+func (resource Resource) resourceIdentity() Resource {
+	return resource
+}
+
 // IdentityLabels contains only allowlisted, redacted workload identity labels.
 // Its values are private so raw Kubernetes labels cannot be assigned directly.
 type IdentityLabels struct {

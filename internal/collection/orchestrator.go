@@ -9,6 +9,7 @@ import (
 	"github.com/qodo-ai/qodo-support-bundle/internal/bundle"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
+	"github.com/qodo-ai/qodo-support-bundle/internal/workload"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
 )
 
@@ -51,6 +52,7 @@ type Result struct {
 	Status               string
 	Coverage             map[Source]Coverage
 	KubernetesReport     kubernetes.Report
+	WorkloadReport       *workload.Report
 	ConnectivityReport   *zitadel.Report
 	ConnectivityFailure  string
 	CanceledBeforeBundle bool
@@ -71,6 +73,15 @@ type KubernetesCollector func(
 	*redact.Redactor,
 ) (kubernetes.Report, error)
 
+// WorkloadCollector returns normalized namespace-scoped workload context.
+type WorkloadCollector func(
+	context.Context,
+	workload.Config,
+	kubernetes.Runner,
+	kubernetes.Sink,
+	*redact.Redactor,
+) (workload.Report, error)
+
 // ZitadelCollector executes the optional Platform-to-Zitadel probe.
 type ZitadelCollector func(
 	context.Context,
@@ -82,6 +93,7 @@ type ZitadelCollector func(
 // Collectors are explicit source collector dependencies.
 type Collectors struct {
 	Kubernetes KubernetesCollector
+	Workload   WorkloadCollector
 	Zitadel    ZitadelCollector
 }
 
@@ -89,6 +101,7 @@ type Collectors struct {
 func DefaultCollectors() Collectors {
 	return Collectors{
 		Kubernetes: kubernetes.Collect,
+		Workload:   workload.Collect,
 		Zitadel:    zitadel.Collect,
 	}
 }
@@ -113,7 +126,7 @@ func Execute(
 	); err != nil {
 		return Result{}, err
 	}
-	requested := []Source{SourceKubernetes}
+	requested := []Source{SourceKubernetes, SourceWorkload}
 	if request.Zitadel != nil {
 		requested = append(requested, SourceZitadel)
 	}
@@ -140,6 +153,32 @@ func Execute(
 	result.Coverage[SourceKubernetes] = KubernetesCoverage(
 		kubernetesReport,
 		kubernetesErr,
+	)
+
+	workloadReport, workloadErr := collectors.Workload(
+		ctx,
+		workload.Config{
+			Namespaces:       workloadCollectionNamespaces(request.Kubernetes, kubernetesReport),
+			Context:          request.Kubernetes.Context,
+			Kubeconfig:       request.Kubernetes.Kubeconfig,
+			Timeout:          request.Kubernetes.Timeout,
+			MaxResponseBytes: workload.DefaultMaxResponseBytes,
+			MaxSourceBytes:   workload.DefaultMaxSourceBytes,
+			MaxTotalBytes:    workload.DefaultMaxTotalBytes,
+		},
+		runner,
+		archive,
+		redactor,
+	)
+	result.WorkloadReport = &workloadReport
+	if ctx.Err() != nil {
+		result.CanceledBeforeBundle = true
+		return result, ctx.Err()
+	}
+	result.Coverage[SourceWorkload] = WorkloadCoverage(workloadReport, workloadErr)
+	kubernetesReport.Issues = append(
+		kubernetesReport.Issues,
+		workloadCollectionIssues(workloadReport, workloadErr, redactor)...,
 	)
 
 	var outcome zitadel.Outcome
@@ -307,12 +346,14 @@ func validateDependencies(
 		return errors.New("Kubernetes runner is required")
 	case archive == nil:
 		return errors.New("bundle archive is required")
-	case redactor == nil:
-		return errors.New("redactor is required")
+	case redactor == nil || !redactor.Ready():
+		return errors.New("configured redactor is required")
 	case currentTime == nil:
 		return errors.New("current time source is required")
 	case collectors.Kubernetes == nil:
 		return errors.New("Kubernetes collector is required")
+	case collectors.Workload == nil:
+		return errors.New("workload collector is required")
 	case requireZitadel && collectors.Zitadel == nil:
 		return errors.New("Zitadel collector is required")
 	default:
@@ -333,6 +374,53 @@ func reportEvent(progress func(Event), event Event) {
 	if progress != nil {
 		progress(event)
 	}
+}
+
+func workloadCollectionNamespaces(
+	config kubernetes.Config,
+	report kubernetes.Report,
+) []string {
+	if config.AllNamespaces {
+		return append([]string(nil), report.CollectionNamespaces...)
+	}
+	if len(config.Namespaces) > 0 {
+		return append([]string(nil), config.Namespaces...)
+	}
+	if config.Namespace != "" {
+		return []string{config.Namespace}
+	}
+	return nil
+}
+
+func workloadCollectionIssues(
+	report workload.Report,
+	collectionErr error,
+	redactor *redact.Redactor,
+) []kubernetes.Issue {
+	issues := make([]kubernetes.Issue, 0)
+	if collectionErr != nil {
+		issues = append(issues, kubernetes.Issue{
+			Operation: "collect workload context",
+			Message:   sanitizeReason(collectionErr.Error(), redactor),
+		})
+	}
+	for _, coverage := range report.Coverage {
+		if coverage.State == workload.CoverageCollected {
+			continue
+		}
+		message := "workload context " + string(coverage.State)
+		if coverage.Reason != "" {
+			message += ": " + coverage.Reason
+		}
+		issues = append(issues, kubernetes.Issue{
+			Operation: "collect workload context",
+			Resource: redactor.Text(
+				coverage.Namespace + "/" + coverage.Source,
+			),
+			Message: redactor.Text(message),
+		})
+	}
+	return issues
 }
 
 func zitadelNamespace(config *zitadel.Config) string {

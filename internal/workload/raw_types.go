@@ -15,6 +15,10 @@ type rawMetadata struct {
 	Labels            rawIdentityLabels `json:"labels"`
 }
 
+type rawListMetadata struct {
+	Continue string `json:"continue"`
+}
+
 type rawIdentityLabels map[string]string
 
 const endpointSliceServiceNameLabel = "kubernetes.io/service-name"
@@ -214,8 +218,9 @@ type rawCondition struct {
 }
 
 type rawDeploymentList struct {
-	Kind  string          `json:"kind"`
-	Items []rawDeployment `json:"items"`
+	Kind     string          `json:"kind"`
+	Metadata rawListMetadata `json:"metadata"`
+	Items    []rawDeployment `json:"items"`
 }
 
 type rawDeployment struct {
@@ -243,8 +248,9 @@ type rawControllerStatus struct {
 }
 
 type rawStatefulSetList struct {
-	Kind  string           `json:"kind"`
-	Items []rawStatefulSet `json:"items"`
+	Kind     string           `json:"kind"`
+	Metadata rawListMetadata  `json:"metadata"`
+	Items    []rawStatefulSet `json:"items"`
 }
 
 type rawStatefulSet struct {
@@ -262,14 +268,16 @@ type rawStatefulSetSpec struct {
 
 type rawStatefulSetStatus struct {
 	Replicas          *int32         `json:"replicas"`
+	CurrentReplicas   *int32         `json:"currentReplicas"`
 	ReadyReplicas     *int32         `json:"readyReplicas"`
 	AvailableReplicas *int32         `json:"availableReplicas"`
 	Conditions        []rawCondition `json:"conditions"`
 }
 
 type rawDaemonSetList struct {
-	Kind  string         `json:"kind"`
-	Items []rawDaemonSet `json:"items"`
+	Kind     string          `json:"kind"`
+	Metadata rawListMetadata `json:"metadata"`
+	Items    []rawDaemonSet  `json:"items"`
 }
 
 type rawDaemonSet struct {
@@ -293,8 +301,9 @@ type rawDaemonSetStatus struct {
 }
 
 type rawJobList struct {
-	Kind  string   `json:"kind"`
-	Items []rawJob `json:"items"`
+	Kind     string          `json:"kind"`
+	Metadata rawListMetadata `json:"metadata"`
+	Items    []rawJob        `json:"items"`
 }
 
 type rawJob struct {
@@ -317,8 +326,9 @@ type rawJobStatus struct {
 }
 
 type rawCronJobList struct {
-	Kind  string       `json:"kind"`
-	Items []rawCronJob `json:"items"`
+	Kind     string          `json:"kind"`
+	Metadata rawListMetadata `json:"metadata"`
+	Items    []rawCronJob    `json:"items"`
 }
 
 type rawCronJob struct {

@@ -61,6 +61,7 @@ type Report struct {
 	AllNamespaces             bool     `json:"all_namespaces"`
 	ExcludedNamespaces        []string `json:"excluded_namespaces,omitempty"`
 	Namespaces                []string `json:"namespaces"`
+	CollectionNamespaces      []string `json:"-"`
 	NamespacesRequested       int      `json:"namespaces_requested"`
 	Pods                      int      `json:"pods"`
 	Containers                int      `json:"containers"`

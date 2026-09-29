@@ -51,8 +51,9 @@ const (
 // retained string had controls removed or any string or collection was
 // shortened to a deterministic hard bound.
 type NormalizationResult struct {
-	Workloads []Workload
-	Truncated bool
+	Workloads    []Workload
+	RecordsFound int
+	Truncated    bool
 }
 
 // NormalizeListJSON decodes one kubectl-style list response for kind and
@@ -90,8 +91,9 @@ func NormalizeListJSON(
 		return NormalizationResult{}, err
 	}
 	return NormalizationResult{
-		Workloads: workloads,
-		Truncated: normalizer.truncated,
+		Workloads:    workloads,
+		RecordsFound: normalizer.recordsFound,
+		Truncated:    normalizer.truncated,
 	}, nil
 }
 
@@ -122,9 +124,10 @@ func validateKind(kind Kind) error {
 }
 
 type normalizer struct {
-	redactor    *redact.Redactor
-	validateAll bool
-	truncated   bool
+	redactor     *redact.Redactor
+	validateAll  bool
+	truncated    bool
+	recordsFound int
 }
 
 func (current *normalizer) validator() *normalizer {
@@ -142,6 +145,7 @@ func decodeDeployments(data []byte, normalizer *normalizer) ([]Workload, error) 
 	if err := validateListKind(list.Kind, DeploymentKind); err != nil {
 		return nil, err
 	}
+	normalizer.observeListContinuation(list.Metadata)
 	validator := normalizer.validator()
 	for index := range list.Items {
 		if _, err := normalizeDeploymentItem(validator, list.Items[index], index); err != nil {
@@ -149,6 +153,7 @@ func decodeDeployments(data []byte, normalizer *normalizer) ([]Workload, error) 
 		}
 	}
 	count := normalizer.boundedLength(len(list.Items), maxWorkloads)
+	normalizer.recordsFound = len(list.Items)
 	output := make([]Workload, 0, count)
 	for index := 0; index < count; index++ {
 		workload, err := normalizeDeploymentItem(normalizer, list.Items[index], index)
@@ -195,6 +200,7 @@ func decodeStatefulSets(data []byte, normalizer *normalizer) ([]Workload, error)
 	if err := validateListKind(list.Kind, StatefulSetKind); err != nil {
 		return nil, err
 	}
+	normalizer.observeListContinuation(list.Metadata)
 	validator := normalizer.validator()
 	for index := range list.Items {
 		if _, err := normalizeStatefulSetItem(validator, list.Items[index], index); err != nil {
@@ -202,6 +208,7 @@ func decodeStatefulSets(data []byte, normalizer *normalizer) ([]Workload, error)
 		}
 	}
 	count := normalizer.boundedLength(len(list.Items), maxWorkloads)
+	normalizer.recordsFound = len(list.Items)
 	output := make([]Workload, 0, count)
 	for index := 0; index < count; index++ {
 		workload, err := normalizeStatefulSetItem(normalizer, list.Items[index], index)
@@ -228,7 +235,7 @@ func normalizeStatefulSetItem(
 		item.Spec.UpdateStrategy.Type,
 		Replicas{
 			Desired:   copyInt32(item.Spec.Replicas),
-			Current:   copyInt32(item.Status.Replicas),
+			Current:   copyInt32(item.Status.CurrentReplicas),
 			Ready:     copyInt32(item.Status.ReadyReplicas),
 			Available: copyInt32(item.Status.AvailableReplicas),
 		},
@@ -248,6 +255,7 @@ func decodeDaemonSets(data []byte, normalizer *normalizer) ([]Workload, error) {
 	if err := validateListKind(list.Kind, DaemonSetKind); err != nil {
 		return nil, err
 	}
+	normalizer.observeListContinuation(list.Metadata)
 	validator := normalizer.validator()
 	for index := range list.Items {
 		if _, err := normalizeDaemonSetItem(validator, list.Items[index], index); err != nil {
@@ -255,6 +263,7 @@ func decodeDaemonSets(data []byte, normalizer *normalizer) ([]Workload, error) {
 		}
 	}
 	count := normalizer.boundedLength(len(list.Items), maxWorkloads)
+	normalizer.recordsFound = len(list.Items)
 	output := make([]Workload, 0, count)
 	for index := 0; index < count; index++ {
 		workload, err := normalizeDaemonSetItem(normalizer, list.Items[index], index)
@@ -301,6 +310,7 @@ func decodeJobs(data []byte, normalizer *normalizer) ([]Workload, error) {
 	if err := validateListKind(list.Kind, JobKind); err != nil {
 		return nil, err
 	}
+	normalizer.observeListContinuation(list.Metadata)
 	validator := normalizer.validator()
 	for index := range list.Items {
 		if _, err := normalizeJobItem(validator, list.Items[index], index); err != nil {
@@ -308,6 +318,7 @@ func decodeJobs(data []byte, normalizer *normalizer) ([]Workload, error) {
 		}
 	}
 	count := normalizer.boundedLength(len(list.Items), maxWorkloads)
+	normalizer.recordsFound = len(list.Items)
 	output := make([]Workload, 0, count)
 	for index := 0; index < count; index++ {
 		workload, err := normalizeJobItem(normalizer, list.Items[index], index)
@@ -355,6 +366,7 @@ func decodeCronJobs(data []byte, normalizer *normalizer) ([]Workload, error) {
 	if err := validateListKind(list.Kind, CronJobKind); err != nil {
 		return nil, err
 	}
+	normalizer.observeListContinuation(list.Metadata)
 	validator := normalizer.validator()
 	for index := range list.Items {
 		if _, err := normalizeCronJobItem(validator, list.Items[index], index); err != nil {
@@ -362,6 +374,7 @@ func decodeCronJobs(data []byte, normalizer *normalizer) ([]Workload, error) {
 		}
 	}
 	count := normalizer.boundedLength(len(list.Items), maxWorkloads)
+	normalizer.recordsFound = len(list.Items)
 	output := make([]Workload, 0, count)
 	for index := 0; index < count; index++ {
 		workload, err := normalizeCronJobItem(normalizer, list.Items[index], index)
@@ -897,6 +910,12 @@ func (normalizer *normalizer) boundedLength(length int, maximum int) int {
 		return maximum
 	}
 	return length
+}
+
+func (normalizer *normalizer) observeListContinuation(metadata rawListMetadata) {
+	if metadata.Continue != "" {
+		normalizer.truncated = true
+	}
 }
 
 func (normalizer *normalizer) string(value string) string {

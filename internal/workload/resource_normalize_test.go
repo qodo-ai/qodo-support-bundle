@@ -305,6 +305,7 @@ func TestNormalizeResourceListsApplyDeterministicBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !first.Truncated ||
+		first.RecordsFound != maxServices+1 ||
 		len(first.Services) != maxServices ||
 		len(first.Services[0].Selectors) != maxMapEntries ||
 		len(first.Services[0].Ports) != maxServicePorts ||

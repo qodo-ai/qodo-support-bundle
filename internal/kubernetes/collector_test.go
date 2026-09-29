@@ -671,11 +671,61 @@ func TestCollectContinuesWhenOneOfMultipleNamespacesIsForbidden(t *testing.T) {
 	}
 	if len(report.Namespaces) != 1 ||
 		report.Namespaces[0] != "qodo" ||
+		!reflect.DeepEqual(report.CollectionNamespaces, []string{"qodo", "zitadel"}) ||
 		len(report.Issues) != 1 {
 		t.Fatalf("unexpected partial report: %+v", report)
 	}
 	if strings.Contains(report.Issues[0].Message, "secret-value") {
 		t.Fatalf("issue leaked token: %+v", report.Issues[0])
+	}
+}
+
+func TestCollectPreservesDiscoveredNamespaceScopeWhenPodDecodeFails(t *testing.T) {
+	t.Parallel()
+	runner := &fakeRunner{
+		run: func(arguments string) (CommandResult, error) {
+			switch {
+			case strings.Contains(arguments, "get namespaces"):
+				return CommandResult{Stdout: []byte(`{"items":[
+					{"metadata":{"name":"alpha"}},
+					{"metadata":{"name":"beta"}}
+				]}`)}, nil
+			case strings.Contains(arguments, "get pods") &&
+				strings.Contains(arguments, "--namespace alpha"):
+				return CommandResult{Stdout: []byte(`{"items":[]}`)}, nil
+			case strings.Contains(arguments, "get pods") &&
+				strings.Contains(arguments, "--namespace beta"):
+				return CommandResult{Stdout: []byte(`not-json`)}, nil
+			case strings.Contains(arguments, "get events"):
+				return CommandResult{Stdout: []byte(`{"items":[]}`)}, nil
+			default:
+				return CommandResult{}, errors.New("unexpected command")
+			}
+		},
+	}
+
+	report, err := Collect(
+		context.Background(),
+		Config{
+			AllNamespaces:    true,
+			Since:            time.Minute,
+			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
+			MaxLogBytes:      1024,
+			MaxTotalLogBytes: 1024,
+		},
+		runner,
+		&memorySink{},
+		redact.New(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(report.CollectionNamespaces, []string{"alpha", "beta"}) {
+		t.Fatalf("raw discovery scope was lost: %+v", report)
+	}
+	if !reflect.DeepEqual(report.Namespaces, []string{"alpha"}) {
+		t.Fatalf("successful pod scope is inaccurate: %+v", report.Namespaces)
 	}
 }
 

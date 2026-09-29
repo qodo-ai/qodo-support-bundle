@@ -19,26 +19,30 @@ const (
 
 // ServiceNormalizationResult contains bounded normalized Services.
 type ServiceNormalizationResult struct {
-	Services  []Service
-	Truncated bool
+	Services     []Service
+	RecordsFound int
+	Truncated    bool
 }
 
 // EndpointSliceNormalizationResult contains bounded normalized EndpointSlices.
 type EndpointSliceNormalizationResult struct {
 	EndpointSlices []EndpointSlice
+	RecordsFound   int
 	Truncated      bool
 }
 
 // AutoscalerNormalizationResult contains bounded normalized HPAs.
 type AutoscalerNormalizationResult struct {
-	Autoscalers []Autoscaler
-	Truncated   bool
+	Autoscalers  []Autoscaler
+	RecordsFound int
+	Truncated    bool
 }
 
 // StorageNormalizationResult contains bounded normalized PVCs.
 type StorageNormalizationResult struct {
-	Storage   []Storage
-	Truncated bool
+	Storage      []Storage
+	RecordsFound int
+	Truncated    bool
 }
 
 // NormalizeServiceListJSON decodes a ServiceList into its approved routing
@@ -58,6 +62,7 @@ func NormalizeServiceListJSON(
 	if err := validateListKind(list.Kind, serviceKind); err != nil {
 		return ServiceNormalizationResult{}, err
 	}
+	normalizer.observeListContinuation(list.Metadata)
 	if !list.Items.set {
 		return ServiceNormalizationResult{}, fmt.Errorf("decode Service list: items are required")
 	}
@@ -71,8 +76,9 @@ func NormalizeServiceListJSON(
 		return ServiceNormalizationResult{}, err
 	}
 	return ServiceNormalizationResult{
-		Services:  services,
-		Truncated: normalizer.truncated,
+		Services:     services,
+		RecordsFound: len(list.Items.values),
+		Truncated:    normalizer.truncated,
 	}, nil
 }
 
@@ -93,6 +99,7 @@ func NormalizeEndpointSliceListJSON(
 	if err := validateListKind(list.Kind, endpointSliceKind); err != nil {
 		return EndpointSliceNormalizationResult{}, err
 	}
+	normalizer.observeListContinuation(list.Metadata)
 	if !list.Items.set {
 		return EndpointSliceNormalizationResult{}, fmt.Errorf(
 			"decode EndpointSlice list: items are required",
@@ -109,6 +116,7 @@ func NormalizeEndpointSliceListJSON(
 	}
 	return EndpointSliceNormalizationResult{
 		EndpointSlices: slices,
+		RecordsFound:   len(list.Items.values),
 		Truncated:      normalizer.truncated,
 	}, nil
 }
@@ -130,6 +138,7 @@ func NormalizeHorizontalPodAutoscalerListJSON(
 	if err := validateListKind(list.Kind, horizontalPodAutoscalerKind); err != nil {
 		return AutoscalerNormalizationResult{}, err
 	}
+	normalizer.observeListContinuation(list.Metadata)
 	if !list.Items.set {
 		return AutoscalerNormalizationResult{}, fmt.Errorf(
 			"decode HorizontalPodAutoscaler list: items are required",
@@ -145,8 +154,9 @@ func NormalizeHorizontalPodAutoscalerListJSON(
 		return AutoscalerNormalizationResult{}, err
 	}
 	return AutoscalerNormalizationResult{
-		Autoscalers: autoscalers,
-		Truncated:   normalizer.truncated,
+		Autoscalers:  autoscalers,
+		RecordsFound: len(list.Items.values),
+		Truncated:    normalizer.truncated,
 	}, nil
 }
 
@@ -167,6 +177,7 @@ func NormalizePersistentVolumeClaimListJSON(
 	if err := validateListKind(list.Kind, persistentVolumeClaimKind); err != nil {
 		return StorageNormalizationResult{}, err
 	}
+	normalizer.observeListContinuation(list.Metadata)
 	if !list.Items.set {
 		return StorageNormalizationResult{}, fmt.Errorf(
 			"decode PersistentVolumeClaim list: items are required",
@@ -182,8 +193,9 @@ func NormalizePersistentVolumeClaimListJSON(
 		return StorageNormalizationResult{}, err
 	}
 	return StorageNormalizationResult{
-		Storage:   storage,
-		Truncated: normalizer.truncated,
+		Storage:      storage,
+		RecordsFound: len(list.Items.values),
+		Truncated:    normalizer.truncated,
 	}, nil
 }
 

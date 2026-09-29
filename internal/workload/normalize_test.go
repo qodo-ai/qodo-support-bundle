@@ -46,7 +46,7 @@ func TestNormalizeListJSONSupportsAllWorkloadKinds(t *testing.T) {
 			assert: func(t *testing.T, workload Workload) {
 				t.Helper()
 				assertInt32Pointer(t, workload.Replicas.Desired, 3)
-				assertInt32Pointer(t, workload.Replicas.Current, 3)
+				assertInt32Pointer(t, workload.Replicas.Current, 1)
 				assertInt32Pointer(t, workload.Replicas.Ready, 2)
 				assertInt32Pointer(t, workload.Replicas.Available, 2)
 			},
@@ -268,7 +268,7 @@ func TestNormalizeListJSONCleansControlsBeforeRedaction(t *testing.T) {
 	}
 }
 
-func TestStatefulSetCurrentUsesTotalReplicas(t *testing.T) {
+func TestStatefulSetReplicaSemanticsUseAppsV1StatusFields(t *testing.T) {
 	t.Parallel()
 	result, err := NormalizeListJSON(
 		StatefulSetKind,
@@ -279,7 +279,10 @@ func TestStatefulSetCurrentUsesTotalReplicas(t *testing.T) {
 		t.Fatal(err)
 	}
 	workload := result.Workloads[0]
-	assertInt32Pointer(t, workload.Replicas.Current, 3)
+	assertInt32Pointer(t, workload.Replicas.Desired, 3)
+	assertInt32Pointer(t, workload.Replicas.Current, 1)
+	assertInt32Pointer(t, workload.Replicas.Ready, 2)
+	assertInt32Pointer(t, workload.Replicas.Available, 2)
 }
 
 func TestNormalizeListJSONBoundsAreDeterministic(t *testing.T) {
@@ -333,6 +336,12 @@ func TestNormalizeListJSONBoundsAreDeterministic(t *testing.T) {
 	}
 	if !first.Truncated || !second.Truncated {
 		t.Fatal("bounded input did not report truncation")
+	}
+	if first.RecordsFound != maxWorkloads+1 || second.RecordsFound != maxWorkloads+1 {
+		t.Fatalf("records found were not preserved: first=%d second=%d",
+			first.RecordsFound,
+			second.RecordsFound,
+		)
 	}
 	if len(first.Workloads) != maxWorkloads ||
 		len(first.Workloads[0].Containers) != maxContainers ||
