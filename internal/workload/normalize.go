@@ -1021,12 +1021,17 @@ func scanJSONValue(decoder *json.Decoder, depth int, caseSensitiveKeys bool) err
 }
 
 func caseSensitiveJSONMap(field string) bool {
-	switch field {
-	case "annotations", "labels", "matchLabels", "nodeSelector":
-		return true
-	default:
-		return false
+	for _, mapField := range []string{
+		"annotations",
+		"labels",
+		"matchLabels",
+		"nodeSelector",
+	} {
+		if strings.EqualFold(field, mapField) {
+			return true
+		}
 	}
+	return false
 }
 
 func caseFoldKey(value string) string {

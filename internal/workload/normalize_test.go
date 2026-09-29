@@ -648,11 +648,17 @@ func TestNormalizeListJSONAllowsCaseDistinctKubernetesMapKeys(t *testing.T) {
 			"metadata":{
 				"name":"api",
 				"namespace":"platform",
-				"labels":{"Team":"one","team":"two"}
+				"Labels":{"Team":"one","team":"two"}
 			},
 			"spec":{"template":{"spec":{
 				"containers":[{"name":"api","image":"api:latest"}],
-				"nodeSelector":{"Disk":"ssd","disk":"nvme"}
+				"NodeSelector":{"Disk":"ssd","disk":"nvme"},
+				"affinity":{"podAffinity":{
+					"requiredDuringSchedulingIgnoredDuringExecution":[{
+						"topologyKey":"zone",
+						"labelSelector":{"MatchLabels":{"App":"one","app":"two"}}
+					}]
+				}}
 			}}}
 		}]
 	}`
@@ -665,6 +671,13 @@ func TestNormalizeListJSONAllowsCaseDistinctKubernetesMapKeys(t *testing.T) {
 			"case-distinct node selector keys were not preserved: %+v",
 			result.Workloads[0].Scheduling.NodeSelector,
 		)
+	}
+	affinity := result.Workloads[0].Scheduling.Affinity
+	if affinity == nil ||
+		len(affinity.RequiredPod) != 1 ||
+		affinity.RequiredPod[0].Selector == nil ||
+		len(affinity.RequiredPod[0].Selector.MatchLabels) != 2 {
+		t.Fatalf("case-distinct match label keys were not preserved: %+v", affinity)
 	}
 }
 
