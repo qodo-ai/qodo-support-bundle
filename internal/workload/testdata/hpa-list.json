@@ -1,0 +1,75 @@
+{
+  "apiVersion": "autoscaling/v2",
+  "kind": "HorizontalPodAutoscalerList",
+  "items": [
+    {
+      "apiVersion": "autoscaling/v2",
+      "kind": "HorizontalPodAutoscaler",
+      "metadata": {
+        "name": "api",
+        "namespace": "platform",
+        "creationTimestamp": "2026-09-29T08:00:00Z",
+        "labels": {
+          "app": "api",
+          "customer.internal/id": "forbidden-hpa-label"
+        },
+        "annotations": {
+          "token": "forbidden-hpa-annotation"
+        }
+      },
+      "spec": {
+        "scaleTargetRef": {
+          "apiVersion": "apps/v1",
+          "kind": "Deployment",
+          "name": "password=raw-target-secret"
+        },
+        "minReplicas": 0,
+        "maxReplicas": 10,
+        "metrics": [
+          {
+            "type": "External",
+            "external": {
+              "metric": {
+                "name": "forbidden-metric",
+                "selector": {
+                  "matchLabels": {
+                    "token": "forbidden-metric-secret"
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "behavior": {
+          "scaleUp": {
+            "policies": [
+              {
+                "type": "Pods",
+                "value": 4
+              }
+            ]
+          }
+        }
+      },
+      "status": {
+        "currentReplicas": 3,
+        "desiredReplicas": 5,
+        "currentMetrics": [
+          {
+            "type": "External",
+            "external": {
+              "current": {
+                "value": "forbidden-current-metric"
+              }
+            }
+          }
+        ],
+        "conditions": [
+          {
+            "message": "forbidden-hpa-condition"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "apiVersion": "discovery.k8s.io/v1",
+  "kind": "EndpointSliceList",
+  "items": [
+    {
+      "apiVersion": "discovery.k8s.io/v1",
+      "kind": "EndpointSlice",
+      "metadata": {
+        "name": "api-abc12",
+        "namespace": "platform",
+        "creationTimestamp": "2026-09-29T08:00:00Z",
+        "labels": {
+          "kubernetes.io/service-name": "password=raw-endpoint-service-secret",
+          "app.kubernetes.io/name": "api",
+          "customer.internal/id": "forbidden-endpoint-label"
+        },
+        "annotations": {
+          "token": "forbidden-endpoint-annotation"
+        }
+      },
+      "addressType": "IPv4",
+      "endpoints": [
+        {
+          "addresses": [
+            "10.1.2.3"
+          ],
+          "conditions": {
+            "ready": true,
+            "serving": true,
+            "terminating": false
+          },
+          "hostname": "forbidden-endpoint-hostname",
+          "nodeName": "forbidden-endpoint-node",
+          "targetRef": {
+            "kind": "Pod",
+            "name": "forbidden-pod-name"
+          }
+        },
+        {
+          "addresses": [
+            "10.1.2.4"
+          ],
+          "conditions": {
+            "ready": false,
+            "serving": false,
+            "terminating": true
+          }
+        },
+        {
+          "addresses": [
+            "10.1.2.5"
+          ],
+          "conditions": {}
+        }
+      ],
+      "ports": [
+        {
+          "name": "http",
+          "port": 8080
+        }
+      ]
+    }
+  ]
+}

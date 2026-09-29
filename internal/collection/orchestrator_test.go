@@ -3,6 +3,7 @@ package collection
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/qodo-ai/qodo-support-bundle/internal/bundle"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
+	"github.com/qodo-ai/qodo-support-bundle/internal/workload"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
 )
 
@@ -89,6 +91,7 @@ func TestExecutePublishesCompleteKubernetesCollection(t *testing.T) {
 				collectorFinished = true
 				return report, nil
 			},
+			Workload: successfulWorkloadCollector,
 			Zitadel: func(
 				context.Context,
 				zitadel.Config,
@@ -109,7 +112,7 @@ func TestExecutePublishesCompleteKubernetesCollection(t *testing.T) {
 	}
 	if result.Coverage[SourceKubernetes].State != CoverageComplete ||
 		result.Coverage[SourceZitadel].State != CoverageNotRequested ||
-		result.Coverage[SourceWorkload].State != CoverageNotRequested ||
+		result.Coverage[SourceWorkload].State != CoverageComplete ||
 		result.Coverage[SourcePrometheus].State != CoverageNotRequested ||
 		result.Coverage[SourcePhoenix].State != CoverageNotRequested {
 		t.Fatalf("unexpected coverage: %+v", result.Coverage)
@@ -176,6 +179,7 @@ func TestExecuteTreatsCollectedZitadelFailureAsComplete(t *testing.T) {
 		redact.New(),
 		Collectors{
 			Kubernetes: successfulKubernetesCollector,
+			Workload:   successfulWorkloadCollector,
 			Zitadel: func(
 				context.Context,
 				zitadel.Config,
@@ -230,6 +234,7 @@ func TestExecuteFailsClosedWhenRequestedProbeHasNoReport(t *testing.T) {
 		redact.New(),
 		Collectors{
 			Kubernetes: successfulKubernetesCollector,
+			Workload:   successfulWorkloadCollector,
 			Zitadel: func(
 				context.Context,
 				zitadel.Config,
@@ -281,6 +286,7 @@ func TestExecuteRejectsZitadelReportWithoutArtifact(t *testing.T) {
 		redact.New(),
 		Collectors{
 			Kubernetes: successfulKubernetesCollector,
+			Workload:   successfulWorkloadCollector,
 			Zitadel: func(
 				context.Context,
 				zitadel.Config,
@@ -341,6 +347,7 @@ func TestExecuteSanitizesCollectorFailureReason(t *testing.T) {
 		redact.New(),
 		Collectors{
 			Kubernetes: successfulKubernetesCollector,
+			Workload:   successfulWorkloadCollector,
 			Zitadel: func(
 				context.Context,
 				zitadel.Config,
@@ -380,6 +387,7 @@ func TestExecuteValidatesRequiredDependencies(t *testing.T) {
 	}
 	validCollectors := Collectors{
 		Kubernetes: successfulKubernetesCollector,
+		Workload:   successfulWorkloadCollector,
 		Zitadel: func(
 			context.Context,
 			zitadel.Config,
@@ -402,12 +410,34 @@ func TestExecuteValidatesRequiredDependencies(t *testing.T) {
 		{"archive", context.Background(), unusedRunner{}, nil, redact.New(), validCollectors},
 		{"redactor", context.Background(), unusedRunner{}, &recordingArchive{}, nil, validCollectors},
 		{
+			"unconfigured redactor",
+			context.Background(),
+			unusedRunner{},
+			&recordingArchive{},
+			&redact.Redactor{},
+			validCollectors,
+		},
+		{
 			"kubernetes collector",
 			context.Background(),
 			unusedRunner{},
 			&recordingArchive{},
 			redact.New(),
-			Collectors{Zitadel: validCollectors.Zitadel},
+			Collectors{
+				Workload: validCollectors.Workload,
+				Zitadel:  validCollectors.Zitadel,
+			},
+		},
+		{
+			"workload collector",
+			context.Background(),
+			unusedRunner{},
+			&recordingArchive{},
+			redact.New(),
+			Collectors{
+				Kubernetes: validCollectors.Kubernetes,
+				Zitadel:    validCollectors.Zitadel,
+			},
 		},
 		{
 			"Zitadel collector",
@@ -415,7 +445,10 @@ func TestExecuteValidatesRequiredDependencies(t *testing.T) {
 			unusedRunner{},
 			&recordingArchive{},
 			redact.New(),
-			Collectors{Kubernetes: validCollectors.Kubernetes},
+			Collectors{
+				Kubernetes: validCollectors.Kubernetes,
+				Workload:   validCollectors.Workload,
+			},
 		},
 	}
 	for _, test := range tests {
@@ -446,6 +479,293 @@ func TestExecuteValidatesRequiredDependencies(t *testing.T) {
 	}
 }
 
+func TestExecuteInvokesProductionWorkloadCollectorAndStagesArtifact(t *testing.T) {
+	t.Parallel()
+	archive := &recordingArchive{}
+	defaults := DefaultCollectors()
+	defaults.Kubernetes = successfulKubernetesCollector
+	runner := workloadAPIRunner{}
+
+	result, err := Execute(
+		context.Background(),
+		Request{
+			CurrentTime: time.Now,
+			Kubernetes: kubernetes.Config{
+				Namespace:  "qodo",
+				Context:    "production-context",
+				Kubeconfig: "/tmp/production-kubeconfig",
+				Timeout:    time.Second,
+				Since:      time.Hour,
+			},
+		},
+		&runner,
+		archive,
+		redact.New(),
+		defaults,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.WorkloadReport == nil ||
+		result.WorkloadReport.RetainedRecords != 1 ||
+		result.Coverage[SourceWorkload].State != CoverageComplete {
+		t.Fatalf("production workload collector was not reflected in result: %+v", result)
+	}
+	artifact := string(archive.files[workload.WorkloadsArtifactPath])
+	if !strings.Contains(artifact, `"kind":"Deployment"`) ||
+		!strings.Contains(artifact, `"namespace":"qodo"`) {
+		t.Fatalf("production collector did not stage normalized artifact: %s", artifact)
+	}
+	coverageArtifact := string(archive.files[workloadReportPath])
+	if !strings.Contains(coverageArtifact, `"namespaces":`) ||
+		!strings.Contains(coverageArtifact, `"coverage":`) ||
+		!strings.Contains(coverageArtifact, `"retained_records": 1`) ||
+		!strings.Contains(coverageArtifact, `"max_total_bytes": 16777216`) {
+		t.Fatalf("production collector did not stage its coverage ledger: %s", coverageArtifact)
+	}
+	if len(runner.calls) != 9 {
+		t.Fatalf("production workload API calls=%d, want 9", len(runner.calls))
+	}
+	for _, call := range runner.calls {
+		if call.maxBytes != workload.DefaultMaxResponseBytes ||
+			call.arguments[0] != "--kubeconfig" ||
+			call.arguments[1] != "/tmp/production-kubeconfig" ||
+			call.arguments[2] != "--context" ||
+			call.arguments[3] != "production-context" {
+			t.Fatalf("production transport inputs were not preserved: %+v", call)
+		}
+	}
+}
+
+func TestExecuteDerivesWorkloadConfigForExplicitAndAllNamespaceScopes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		kubernetesConfig kubernetes.Config
+		kubernetesReport kubernetes.Report
+		kubernetesErr    error
+		wantNamespaces   []string
+	}{
+		{
+			name: "explicit list survives pod collector failure",
+			kubernetesConfig: kubernetes.Config{
+				Namespaces: []string{"beta", "alpha"},
+			},
+			kubernetesErr:  errors.New("pod collection failed"),
+			wantNamespaces: []string{"beta", "alpha"},
+		},
+		{
+			name: "singular explicit namespace",
+			kubernetesConfig: kubernetes.Config{
+				Namespace: "platform",
+			},
+			wantNamespaces: []string{"platform"},
+		},
+		{
+			name: "all namespaces use collected report scope",
+			kubernetesConfig: kubernetes.Config{
+				AllNamespaces: true,
+				Namespaces:    []string{"must-not-be-used"},
+			},
+			kubernetesReport: kubernetes.Report{
+				Namespaces:           []string{"application-a"},
+				CollectionNamespaces: []string{"application-a", "application-b"},
+			},
+			wantNamespaces: []string{"application-a", "application-b"},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			archive := &recordingArchive{}
+			var received workload.Config
+			kubernetesConfig := test.kubernetesConfig
+			kubernetesConfig.Context = "cluster-context"
+			kubernetesConfig.Kubeconfig = "/tmp/kubeconfig"
+			kubernetesConfig.Timeout = 17 * time.Second
+			kubernetesConfig.Since = time.Hour
+
+			_, err := Execute(
+				context.Background(),
+				Request{
+					CurrentTime: time.Now,
+					Kubernetes:  kubernetesConfig,
+				},
+				unusedRunner{},
+				archive,
+				redact.New(),
+				Collectors{
+					Kubernetes: func(
+						context.Context,
+						kubernetes.Config,
+						kubernetes.Runner,
+						kubernetes.Sink,
+						*redact.Redactor,
+					) (kubernetes.Report, error) {
+						return test.kubernetesReport, test.kubernetesErr
+					},
+					Workload: func(
+						_ context.Context,
+						config workload.Config,
+						_ kubernetes.Runner,
+						sink kubernetes.Sink,
+						_ *redact.Redactor,
+					) (workload.Report, error) {
+						received = config
+						if err := sink.Add(
+							workload.WorkloadsArtifactPath,
+							[]byte("{\"kind\":\"Deployment\"}\n"),
+						); err != nil {
+							return workload.Report{}, err
+						}
+						report, err := successfulWorkloadCollector(
+							context.Background(),
+							config,
+							unusedRunner{},
+							sink,
+							redact.New(),
+						)
+						report.RetainedRecords = 1
+						report.RetainedBytes = 22
+						return report, err
+					},
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(received.Namespaces, test.wantNamespaces) {
+				t.Fatalf("workload namespaces=%v, want %v", received.Namespaces, test.wantNamespaces)
+			}
+			if received.Context != "cluster-context" ||
+				received.Kubeconfig != "/tmp/kubeconfig" ||
+				received.Timeout != 17*time.Second ||
+				received.MaxResponseBytes != workload.DefaultMaxResponseBytes ||
+				received.MaxSourceBytes != workload.DefaultMaxSourceBytes ||
+				received.MaxTotalBytes != workload.DefaultMaxTotalBytes ||
+				received.MaxNamespaces != workload.DefaultMaxNamespaces ||
+				received.MaxDuration != workload.DefaultMaxCollectionDuration {
+				t.Fatalf("unexpected workload config: %+v", received)
+			}
+			if _, exists := archive.files[workload.WorkloadsArtifactPath]; !exists {
+				t.Fatal("workload collector did not receive the shared archive")
+			}
+		})
+	}
+}
+
+func TestExecuteTreatsWorkloadFailureAsSanitizedPartialCollection(t *testing.T) {
+	t.Parallel()
+	archive := &recordingArchive{}
+	const secret = "raw-workload-secret"
+
+	result, err := Execute(
+		context.Background(),
+		Request{
+			CurrentTime: time.Now,
+			Kubernetes: kubernetes.Config{
+				Namespace: "qodo",
+				Timeout:   time.Second,
+				Since:     time.Hour,
+			},
+		},
+		unusedRunner{},
+		archive,
+		redact.New(),
+		Collectors{
+			Kubernetes: successfulKubernetesCollector,
+			Workload: func(
+				context.Context,
+				workload.Config,
+				kubernetes.Runner,
+				kubernetes.Sink,
+				*redact.Redactor,
+			) (workload.Report, error) {
+				return workload.Report{
+					Namespaces: []string{"qodo"},
+					Coverage: []workload.Coverage{{
+						Namespace:    "qodo",
+						Source:       "deployments",
+						State:        workload.CoverageFailed,
+						ArtifactPath: workload.WorkloadsArtifactPath,
+						Reason:       "request_failed",
+						Diagnostic:   "password=" + secret + "\naccess denied",
+					}},
+				}, errors.New("password=" + secret + "\r\nforged")
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != CoveragePartial.String() ||
+		result.Coverage[SourceWorkload].State != CoverageUnavailable ||
+		result.Coverage[SourceWorkload].Reason != reasonCollectionError {
+		t.Fatalf("workload failure did not produce partial coverage: %+v", result)
+	}
+	issues := string(archive.files[issuesArtifactPath])
+	if strings.Contains(issues, secret) || !strings.Contains(issues, redact.Replacement) ||
+		!strings.Contains(issues, "qodo/deployments") ||
+		!strings.Contains(issues, "access denied") {
+		t.Fatalf("workload issues were not safely represented: %s", issues)
+	}
+	coverageArtifact := string(archive.files[workloadReportPath])
+	if strings.Contains(coverageArtifact, secret) ||
+		!strings.Contains(coverageArtifact, redact.Replacement) ||
+		!strings.Contains(coverageArtifact, `"diagnostic": "password=[REDACTED] access denied"`) {
+		t.Fatalf("workload coverage ledger was not safely staged: %s", coverageArtifact)
+	}
+}
+
+func TestExecuteTreatsWorkloadCancellationAsFatal(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	archive := &recordingArchive{}
+
+	result, err := Execute(
+		ctx,
+		Request{
+			CurrentTime: time.Now,
+			Kubernetes: kubernetes.Config{
+				Namespace: "qodo",
+				Timeout:   time.Second,
+			},
+		},
+		unusedRunner{},
+		archive,
+		redact.New(),
+		Collectors{
+			Kubernetes: successfulKubernetesCollector,
+			Workload: func(
+				context.Context,
+				workload.Config,
+				kubernetes.Runner,
+				kubernetes.Sink,
+				*redact.Redactor,
+			) (workload.Report, error) {
+				cancel()
+				return workload.Report{}, context.Canceled
+			},
+			Zitadel: func(
+				context.Context,
+				zitadel.Config,
+				kubernetes.Runner,
+				*redact.Redactor,
+			) zitadel.Outcome {
+				t.Fatal("unexpected Zitadel collection")
+				return zitadel.Outcome{}
+			},
+		},
+	)
+	if !errors.Is(err, context.Canceled) || !result.CanceledBeforeBundle {
+		t.Fatalf("unexpected cancellation result: result=%+v err=%v", result, err)
+	}
+	if archive.finalizeCalls != 0 || len(archive.files) != 0 {
+		t.Fatalf("canceled workload collection staged or finalized data: %+v", archive)
+	}
+}
+
 func TestExecuteStopsBeforeProbeAndFinalizationAfterCancellation(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -472,6 +792,7 @@ func TestExecuteStopsBeforeProbeAndFinalizationAfterCancellation(t *testing.T) {
 				cancel()
 				return kubernetes.Report{}, errors.New("interrupted")
 			},
+			Workload: successfulWorkloadCollector,
 			Zitadel: func(
 				context.Context,
 				zitadel.Config,
@@ -499,7 +820,93 @@ func successfulKubernetesCollector(
 	*redact.Redactor,
 ) (kubernetes.Report, error) {
 	return kubernetes.Report{
-		Namespaces:          []string{"qodo"},
-		NamespacesRequested: 1,
+		Namespaces:           []string{"qodo"},
+		CollectionNamespaces: []string{"qodo"},
+		NamespacesRequested:  1,
 	}, nil
+}
+
+func successfulWorkloadCollector(
+	_ context.Context,
+	config workload.Config,
+	_ kubernetes.Runner,
+	_ kubernetes.Sink,
+	_ *redact.Redactor,
+) (workload.Report, error) {
+	report := workload.Report{
+		Namespaces:       append([]string(nil), config.Namespaces...),
+		MaxResponseBytes: config.MaxResponseBytes,
+		MaxSourceBytes:   config.MaxSourceBytes,
+		MaxTotalBytes:    config.MaxTotalBytes,
+	}
+	sources := []struct {
+		name string
+		path string
+	}{
+		{"deployments", workload.WorkloadsArtifactPath},
+		{"statefulsets", workload.WorkloadsArtifactPath},
+		{"daemonsets", workload.WorkloadsArtifactPath},
+		{"jobs", workload.WorkloadsArtifactPath},
+		{"cronjobs", workload.WorkloadsArtifactPath},
+		{"services", workload.ServicesArtifactPath},
+		{"endpointslices", workload.ServicesArtifactPath},
+		{"horizontalpodautoscalers", workload.AutoscalersArtifactPath},
+		{"persistentvolumeclaims", workload.StorageArtifactPath},
+	}
+	for _, namespace := range config.Namespaces {
+		for _, source := range sources {
+			report.Coverage = append(report.Coverage, workload.Coverage{
+				Namespace:    namespace,
+				Source:       source.name,
+				State:        workload.CoverageCollected,
+				ArtifactPath: source.path,
+			})
+		}
+	}
+	return report, nil
+}
+
+type workloadAPICall struct {
+	maxBytes  int64
+	arguments []string
+}
+
+type workloadAPIRunner struct {
+	calls []workloadAPICall
+}
+
+func (runner *workloadAPIRunner) Run(
+	_ context.Context,
+	maxBytes int64,
+	arguments ...string,
+) (kubernetes.CommandResult, error) {
+	runner.calls = append(runner.calls, workloadAPICall{
+		maxBytes:  maxBytes,
+		arguments: append([]string(nil), arguments...),
+	})
+	apiPath := arguments[len(arguments)-1]
+	var response string
+	switch {
+	case strings.Contains(apiPath, "/deployments?"):
+		response = `{"kind":"DeploymentList","items":[{"kind":"Deployment","metadata":{"name":"api","namespace":"qodo"},"spec":{"template":{"spec":{"containers":[{"name":"api","image":"registry/api:1"}]}}},"status":{}}]}`
+	case strings.Contains(apiPath, "/statefulsets?"):
+		response = `{"kind":"StatefulSetList","items":[]}`
+	case strings.Contains(apiPath, "/daemonsets?"):
+		response = `{"kind":"DaemonSetList","items":[]}`
+	case strings.Contains(apiPath, "/cronjobs?"):
+		response = `{"kind":"CronJobList","items":[]}`
+	case strings.Contains(apiPath, "/jobs?"):
+		response = `{"kind":"JobList","items":[]}`
+	case strings.Contains(apiPath, "/services?"):
+		response = `{"kind":"ServiceList","items":[]}`
+	case strings.Contains(apiPath, "/endpointslices?"):
+		response = `{"kind":"EndpointSliceList","items":[]}`
+	case strings.Contains(apiPath, "/horizontalpodautoscalers?"):
+		response = `{"kind":"HorizontalPodAutoscalerList","items":[]}`
+	case strings.Contains(apiPath, "/persistentvolumeclaims?"):
+		response = `{"kind":"PersistentVolumeClaimList","items":[]}`
+	default:
+		return kubernetes.CommandResult{}, errors.New("unexpected workload API path")
+	}
+	return kubernetes.CommandResult{Stdout: []byte(response)}, nil
 }

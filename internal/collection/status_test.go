@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/workload"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
 )
 
@@ -55,6 +56,106 @@ func TestKubernetesCoverage(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWorkloadCoverage(t *testing.T) {
+	t.Parallel()
+	completeReport := completeWorkloadCoverageReport("qodo")
+	completeReport.RetainedBytes = 42
+	completeReport.RetainedRecords = 2
+	completeReport.Coverage[0].RecordsFound = 2
+	completeReport.Coverage[0].RecordsRetained = 2
+	completeReport.Coverage[0].RetainedBytes = 42
+	partialReport := completeWorkloadCoverageReport("qodo")
+	partialReport.RetainedBytes = 20
+	partialReport.RetainedRecords = 1
+	partialReport.Truncated = true
+	partialReport.Coverage[0].State = workload.CoveragePartial
+	partialReport.Coverage[0].Truncated = true
+	tests := []struct {
+		name   string
+		report workload.Report
+		err    error
+		want   Coverage
+	}{
+		{
+			name:   "complete",
+			report: completeReport,
+			want: Coverage{
+				State:         CoverageComplete,
+				RetainedBytes: 42,
+				RecordCount:   2,
+			},
+		},
+		{
+			name:   "partial source",
+			report: partialReport,
+			want: Coverage{
+				State:         CoveragePartial,
+				RetainedBytes: 20,
+				RecordCount:   1,
+				Truncated:     true,
+				Reason:        reasonIssuesReported,
+			},
+		},
+		{
+			name: "failed before artifacts",
+			err:  errors.New("failed"),
+			want: Coverage{
+				State:  CoverageUnavailable,
+				Reason: reasonCollectionError,
+			},
+		},
+		{
+			name: "failed after retaining records",
+			report: workload.Report{
+				RetainedBytes:   20,
+				RetainedRecords: 1,
+			},
+			err: errors.New("failed"),
+			want: Coverage{
+				State:         CoveragePartial,
+				RetainedBytes: 20,
+				RecordCount:   1,
+				Reason:        reasonCollectionError,
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := WorkloadCoverage(test.report, test.err); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("WorkloadCoverage() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func completeWorkloadCoverageReport(namespace string) workload.Report {
+	report := workload.Report{Namespaces: []string{namespace}}
+	for _, source := range []struct {
+		name string
+		path string
+	}{
+		{"deployments", workload.WorkloadsArtifactPath},
+		{"statefulsets", workload.WorkloadsArtifactPath},
+		{"daemonsets", workload.WorkloadsArtifactPath},
+		{"jobs", workload.WorkloadsArtifactPath},
+		{"cronjobs", workload.WorkloadsArtifactPath},
+		{"services", workload.ServicesArtifactPath},
+		{"endpointslices", workload.ServicesArtifactPath},
+		{"horizontalpodautoscalers", workload.AutoscalersArtifactPath},
+		{"persistentvolumeclaims", workload.StorageArtifactPath},
+	} {
+		report.Coverage = append(report.Coverage, workload.Coverage{
+			Namespace:    namespace,
+			Source:       source.name,
+			State:        workload.CoverageCollected,
+			ArtifactPath: source.path,
+		})
+	}
+	return report
 }
 
 func TestZitadelCoverage(t *testing.T) {

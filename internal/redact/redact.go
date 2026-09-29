@@ -171,6 +171,11 @@ func New() *Redactor {
 	}
 }
 
+// Ready reports whether the redactor contains the built-in policy.
+func (redactor *Redactor) Ready() bool {
+	return redactor != nil && len(redactor.patterns) != 0
+}
+
 // Ruleset returns a stable version and hash for audit manifests.
 func (redactor *Redactor) Ruleset() RulesetMetadata {
 	digest := sha256.Sum256([]byte(strings.Join(rulesetDigestParts(redactor), "\n")))

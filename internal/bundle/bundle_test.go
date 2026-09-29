@@ -74,6 +74,32 @@ func TestFinalizeCreatesRestrictedChecksummedArchive(t *testing.T) {
 	}
 }
 
+func TestAddRejectsDuplicateArtifactPathWithoutOverwriting(t *testing.T) {
+	t.Parallel()
+	builder, err := New(filepath.Join(t.TempDir(), "bundle.tar.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer builder.Close()
+
+	if err := builder.Add("kubernetes/workloads.jsonl", []byte("first\n")); err != nil {
+		t.Fatal(err)
+	}
+	err = builder.Add("kubernetes/workloads.jsonl", []byte("second\n"))
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("duplicate Add returned %v", err)
+	}
+	staged, readErr := os.ReadFile(
+		filepath.Join(builder.stagingDir, "kubernetes", "workloads.jsonl"),
+	)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(staged) != "first\n" || builder.fileCount != 1 {
+		t.Fatalf("duplicate path overwrote staged data: data=%q files=%d", staged, builder.fileCount)
+	}
+}
+
 func TestFinalizeContextRetractsArchiveCanceledAfterPublish(t *testing.T) {
 	t.Parallel()
 	outputPath := filepath.Join(t.TempDir(), "bundle.tar.gz")
@@ -322,7 +348,7 @@ func TestCreateArchiveFailureReportsCleanupErrorsAndRetainsPath(t *testing.T) {
 	}
 }
 
-func TestAddRejectsArchiveTraversal(t *testing.T) {
+func TestAddRejectsUnsafeAndAliasedArchivePaths(t *testing.T) {
 	t.Parallel()
 	builder, err := New(filepath.Join(t.TempDir(), "bundle.tar.gz"))
 	if err != nil {
@@ -330,8 +356,17 @@ func TestAddRejectsArchiveTraversal(t *testing.T) {
 	}
 	defer builder.Close()
 
-	if err := builder.Add("../outside", []byte("data")); err == nil {
-		t.Fatal("expected traversal path to be rejected")
+	for _, path := range []string{
+		"../outside",
+		`..\outside`,
+		"kubernetes/../outside",
+		"kubernetes//workloads.jsonl",
+		"C:/outside",
+		"/absolute",
+	} {
+		if err := builder.Add(path, []byte("data")); err == nil {
+			t.Errorf("expected unsafe path %q to be rejected", path)
+		}
 	}
 }
 

@@ -113,11 +113,12 @@ func Collect(
 	})
 
 	report := Report{
-		AllNamespaces:       config.AllNamespaces,
-		ExcludedNamespaces:  excludedNamespaces,
-		Namespaces:          make([]string, 0, len(namespaces)),
-		NamespacesRequested: len(namespaces),
-		MetadataLimitBytes:  config.MaxMetadataBytes,
+		AllNamespaces:        config.AllNamespaces,
+		ExcludedNamespaces:   excludedNamespaces,
+		Namespaces:           make([]string, 0, len(namespaces)),
+		CollectionNamespaces: append([]string(nil), namespaces...),
+		NamespacesRequested:  len(namespaces),
+		MetadataLimitBytes:   config.MaxMetadataBytes,
 	}
 	metadata := metadataBudget{remaining: config.MaxMetadataBytes}
 	logRequests := make([]logRequest, 0)

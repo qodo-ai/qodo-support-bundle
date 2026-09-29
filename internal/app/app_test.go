@@ -674,6 +674,33 @@ case " $* " in
   *" get events "*)
     printf '%s\n' '{"items":[]}'
     ;;
+  *"/deployments?limit=101"*)
+    printf '%s\n' '{"kind":"DeploymentList","items":[]}'
+    ;;
+  *"/statefulsets?limit=101"*)
+    printf '%s\n' '{"kind":"StatefulSetList","items":[]}'
+    ;;
+  *"/daemonsets?limit=101"*)
+    printf '%s\n' '{"kind":"DaemonSetList","items":[]}'
+    ;;
+  *"/cronjobs?limit=101"*)
+    printf '%s\n' '{"kind":"CronJobList","items":[]}'
+    ;;
+  *"/jobs?limit=101"*)
+    printf '%s\n' '{"kind":"JobList","items":[]}'
+    ;;
+  *"/services?limit=101"*)
+    printf '%s\n' '{"kind":"ServiceList","items":[]}'
+    ;;
+  *"/endpointslices?limit=101"*)
+    printf '%s\n' '{"kind":"EndpointSliceList","items":[]}'
+    ;;
+  *"/horizontalpodautoscalers?limit=101"*)
+    printf '%s\n' '{"kind":"HorizontalPodAutoscalerList","items":[]}'
+    ;;
+  *"/persistentvolumeclaims?limit=101"*)
+    printf '%s\n' '{"kind":"PersistentVolumeClaimList","items":[]}'
+    ;;
   *" logs "*)
     printf '%s\n' '2026-09-27T08:00:00Z ready'
     ;;

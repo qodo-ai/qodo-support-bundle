@@ -8,6 +8,16 @@ import (
 	"testing"
 )
 
+func TestReadyRequiresBuiltInPolicy(t *testing.T) {
+	t.Parallel()
+	if (*Redactor)(nil).Ready() || (&Redactor{}).Ready() {
+		t.Fatal("nil or zero-value redactor reported ready")
+	}
+	if !New().Ready() {
+		t.Fatal("configured redactor did not report ready")
+	}
+}
+
 func TestTextRemovesCredentialsAndEmail(t *testing.T) {
 	t.Parallel()
 	redactor := New()

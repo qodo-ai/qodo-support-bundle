@@ -141,8 +141,11 @@ func (builder *Builder) AddStream(path string, write func(io.Writer) error) erro
 	if err := os.MkdirAll(filepath.Dir(target), directoryMode); err != nil {
 		return fmt.Errorf("create bundle directory: %w", err)
 	}
-	file, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, fileMode)
+	file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, fileMode)
 	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("bundle file %q already exists", cleanPath)
+		}
 		return fmt.Errorf("create bundle file %q: %w", cleanPath, err)
 	}
 	if err := write(file); err != nil {
@@ -623,12 +626,14 @@ func stagedFiles(root string) ([]string, error) {
 }
 
 func safeRelativePath(path string) (string, error) {
-	if path == "" || filepath.IsAbs(path) {
+	if path == "" || filepath.IsAbs(path) || strings.Contains(path, `\`) {
 		return "", fmt.Errorf("invalid bundle path: %q", path)
 	}
 	cleaned := filepath.Clean(filepath.FromSlash(path))
 	if cleaned == "." || cleaned == ".." ||
-		strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) ||
+		filepath.ToSlash(cleaned) != path ||
+		strings.Contains(strings.SplitN(path, "/", 2)[0], ":") {
 		return "", fmt.Errorf("invalid bundle path: %q", path)
 	}
 	return cleaned, nil
