@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
@@ -247,7 +248,9 @@ func TestCollectReportsPartialFailuresAndContinuation(t *testing.T) {
 			apiPath := arguments[len(arguments)-1]
 			switch {
 			case strings.Contains(apiPath, "/deployments?"):
-				return kubernetes.CommandResult{}, errors.New("denied raw-secret-value")
+				return kubernetes.CommandResult{
+					Stderr: []byte("password=raw-secret-value\naccess denied"),
+				}, errors.New("request failed")
 			case strings.Contains(apiPath, "/services?"):
 				return kubernetes.CommandResult{Stdout: []byte(`not-json`)}, nil
 			default:
@@ -274,6 +277,9 @@ func TestCollectReportsPartialFailuresAndContinuation(t *testing.T) {
 	}
 	if report.Coverage[0].State != CoverageFailed ||
 		report.Coverage[0].Reason != reasonRequestFailed ||
+		!strings.Contains(report.Coverage[0].Diagnostic, redact.Replacement) ||
+		!strings.Contains(report.Coverage[0].Diagnostic, "access denied") ||
+		strings.Contains(report.Coverage[0].Diagnostic, "raw-secret-value") ||
 		report.Coverage[5].State != CoverageFailed ||
 		report.Coverage[5].Reason != reasonNormalizationFailed {
 		t.Fatalf("unexpected failure coverage: %+v", report.Coverage)
@@ -320,6 +326,23 @@ func TestCollectReportsPartialFailuresAndContinuation(t *testing.T) {
 		continued.Coverage[0].Reason != reasonRecordLimit ||
 		!continued.Coverage[0].Truncated {
 		t.Fatalf("list continuation was not reported: %+v", continued.Coverage[0])
+	}
+}
+
+func TestRequestDiagnosticIsRedactedBoundedAndValidUTF8(t *testing.T) {
+	t.Parallel()
+	diagnostic := requestDiagnostic(
+		kubernetes.CommandResult{
+			Stderr: []byte("password=raw-secret-value " + strings.Repeat("界", maxDiagnosticBytes)),
+		},
+		errors.New("fallback must not be used"),
+		redact.New(),
+	)
+	if strings.Contains(diagnostic, "raw-secret-value") ||
+		!strings.Contains(diagnostic, redact.Replacement) ||
+		len(diagnostic) > maxDiagnosticBytes ||
+		!utf8.ValidString(diagnostic) {
+		t.Fatalf("unsafe request diagnostic: %q", diagnostic)
 	}
 }
 

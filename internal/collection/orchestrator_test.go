@@ -516,6 +516,13 @@ func TestExecuteInvokesProductionWorkloadCollectorAndStagesArtifact(t *testing.T
 		!strings.Contains(artifact, `"namespace":"qodo"`) {
 		t.Fatalf("production collector did not stage normalized artifact: %s", artifact)
 	}
+	coverageArtifact := string(archive.files[workloadReportPath])
+	if !strings.Contains(coverageArtifact, `"namespaces":`) ||
+		!strings.Contains(coverageArtifact, `"coverage":`) ||
+		!strings.Contains(coverageArtifact, `"retained_records": 1`) ||
+		!strings.Contains(coverageArtifact, `"max_total_bytes": 16777216`) {
+		t.Fatalf("production collector did not stage its coverage ledger: %s", coverageArtifact)
+	}
 	if len(runner.calls) != 9 {
 		t.Fatalf("production workload API calls=%d, want 9", len(runner.calls))
 	}
@@ -681,6 +688,7 @@ func TestExecuteTreatsWorkloadFailureAsSanitizedPartialCollection(t *testing.T) 
 						State:        workload.CoverageFailed,
 						ArtifactPath: workload.WorkloadsArtifactPath,
 						Reason:       "request_failed",
+						Diagnostic:   "password=" + secret + "\naccess denied",
 					}},
 				}, errors.New("password=" + secret + "\r\nforged")
 			},
@@ -696,8 +704,15 @@ func TestExecuteTreatsWorkloadFailureAsSanitizedPartialCollection(t *testing.T) 
 	}
 	issues := string(archive.files[issuesArtifactPath])
 	if strings.Contains(issues, secret) || !strings.Contains(issues, redact.Replacement) ||
-		!strings.Contains(issues, "qodo/deployments") {
+		!strings.Contains(issues, "qodo/deployments") ||
+		!strings.Contains(issues, "access denied") {
 		t.Fatalf("workload issues were not safely represented: %s", issues)
+	}
+	coverageArtifact := string(archive.files[workloadReportPath])
+	if strings.Contains(coverageArtifact, secret) ||
+		!strings.Contains(coverageArtifact, redact.Replacement) ||
+		!strings.Contains(coverageArtifact, `"diagnostic": "password=[REDACTED] access denied"`) {
+		t.Fatalf("workload coverage ledger was not safely staged: %s", coverageArtifact)
 	}
 }
 

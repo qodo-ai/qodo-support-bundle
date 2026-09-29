@@ -17,6 +17,7 @@ const (
 	zitadelArtifactPath = "connectivity/zitadel.json"
 	issuesArtifactPath  = "collection-issues.jsonl"
 	summaryArtifactPath = "summary.md"
+	workloadReportPath  = "kubernetes/workload-coverage.json"
 )
 
 // EventKind identifies a collection event that the application may present.
@@ -174,6 +175,13 @@ func Execute(
 	if ctx.Err() != nil {
 		result.CanceledBeforeBundle = true
 		return result, ctx.Err()
+	}
+	workloadReportData, err := MarshalWorkloadReport(workloadReport, redactor)
+	if err != nil {
+		return result, err
+	}
+	if err := archive.Add(workloadReportPath, workloadReportData); err != nil {
+		return result, err
 	}
 	result.Coverage[SourceWorkload] = WorkloadCoverage(workloadReport, workloadErr)
 	kubernetesReport.Issues = append(
@@ -411,6 +419,9 @@ func workloadCollectionIssues(
 		message := "workload context " + string(coverage.State)
 		if coverage.Reason != "" {
 			message += ": " + coverage.Reason
+		}
+		if diagnostic := sanitizeReason(coverage.Diagnostic, redactor); diagnostic != "" {
+			message += ": " + diagnostic
 		}
 		issues = append(issues, kubernetes.Issue{
 			Operation: "collect workload context",

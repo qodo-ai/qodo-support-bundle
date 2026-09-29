@@ -1,6 +1,7 @@
 package collection
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
+	"github.com/qodo-ai/qodo-support-bundle/internal/workload"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
 )
 
@@ -274,5 +276,54 @@ func TestMarshalIssues(t *testing.T) {
 		"{\"operation\":\"read logs\",\"resource\":\"ns/pod\",\"message\":\"[REDACTED]\"}\n"
 	if string(got) != want {
 		t.Fatalf("MarshalIssues() = %q, want %q", got, want)
+	}
+}
+
+func TestMarshalWorkloadReportRedactsCoverageLedger(t *testing.T) {
+	t.Parallel()
+	const secret = "raw-report-secret"
+	report := workload.Report{
+		Namespaces: []string{"user@example.com"},
+		Coverage: []workload.Coverage{{
+			Namespace:       "user@example.com",
+			Source:          "deployments",
+			State:           workload.CoverageFailed,
+			ArtifactPath:    workload.WorkloadsArtifactPath,
+			ResponseBytes:   100,
+			RecordsFound:    2,
+			RecordsRetained: 1,
+			RetainedBytes:   20,
+			Reason:          "request_failed",
+			Diagnostic:      "password=" + secret + "\naccess denied",
+		}},
+		MaxResponseBytes: 1000,
+		MaxSourceBytes:   500,
+		MaxTotalBytes:    2000,
+		RetainedRecords:  1,
+		RetainedBytes:    20,
+		Truncated:        true,
+	}
+	data, err := MarshalWorkloadReport(report, redact.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), secret) ||
+		strings.Contains(string(data), "user@example.com") {
+		t.Fatalf("workload coverage leaked sensitive data: %s", data)
+	}
+	var decoded workload.Report
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Coverage) != 1 ||
+		decoded.Coverage[0].Namespace != redact.Replacement ||
+		decoded.Coverage[0].Diagnostic != "password=[REDACTED] access denied" ||
+		decoded.Coverage[0].RecordsRetained != 1 ||
+		decoded.MaxTotalBytes != 2000 {
+		t.Fatalf("workload coverage ledger was not preserved: %+v", decoded)
+	}
+	if report.Namespaces[0] != "user@example.com" ||
+		report.Coverage[0].Diagnostic != "password="+secret+"\naccess denied" {
+		t.Fatal("MarshalWorkloadReport mutated its input")
 	}
 }

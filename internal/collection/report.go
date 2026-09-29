@@ -9,6 +9,7 @@ import (
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
+	"github.com/qodo-ai/qodo-support-bundle/internal/workload"
 	"github.com/qodo-ai/qodo-support-bundle/internal/zitadel"
 )
 
@@ -181,6 +182,30 @@ func MarshalIssues(issues []kubernetes.Issue) ([]byte, error) {
 		}
 	}
 	return output.Bytes(), nil
+}
+
+// MarshalWorkloadReport encodes the redacted coverage and retention ledger
+// needed to interpret normalized workload artifacts.
+func MarshalWorkloadReport(
+	report workload.Report,
+	redactor *redact.Redactor,
+) ([]byte, error) {
+	sanitized := report
+	sanitized.Namespaces = redactStrings(report.Namespaces, redactor)
+	sanitized.Coverage = append([]workload.Coverage(nil), report.Coverage...)
+	for index := range sanitized.Coverage {
+		coverage := &sanitized.Coverage[index]
+		coverage.Namespace = redactor.Text(coverage.Namespace)
+		coverage.Diagnostic = strings.Join(
+			strings.Fields(redactor.Text(coverage.Diagnostic)),
+			" ",
+		)
+	}
+	data, err := json.MarshalIndent(sanitized, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode workload coverage report: %w", err)
+	}
+	return append(data, '\n'), nil
 }
 
 func summaryValue(value string) string {

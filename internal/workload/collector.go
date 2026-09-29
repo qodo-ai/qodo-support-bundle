@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
@@ -28,7 +29,8 @@ const (
 	MaximumSourceBytes   int64 = 64 << 20
 	MaximumTotalBytes    int64 = 256 << 20
 
-	apiRecordLimit = 101
+	apiRecordLimit     = 101
+	maxDiagnosticBytes = 1024
 )
 
 const (
@@ -93,6 +95,7 @@ type Coverage struct {
 	RetainedBytes   int64         `json:"retained_bytes"`
 	Truncated       bool          `json:"truncated"`
 	Reason          string        `json:"reason,omitempty"`
+	Diagnostic      string        `json:"diagnostic,omitempty"`
 }
 
 // Artifact reports one staged normalized JSONL file.
@@ -194,6 +197,7 @@ func Collect(
 			if runErr != nil {
 				coverage.State = CoverageFailed
 				coverage.Reason = reasonRequestFailed
+				coverage.Diagnostic = requestDiagnostic(result, runErr, redactor)
 				report.Coverage = append(report.Coverage, coverage)
 				continue
 			}
@@ -386,6 +390,26 @@ func runAPIRequest(
 	return result, err
 }
 
+func requestDiagnostic(
+	result CommandResult,
+	requestErr error,
+	redactor *redact.Redactor,
+) string {
+	message := strings.TrimSpace(string(result.Stderr))
+	if message == "" && requestErr != nil {
+		message = requestErr.Error()
+	}
+	message = strings.Join(strings.Fields(redactor.Text(message)), " ")
+	if len(message) <= maxDiagnosticBytes {
+		return message
+	}
+	end := maxDiagnosticBytes
+	for end > 0 && !utf8.ValidString(message[:end]) {
+		end--
+	}
+	return message[:end]
+}
+
 func sourceSpecs() []sourceSpec {
 	namespaced := func(groupPath string) func(string) string {
 		return func(namespace string) string {
@@ -530,7 +554,10 @@ func ValidateCompleteCoverage(report Report) error {
 				artifactPath,
 			)
 		}
-		if entry.State != CoverageCollected || entry.Truncated || entry.Reason != "" {
+		if entry.State != CoverageCollected ||
+			entry.Truncated ||
+			entry.Reason != "" ||
+			entry.Diagnostic != "" {
 			return fmt.Errorf(
 				"incomplete workload coverage for %q/%q",
 				entry.Namespace,
