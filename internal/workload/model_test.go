@@ -363,6 +363,12 @@ func TestIdentityLabelsOmitsEmptySetAndRequiresRedactor(t *testing.T) {
 	if _, err := NewIdentityLabels(nil, nil); err == nil {
 		t.Fatal("expected missing redactor error")
 	}
+	if _, err := NewIdentityLabels(
+		map[string]string{"app": "password=raw-secret"},
+		&redact.Redactor{},
+	); err == nil {
+		t.Fatal("expected unconfigured redactor error")
+	}
 }
 
 func exportedJSONFields(model reflect.Type) []string {

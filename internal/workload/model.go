@@ -244,8 +244,8 @@ func NewIdentityLabels(
 	labels map[string]string,
 	redactor *redact.Redactor,
 ) (*IdentityLabels, error) {
-	if redactor == nil {
-		return nil, errors.New("redactor is required")
+	if !redactor.Ready() {
+		return nil, errors.New("configured redactor is required")
 	}
 	selected := make(map[string]string)
 	for key, value := range labels {
