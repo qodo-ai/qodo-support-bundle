@@ -568,7 +568,7 @@ func (normalizer *normalizer) resource(kind Kind, metadata rawMetadata) (Resourc
 
 func (normalizer *normalizer) containers(input []rawContainer) ([]Container, error) {
 	count := normalizer.boundedLength(len(input), maxContainers)
-	output := make([]Container, 0, count)
+	output := make([]Container, 0, normalizer.outputCapacity(count))
 	for index := 0; index < count; index++ {
 		container := input[index]
 		if container.Name == "" || container.Image == "" {
@@ -593,6 +593,9 @@ func (normalizer *normalizer) containers(input []rawContainer) ([]Container, err
 		startup, err := normalizer.probe(container.StartupProbe)
 		if err != nil {
 			return nil, fmt.Errorf("container %d startup probe: %w", index, err)
+		}
+		if normalizer.validateAll {
+			continue
 		}
 		output = append(output, Container{
 			Name:            name,
@@ -700,9 +703,12 @@ func (normalizer *normalizer) scheduling(input rawPodSpec) (Scheduling, error) {
 	}
 
 	tolerationCount := normalizer.boundedLength(len(input.Tolerations), maxTolerations)
-	tolerations := make([]Toleration, 0, tolerationCount)
+	tolerations := make([]Toleration, 0, normalizer.outputCapacity(tolerationCount))
 	for index := 0; index < tolerationCount; index++ {
 		item := input.Tolerations[index]
+		if normalizer.validateAll {
+			continue
+		}
 		tolerations = append(tolerations, Toleration{
 			Key:               normalizer.string(item.Key),
 			Operator:          normalizer.string(item.Operator),
@@ -713,7 +719,7 @@ func (normalizer *normalizer) scheduling(input rawPodSpec) (Scheduling, error) {
 	}
 
 	spreadCount := normalizer.boundedLength(len(input.TopologySpreadConstraints), maxTopologySpread)
-	topologySpread := make([]TopologySpread, 0, spreadCount)
+	topologySpread := make([]TopologySpread, 0, normalizer.outputCapacity(spreadCount))
 	for index := 0; index < spreadCount; index++ {
 		item := input.TopologySpreadConstraints[index]
 		if item.MaxSkew <= 0 {
@@ -725,6 +731,9 @@ func (normalizer *normalizer) scheduling(input rawPodSpec) (Scheduling, error) {
 		selector, err := normalizer.labelSelector(item.LabelSelector)
 		if err != nil {
 			return Scheduling{}, fmt.Errorf("topology spread %d selector: %w", index, err)
+		}
+		if normalizer.validateAll {
+			continue
 		}
 		topologySpread = append(topologySpread, TopologySpread{
 			MaxSkew:            item.MaxSkew,
@@ -758,7 +767,11 @@ func (normalizer *normalizer) affinity(input *rawAffinity) (*Affinity, error) {
 		}
 		output.RequiredNode = required
 		count := normalizer.boundedLength(len(input.NodeAffinity.Preferred), maxAffinityTerms)
-		output.PreferredNode = make([]WeightedSelectorTerm, 0, count)
+		output.PreferredNode = make(
+			[]WeightedSelectorTerm,
+			0,
+			normalizer.outputCapacity(count),
+		)
 		for index := 0; index < count; index++ {
 			item := input.NodeAffinity.Preferred[index]
 			if item.Weight < 1 || item.Weight > 100 {
@@ -770,6 +783,9 @@ func (normalizer *normalizer) affinity(input *rawAffinity) (*Affinity, error) {
 			term, err := normalizer.selectorTerm(item.Preference)
 			if err != nil {
 				return nil, fmt.Errorf("preferred node term %d: %w", index, err)
+			}
+			if normalizer.validateAll {
+				continue
 			}
 			output.PreferredNode = append(output.PreferredNode, WeightedSelectorTerm{
 				Weight:     item.Weight,
@@ -806,11 +822,16 @@ func (normalizer *normalizer) nodeSelector(input *rawNodeSelector) (*NodeSelecto
 		return nil, nil
 	}
 	count := normalizer.boundedLength(len(input.NodeSelectorTerms), maxSelectorTerms)
-	output := &NodeSelector{Terms: make([]SelectorTerm, 0, count)}
+	output := &NodeSelector{
+		Terms: make([]SelectorTerm, 0, normalizer.outputCapacity(count)),
+	}
 	for index := 0; index < count; index++ {
 		term, err := normalizer.selectorTerm(input.NodeSelectorTerms[index])
 		if err != nil {
 			return nil, fmt.Errorf("term %d: %w", index, err)
+		}
+		if normalizer.validateAll {
+			continue
 		}
 		output.Terms = append(output.Terms, term)
 	}
@@ -830,13 +851,20 @@ func (normalizer *normalizer) selectorRequirements(
 	input []rawSelectorRequirement,
 ) []SelectorRequirement {
 	count := normalizer.boundedLength(len(input), maxSelectorRequirements)
-	output := make([]SelectorRequirement, 0, count)
+	output := make([]SelectorRequirement, 0, normalizer.outputCapacity(count))
 	for index := 0; index < count; index++ {
 		item := input[index]
 		valueCount := normalizer.boundedLength(len(item.Values), maxSelectorValues)
-		values := make([]string, 0, valueCount)
+		values := make([]string, 0, normalizer.outputCapacity(valueCount))
 		for valueIndex := 0; valueIndex < valueCount; valueIndex++ {
+			if normalizer.validateAll {
+				_ = normalizer.string(item.Values[valueIndex])
+				continue
+			}
 			values = append(values, normalizer.string(item.Values[valueIndex]))
+		}
+		if normalizer.validateAll {
+			continue
 		}
 		output = append(output, SelectorRequirement{
 			Key:      normalizer.string(item.Key),
@@ -851,11 +879,14 @@ func (normalizer *normalizer) podAffinityTerms(
 	input []rawPodAffinityTerm,
 ) ([]PodAffinityTerm, error) {
 	count := normalizer.boundedLength(len(input), maxAffinityTerms)
-	output := make([]PodAffinityTerm, 0, count)
+	output := make([]PodAffinityTerm, 0, normalizer.outputCapacity(count))
 	for index := 0; index < count; index++ {
 		item, err := normalizer.podAffinityTerm(input[index])
 		if err != nil {
 			return nil, fmt.Errorf("term %d: %w", index, err)
+		}
+		if normalizer.validateAll {
+			continue
 		}
 		output = append(output, item)
 	}
@@ -866,7 +897,7 @@ func (normalizer *normalizer) weightedPodAffinityTerms(
 	input []rawWeightedPodAffinityTerm,
 ) ([]WeightedPodAffinity, error) {
 	count := normalizer.boundedLength(len(input), maxAffinityTerms)
-	output := make([]WeightedPodAffinity, 0, count)
+	output := make([]WeightedPodAffinity, 0, normalizer.outputCapacity(count))
 	for index := 0; index < count; index++ {
 		if input[index].Weight < 1 || input[index].Weight > 100 {
 			return nil, fmt.Errorf("term %d weight must be between 1 and 100", index)
@@ -874,6 +905,9 @@ func (normalizer *normalizer) weightedPodAffinityTerms(
 		term, err := normalizer.podAffinityTerm(input[index].PodAffinityTerm)
 		if err != nil {
 			return nil, fmt.Errorf("term %d: %w", index, err)
+		}
+		if normalizer.validateAll {
+			continue
 		}
 		output = append(output, WeightedPodAffinity{
 			Weight:          input[index].Weight,
@@ -895,8 +929,12 @@ func (normalizer *normalizer) podAffinityTerm(
 		return PodAffinityTerm{}, fmt.Errorf("namespace selector: %w", err)
 	}
 	count := normalizer.boundedLength(len(input.Namespaces), maxNamespaces)
-	namespaces := make([]string, 0, count)
+	namespaces := make([]string, 0, normalizer.outputCapacity(count))
 	for index := 0; index < count; index++ {
+		if normalizer.validateAll {
+			_ = normalizer.string(input.Namespaces[index])
+			continue
+		}
 		namespaces = append(namespaces, normalizer.string(input.Namespaces[index]))
 	}
 	return PodAffinityTerm{
@@ -925,12 +963,15 @@ func (normalizer *normalizer) labelSelector(
 
 func (normalizer *normalizer) conditions(input []rawCondition) ([]Condition, error) {
 	count := normalizer.boundedLength(len(input), maxConditions)
-	output := make([]Condition, 0, count)
+	output := make([]Condition, 0, normalizer.outputCapacity(count))
 	for index := 0; index < count; index++ {
 		item := input[index]
 		transitionTime, err := parseOptionalTime(item.LastTransitionTime)
 		if err != nil {
 			return nil, fmt.Errorf("condition %d transition time: %w", index, err)
+		}
+		if normalizer.validateAll {
+			continue
 		}
 		output = append(output, Condition{
 			Type:               normalizer.string(item.Type),
@@ -973,6 +1014,13 @@ func (normalizer *normalizer) boundedLength(length int, maximum int) int {
 	if length > maximum {
 		normalizer.truncated = true
 		return maximum
+	}
+	return length
+}
+
+func (normalizer *normalizer) outputCapacity(length int) int {
+	if normalizer.validateAll {
+		return 0
 	}
 	return length
 }

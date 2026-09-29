@@ -253,6 +253,14 @@ func Collect(
 				report.Coverage = append(report.Coverage, coverage)
 				continue
 			}
+			if collectionCtx.Err() != nil {
+				coverage.State = CoverageFailed
+				coverage.Truncated = true
+				coverage.Reason = reasonCollectionDeadline
+				report.Coverage = append(report.Coverage, coverage)
+				report.Truncated = true
+				continue
+			}
 			sort.Slice(records, func(left, right int) bool {
 				return records[left].key < records[right].key
 			})
@@ -271,6 +279,12 @@ func Collect(
 				coverage.Reason = reasonRecordLimit
 			}
 			for _, record := range records {
+				if collectionCtx.Err() != nil {
+					coverage.State = CoveragePartial
+					coverage.Truncated = true
+					coverage.Reason = reasonCollectionDeadline
+					break
+				}
 				recordBytes := int64(len(record.data))
 				switch {
 				case recordBytes > sourceRemaining[spec.name]:
@@ -303,7 +317,7 @@ func Collect(
 		}
 	}
 
-	if err := stageArtifacts(ctx, sink, recordsByArtifact, &report); err != nil {
+	if err := stageArtifacts(collectionCtx, sink, recordsByArtifact, &report); err != nil {
 		return report, err
 	}
 	return report, nil

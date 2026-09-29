@@ -480,8 +480,8 @@ func TestCollectBoundsAggregateDurationWithExplicitCoverage(t *testing.T) {
 		&collectorSink{},
 		redact.New(),
 	)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("aggregate deadline error = %v", err)
 	}
 	if len(runner.calls) != 1 || len(report.Coverage) != 9 || !report.Truncated {
 		t.Fatalf("aggregate deadline was not enforced: calls=%d report=%+v", len(runner.calls), report)
