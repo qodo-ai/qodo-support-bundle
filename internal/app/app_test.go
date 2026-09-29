@@ -497,7 +497,7 @@ func TestConnectivityFailureIsSummarizedWithoutChangingStatus(t *testing.T) {
 	status := 503
 	summary := collection.BuildSummary(
 		time.Date(2026, 9, 27, 8, 0, 0, 0, time.UTC),
-		collectionStatusComplete,
+		collection.CoverageComplete.String(),
 		kubernetes.Report{},
 		nil,
 		true,
@@ -611,9 +611,9 @@ func TestCollectExitSemanticsForProbeResults(t *testing.T) {
 				!strings.Contains(manifest, expectedReportLimit) {
 				t.Fatalf("manifest omitted metadata limit: %s", manifest)
 			}
-			expectedStatus := collectionStatusComplete
+			expectedStatus := collection.CoverageComplete.String()
 			if test.wantExit == 3 {
-				expectedStatus = collectionStatusPartial
+				expectedStatus = collection.CoveragePartial.String()
 			}
 			if !strings.Contains(
 				manifest,
