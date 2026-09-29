@@ -62,7 +62,7 @@ type Archive interface {
 	FinalizeContext(context.Context, bundle.Manifest) (string, error)
 }
 
-// KubernetesCollector collects Kubernetes artifacts into the supplied sink.
+// KubernetesCollector returns the evidence used to derive Kubernetes coverage.
 type KubernetesCollector func(
 	context.Context,
 	kubernetes.Config,
