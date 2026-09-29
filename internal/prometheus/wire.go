@@ -79,6 +79,10 @@ func normalizeRangeResponse(
 		if len(series.Metric) > 128 {
 			return normalizedQuery{}, errInvalidResponse
 		}
+		if namespace, exists := series.Metric["namespace"]; !exists ||
+			!validDNSLabel(namespace) {
+			return normalizedQuery{}, errInvalidResponse
+		}
 		rawIdentity := sortedLabelIdentity(series.Metric)
 		if _, duplicate := rawIdentities[rawIdentity]; duplicate {
 			return normalizedQuery{}, errInvalidResponse

@@ -15,6 +15,9 @@ func ValidateCompleteCoverage(report Report) error {
 	if report.State != ReportComplete || report.Truncated {
 		return fmt.Errorf("%w: report is not complete", ErrCoverageInvalid)
 	}
+	if report.RetainedRecords < 0 || report.RetainedBytes < 0 {
+		return fmt.Errorf("%w: invalid report counters", ErrCoverageInvalid)
+	}
 	requestedStart, startErr := time.Parse(time.RFC3339Nano, report.RequestedStart)
 	requestedEnd, endErr := time.Parse(time.RFC3339Nano, report.RequestedEnd)
 	actualStart, actualStartErr := time.Parse(time.RFC3339Nano, report.ActualStart)
@@ -58,6 +61,10 @@ func ValidateCompleteCoverage(report Report) error {
 		if coverage.Reason != "" ||
 			coverage.Diagnostic != "" ||
 			coverage.Truncated ||
+			coverage.SeriesFound < 0 ||
+			coverage.SeriesRetained < 0 ||
+			coverage.SamplesFound < 0 ||
+			coverage.SamplesRetained < 0 ||
 			coverage.SeriesFound < coverage.SeriesRetained ||
 			coverage.SamplesFound < coverage.SamplesRetained ||
 			coverage.RetainedBytes < 0 {

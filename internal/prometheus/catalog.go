@@ -18,7 +18,7 @@ const CatalogVersion = "v1"
 const (
 	namespaceRegexToken       = "{{namespace_regex}}"
 	namespaceSelectorTemplate = `namespace=~"` + namespaceRegexToken + `"`
-	allNamespacesRegex        = ".*"
+	allNamespacesRegex        = ".+"
 	systemNamespacesRegex     = "^(?:kube-system|kube-public|kube-node-lease|gmp-system|gmp-public|cnrm-system|configconnector-operator-system|gke-managed-.*)$"
 )
 

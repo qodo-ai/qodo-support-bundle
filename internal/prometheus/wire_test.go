@@ -93,6 +93,12 @@ func TestNormalizeRangeResponseRejectsMalformedInput(t *testing.T) {
 		"null result":   `{"status":"success","data":{"resultType":"matrix","result":null}}`,
 		"null metric":   `{"status":"success","data":{"resultType":"matrix","result":[{"metric":null,"values":[]}]}}`,
 		"null values":   `{"status":"success","data":{"resultType":"matrix","result":[{"metric":{},"values":null}]}}`,
+		"missing namespace": `{"status":"success","data":{"resultType":"matrix","result":[
+			{"metric":{"service":"api"},"values":[[1790676000,"1"]]}
+		]}}`,
+		"empty namespace": `{"status":"success","data":{"resultType":"matrix","result":[
+			{"metric":{"namespace":""},"values":[[1790676000,"1"]]}
+		]}}`,
 	}
 	for name, response := range tests {
 		t.Run(name, func(t *testing.T) {

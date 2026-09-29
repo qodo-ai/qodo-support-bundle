@@ -193,7 +193,7 @@ func TestAllNamespacesUsesFixedSafeRegex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(rendered, `namespace=~".*"`) ||
+	if !strings.Contains(rendered, `namespace=~".+"`) ||
 		strings.Contains(rendered, namespaceRegexToken) {
 		t.Fatalf("rendered all-namespace query = %q", rendered)
 	}
@@ -214,7 +214,7 @@ func TestAllNamespacesCanExcludeFixedSystemNamespaces(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		included := strings.Count(rendered, `namespace=~".*"`)
+		included := strings.Count(rendered, `namespace=~".+"`)
 		excluded := strings.Count(
 			rendered,
 			`namespace!~"`+systemNamespacesRegex+`"`,

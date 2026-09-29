@@ -108,6 +108,7 @@ func TestCollectStagesDeterministicRedactedArtifacts(t *testing.T) {
 		if len(query.RetainLabels) > 0 {
 			labels[query.RetainLabels[0]] = "token=raw-label-secret"
 		}
+		labels["namespace"] = "team-a"
 		_ = json.NewEncoder(writer).Encode(map[string]any{
 			"status": "success",
 			"data": map[string]any{
