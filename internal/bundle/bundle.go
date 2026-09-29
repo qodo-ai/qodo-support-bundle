@@ -21,6 +21,7 @@ import (
 const (
 	directoryMode = 0o700
 	fileMode      = 0o600
+	schemaVersion = "4"
 )
 
 // ErrCleanup reports that temporary staged data could not be removed.
@@ -172,7 +173,7 @@ func (builder *Builder) FinalizeContext(
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	manifest.SchemaVersion = "3"
+	manifest.SchemaVersion = schemaVersion
 	artifacts, err := builder.manifestFiles(ctx)
 	if err != nil {
 		return "", err

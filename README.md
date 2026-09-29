@@ -2,21 +2,22 @@
 
 `qodo-support-bundle` is a portable, read-only CLI for collecting bounded and
 redacted Kubernetes diagnostics. It collects pod metadata, events, current and
-previous container logs, and an optional Platform-to-Zitadel connectivity
-report.
+previous container logs, normalized namespace-scoped workload context, and an
+optional Platform-to-Zitadel connectivity report.
 
 ## Prerequisites and scope
 
 - A release binary for the operator's platform.
 - `kubectl` configured for the target cluster.
-- Read access to pods, pod logs, and events in each collected namespace.
+- Read access to pods, pod logs, events, and the supported workload resources
+  in each collected namespace.
 - Cluster-scoped `list` access to namespaces only when automatic discovery or
   `--all-namespaces` is used.
 - `pods/exec` permission only when `--check-zitadel` is requested.
 
-The collector never requests Secrets, ConfigMaps, or new workload resources,
-and it does not retain workload environment variables from the Pod metadata it
-reads. A namespace-scoped baseline role is:
+The collector never requests Secrets or ConfigMaps. Workload artifacts omit raw
+manifests, environment values, command arguments, annotations, endpoint
+addresses, and volume contents. A namespace-scoped baseline role is:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -25,7 +26,22 @@ metadata:
   name: qodo-support-bundle-reader
 rules:
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "events"]
+    resources: ["pods", "events", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list"]
 ```
 
@@ -80,6 +96,11 @@ Defaults and hard bounds are:
 - `--max-log-bytes 10 MiB` per stream, maximum 100 MiB
 - `--max-total-log-bytes 1 GiB`, maximum 8 GiB
 - `--log-workers 8`, maximum 64
+
+Workload collection separately bounds each raw API response to 8 MiB, each
+normalized resource kind to 4 MiB, all normalized workload artifacts to
+16 MiB, namespace scope to 100 namespaces, and total workload collection time
+to 5 minutes.
 
 Once the total log budget is exhausted, remaining streams are skipped and
 recorded as collection issues. The metadata budget is shared across every
@@ -168,21 +189,86 @@ kubernetes/pods.jsonl
 kubernetes/events.jsonl
 kubernetes/container_events.jsonl
 kubernetes/logs/<pod>/<container>.log
+kubernetes/workloads.jsonl                 # present when records are retained
+kubernetes/services.jsonl                  # present when records are retained
+kubernetes/autoscalers.jsonl               # present when records are retained
+kubernetes/storage.jsonl                   # present when records are retained
+kubernetes/workload-coverage.json
 connectivity/zitadel.json                 # optional
 collection-issues.jsonl                   # partial collection only
 ```
 
-Multi-namespace paths include the namespace below `kubernetes/`. The
-schema-version 3 manifest identifies the Kubernetes-only archive format and
-records collector version, timestamp, redaction rules, scope, limits,
-Kubernetes statistics, connectivity metadata, and each artifact's size and
-SHA-256. `checksums.sha256` includes every artifact and the manifest.
+Pod, event, and log paths include the namespace below `kubernetes/` in
+multi-namespace bundles. Normalized workload JSONL paths remain flat and combine
+records from all selected namespaces; every record identifies its namespace.
+Categories with no retained records have no JSONL file. The schema-version 4
+manifest identifies the normalized workload-context format and records
+collector version, timestamp, redaction rules, scope, limits, Kubernetes
+statistics, connectivity metadata, and each artifact's size and SHA-256.
+`checksums.sha256` includes every artifact and the manifest.
 
 After safe extraction, verify embedded integrity:
 
 ```bash
 shasum -a 256 -c checksums.sha256
 ```
+
+### Manual workload smoke test
+
+Build the current source and collect one namespace that contains representative
+applications. The collector is read-only; this does not create or modify
+cluster resources:
+
+```bash
+NAMESPACE=qodo-onprem
+make build VERSION=manual
+
+TEST_DIR="$(mktemp -d)"
+ARCHIVE="$TEST_DIR/bundle.tar.gz"
+./dist/qodo-support-bundle collect \
+  --namespace "$NAMESPACE" \
+  --output "$ARCHIVE"
+
+mkdir "$TEST_DIR/extracted"
+tar -xzf "$ARCHIVE" -C "$TEST_DIR/extracted"
+```
+
+Verify archive integrity, schema 4, all nine namespace/resource coverage rows,
+and the four normalized JSONL artifacts:
+
+```bash
+(
+  set -e
+  cd "$TEST_DIR/extracted"
+  shasum -a 256 -c checksums.sha256
+  jq -e '.schema_version == "4"' manifest.json
+  jq -e --arg namespace "$NAMESPACE" '
+    .namespaces == [$namespace] and
+    (.coverage | length == 9) and
+    all(.coverage[]; .namespace == $namespace)
+  ' kubernetes/workload-coverage.json
+
+  for artifact in \
+    kubernetes/workloads.jsonl \
+    kubernetes/services.jsonl \
+    kubernetes/autoscalers.jsonl \
+    kubernetes/storage.jsonl
+  do
+    if [ -f "$artifact" ]; then
+      jq -e -s 'all(.[]; type == "object")' "$artifact" || exit 1
+    fi
+  done
+)
+```
+
+Inspect `kubernetes/workload-coverage.json` for `partial`, `failed`, or
+`skipped` entries. Exit code `3` and `collection-issues.jsonl` indicate a usable
+partial bundle, commonly caused by missing RBAC for one of the resource kinds.
+An absent normalized JSONL category means that no records for it were retained;
+the coverage file remains authoritative for whether its API requests succeeded.
+Review normalized artifacts before sharing; they must not contain raw
+manifests, Secrets, ConfigMaps, endpoint addresses, environment values,
+commands, arguments, annotations, or volume contents.
 
 Checksums detect corruption but do not authenticate provenance. Treat bundles
 as sensitive, review them before sharing, and use an approved authenticated
