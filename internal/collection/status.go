@@ -52,10 +52,14 @@ func ZitadelCoverage(enabled bool, outcome zitadel.Outcome) Coverage {
 	}
 }
 
-// AggregateStatus returns the schema-3 manifest collection status. An empty
-// coverage map is complete by vacuous truth; any state other than complete or
-// not_requested, including an invalid state, makes the aggregate partial.
+// AggregateStatus returns the schema-3 manifest collection status. Missing
+// coverage evidence fails closed as partial. For non-empty coverage, any state
+// other than complete or not_requested, including an invalid state, also makes
+// the aggregate partial.
 func AggregateStatus(coverage map[Source]Coverage) string {
+	if len(coverage) == 0 {
+		return CoveragePartial.String()
+	}
 	for _, sourceCoverage := range coverage {
 		switch sourceCoverage.State {
 		case CoverageComplete, CoverageNotRequested:

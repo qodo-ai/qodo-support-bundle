@@ -166,9 +166,14 @@ func TestAggregateStatus(t *testing.T) {
 			want: "partial",
 		},
 		{
-			name:     "empty coverage is vacuously complete",
+			name:     "nil coverage fails closed",
+			coverage: nil,
+			want:     "partial",
+		},
+		{
+			name:     "empty coverage fails closed",
 			coverage: map[Source]Coverage{},
-			want:     "complete",
+			want:     "partial",
 		},
 	}
 
