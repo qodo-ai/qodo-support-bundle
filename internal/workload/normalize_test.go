@@ -604,12 +604,13 @@ func TestNormalizeListJSONRejectsMalformedAndAmbiguousInput(t *testing.T) {
 		"zero value": {},
 	} {
 		t.Run(name+" redactor", func(t *testing.T) {
-			if _, err := NormalizeListJSON(
+			_, err := NormalizeListJSON(
 				DeploymentKind,
 				[]byte(`{"kind":"DeploymentList","items":[]}`),
 				redactor,
-			); err == nil {
-				t.Fatal("expected redactor configuration error")
+			)
+			if err == nil || !strings.Contains(err.Error(), "configured redactor is required") {
+				t.Fatalf("expected redactor configuration error, got %v", err)
 			}
 		})
 	}
@@ -636,6 +637,21 @@ func TestRejectDuplicateJSONKeysUsesUnicodeCaseFolding(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "match case-insensitively") {
 			t.Fatalf("input %s: expected case-folded duplicate error, got %v", input, err)
 		}
+	}
+}
+
+func TestNormalizeListJSONReportsDuplicateKeyReason(t *testing.T) {
+	t.Parallel()
+	for name, input := range map[string]string{
+		"exact":       `{"kind":"DeploymentList","kind":"DeploymentList","items":[]}`,
+		"case folded": `{"kind":"DeploymentList","Kind":"JobList","items":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := NormalizeListJSON(DeploymentKind, []byte(input), redact.New())
+			if err == nil || !strings.Contains(err.Error(), "duplicate object keys") {
+				t.Fatalf("expected duplicate-key validation error, got %v", err)
+			}
+		})
 	}
 }
 
@@ -702,21 +718,34 @@ func TestNormalizeListJSONRejectsMalformedContainers(t *testing.T) {
 func TestRawWorkloadTypesContainNoForbiddenJSONFields(t *testing.T) {
 	t.Parallel()
 	forbidden := map[string]bool{
-		"annotations":  true,
-		"env":          true,
-		"envFrom":      true,
-		"command":      true,
-		"args":         true,
-		"httpHeaders":  true,
-		"host":         true,
-		"volumes":      true,
-		"volumeMounts": true,
-		"nodeName":     true,
-		"podIP":        true,
-		"podIPs":       true,
-		"addresses":    true,
-		"data":         true,
-		"stringData":   true,
+		"annotations":    true,
+		"env":            true,
+		"envFrom":        true,
+		"command":        true,
+		"args":           true,
+		"httpHeaders":    true,
+		"host":           true,
+		"volumes":        true,
+		"volumeMounts":   true,
+		"nodeName":       true,
+		"podIP":          true,
+		"podIPs":         true,
+		"addresses":      true,
+		"clusterIP":      true,
+		"clusterIPs":     true,
+		"externalIPs":    true,
+		"loadBalancerIP": true,
+		"data":           true,
+		"stringData":     true,
+		"rawManifest":    true,
+		"volumeName":     true,
+		"dataSource":     true,
+		"dataSourceRef":  true,
+		"hostname":       true,
+		"targetRef":      true,
+		"metrics":        true,
+		"behavior":       true,
+		"currentMetrics": true,
 	}
 	visited := make(map[reflect.Type]bool)
 	for _, root := range []any{
@@ -725,6 +754,10 @@ func TestRawWorkloadTypesContainNoForbiddenJSONFields(t *testing.T) {
 		rawDaemonSetList{},
 		rawJobList{},
 		rawCronJobList{},
+		rawServiceList{},
+		rawEndpointSliceList{},
+		rawHorizontalPodAutoscalerList{},
+		rawPersistentVolumeClaimList{},
 	} {
 		assertRawFieldsAllowed(t, reflect.TypeOf(root), forbidden, visited)
 	}

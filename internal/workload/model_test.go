@@ -360,14 +360,15 @@ func TestIdentityLabelsOmitsEmptySetAndRequiresRedactor(t *testing.T) {
 	if err != nil || labels != nil {
 		t.Fatalf("unexpected empty label set: %#v", labels)
 	}
-	if _, err := NewIdentityLabels(nil, nil); err == nil {
-		t.Fatal("expected missing redactor error")
+	if _, err := NewIdentityLabels(nil, nil); err == nil ||
+		!strings.Contains(err.Error(), "configured redactor is required") {
+		t.Fatalf("expected missing redactor error, got %v", err)
 	}
 	if _, err := NewIdentityLabels(
 		map[string]string{"app": "password=raw-secret"},
 		&redact.Redactor{},
-	); err == nil {
-		t.Fatal("expected unconfigured redactor error")
+	); err == nil || !strings.Contains(err.Error(), "configured redactor is required") {
+		t.Fatalf("expected unconfigured redactor error, got %v", err)
 	}
 }
 

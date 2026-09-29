@@ -17,6 +17,8 @@ type rawMetadata struct {
 
 type rawIdentityLabels map[string]string
 
+const endpointSliceServiceNameLabel = "kubernetes.io/service-name"
+
 func (labels *rawIdentityLabels) UnmarshalJSON(data []byte) error {
 	var decoded map[string]string
 	if err := json.Unmarshal(data, &decoded); err != nil {
@@ -24,7 +26,7 @@ func (labels *rawIdentityLabels) UnmarshalJSON(data []byte) error {
 	}
 	selected := make(rawIdentityLabels)
 	for key, value := range decoded {
-		if identityLabelAllowed(key) {
+		if identityLabelAllowed(key) || key == endpointSliceServiceNameLabel {
 			selected[key] = value
 		}
 	}

@@ -1,0 +1,67 @@
+{
+  "apiVersion": "v1",
+  "kind": "ServiceList",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "api",
+        "namespace": "platform",
+        "creationTimestamp": "2026-09-29T08:00:00Z",
+        "labels": {
+          "app": "password=raw-service-label-secret",
+          "customer.internal/id": "forbidden-service-label"
+        },
+        "annotations": {
+          "token": "forbidden-service-annotation"
+        },
+        "managedFields": [
+          {
+            "manager": "forbidden-service-manager"
+          }
+        ]
+      },
+      "spec": {
+        "type": "ClusterIP",
+        "selector": {
+          "App": "password=raw-selector-secret",
+          "app": "api"
+        },
+        "ports": [
+          {
+            "name": "http",
+            "protocol": "TCP",
+            "port": 80,
+            "targetPort": 8080,
+            "appProtocol": "forbidden-app-protocol"
+          },
+          {
+            "name": "metrics",
+            "protocol": "TCP",
+            "port": 9090,
+            "targetPort": "metrics"
+          }
+        ],
+        "clusterIP": "10.0.0.1",
+        "clusterIPs": [
+          "10.0.0.1"
+        ],
+        "externalIPs": [
+          "203.0.113.5"
+        ],
+        "loadBalancerIP": "203.0.113.6"
+      },
+      "status": {
+        "loadBalancer": {
+          "ingress": [
+            {
+              "ip": "203.0.113.7",
+              "hostname": "forbidden-service-hostname"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

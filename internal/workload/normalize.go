@@ -20,11 +20,15 @@ import (
 type Kind string
 
 const (
-	DeploymentKind  Kind = "Deployment"
-	StatefulSetKind Kind = "StatefulSet"
-	DaemonSetKind   Kind = "DaemonSet"
-	JobKind         Kind = "Job"
-	CronJobKind     Kind = "CronJob"
+	DeploymentKind              Kind = "Deployment"
+	StatefulSetKind             Kind = "StatefulSet"
+	DaemonSetKind               Kind = "DaemonSet"
+	JobKind                     Kind = "Job"
+	CronJobKind                 Kind = "CronJob"
+	serviceKind                 Kind = "Service"
+	endpointSliceKind           Kind = "EndpointSlice"
+	horizontalPodAutoscalerKind Kind = "HorizontalPodAutoscaler"
+	persistentVolumeClaimKind   Kind = "PersistentVolumeClaim"
 )
 
 const (
@@ -61,22 +65,15 @@ func NormalizeListJSON(
 	data []byte,
 	redactor *redact.Redactor,
 ) (NormalizationResult, error) {
-	if !redactor.Ready() {
-		return NormalizationResult{}, errors.New("configured redactor is required")
-	}
 	if err := validateKind(kind); err != nil {
 		return NormalizationResult{}, err
 	}
-	if !utf8.Valid(data) {
-		return NormalizationResult{}, errors.New("workload JSON is not valid UTF-8")
-	}
-	if err := rejectDuplicateJSONKeys(data); err != nil {
-		return NormalizationResult{}, fmt.Errorf("validate workload JSON: %w", err)
+	normalizer, err := newNormalizer(data, redactor, "workload")
+	if err != nil {
+		return NormalizationResult{}, err
 	}
 
-	normalizer := &normalizer{redactor: redactor}
 	var workloads []Workload
-	var err error
 	switch kind {
 	case DeploymentKind:
 		workloads, err = decodeDeployments(data, normalizer)
@@ -96,6 +93,23 @@ func NormalizeListJSON(
 		Workloads: workloads,
 		Truncated: normalizer.truncated,
 	}, nil
+}
+
+func newNormalizer(
+	data []byte,
+	redactor *redact.Redactor,
+	subject string,
+) (*normalizer, error) {
+	if !redactor.Ready() {
+		return nil, errors.New("configured redactor is required")
+	}
+	if !utf8.Valid(data) {
+		return nil, fmt.Errorf("%s JSON is not valid UTF-8", subject)
+	}
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return nil, fmt.Errorf("validate %s JSON: %w", subject, err)
+	}
+	return &normalizer{redactor: redactor}, nil
 }
 
 func validateKind(kind Kind) error {
@@ -1023,9 +1037,12 @@ func scanJSONValue(decoder *json.Decoder, depth int, caseSensitiveKeys bool) err
 func caseSensitiveJSONMap(field string) bool {
 	for _, mapField := range []string{
 		"annotations",
+		"capacity",
 		"labels",
 		"matchLabels",
 		"nodeSelector",
+		"requests",
+		"selector",
 	} {
 		if strings.EqualFold(field, mapField) {
 			return true
