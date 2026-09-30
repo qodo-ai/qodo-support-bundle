@@ -65,6 +65,8 @@ func TestGCSWorkflowsUseOIDCAndSeparateDevFromProduction(t *testing.T) {
 		"qodo-cli-public-dev",
 		"google-github-actions/auth@",
 		"./scripts/publish-gcs.sh",
+		"verify_gcs_access_only",
+		"${QODO_SUPPORT_BUNDLE_PREFIX}/ci-probes/",
 	} {
 		if !strings.Contains(release, required) {
 			t.Fatalf("release workflow does not contain %q", required)
