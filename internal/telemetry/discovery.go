@@ -27,6 +27,11 @@ type listEnvelope struct {
 	Items      json.RawMessage `json:"items"`
 }
 
+type typeMeta struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+}
+
 type serviceItem struct {
 	APIVersion string            `json:"apiVersion"`
 	Kind       string            `json:"kind"`
@@ -236,7 +241,7 @@ func runDiscoveryQuery(
 
 func decodeServices(data []byte, namespace string) ([]serviceItem, error) {
 	var services []serviceItem
-	if err := decodeList(data, "v1", "ServiceList", &services); err != nil {
+	if err := decodeList(data, "v1", "ServiceList", "Service", &services); err != nil {
 		return nil, ErrInvalidResponse
 	}
 	seen := make(map[string]struct{}, len(services))
@@ -266,6 +271,7 @@ func decodeEndpointSlices(data []byte, namespace string) ([]endpointSliceItem, e
 		data,
 		"discovery.k8s.io/v1",
 		"EndpointSliceList",
+		"EndpointSlice",
 		&slices,
 	); err != nil {
 		return nil, ErrInvalidResponse
@@ -290,7 +296,13 @@ func decodeEndpointSlices(data []byte, namespace string) ([]endpointSliceItem, e
 	return slices, nil
 }
 
-func decodeList(data []byte, apiVersion string, kind string, destination any) error {
+func decodeList(
+	data []byte,
+	apiVersion string,
+	listKind string,
+	itemKind string,
+	destination any,
+) error {
 	if len(data) == 0 {
 		return errors.New("empty response")
 	}
@@ -302,12 +314,28 @@ func decodeList(data []byte, apiVersion string, kind string, destination any) er
 	if err := requireJSONEOF(decoder); err != nil {
 		return err
 	}
-	typedList := envelope.APIVersion == apiVersion && envelope.Kind == kind
+	typedList := envelope.APIVersion == apiVersion && envelope.Kind == listKind
 	genericKubectlList := envelope.APIVersion == "v1" && envelope.Kind == "List"
 	if (!typedList && !genericKubectlList) ||
 		len(envelope.Items) == 0 ||
 		bytes.Equal(bytes.TrimSpace(envelope.Items), []byte("null")) {
 		return errors.New("unexpected list shape")
+	}
+	if genericKubectlList {
+		var items []json.RawMessage
+		if err := json.Unmarshal(envelope.Items, &items); err != nil {
+			return err
+		}
+		for _, item := range items {
+			var metadata typeMeta
+			if err := json.Unmarshal(item, &metadata); err != nil {
+				return err
+			}
+			if (metadata.APIVersion != "" && metadata.APIVersion != apiVersion) ||
+				(metadata.Kind != "" && metadata.Kind != itemKind) {
+				return errors.New("unexpected item type")
+			}
+		}
 	}
 	if err := json.Unmarshal(envelope.Items, destination); err != nil {
 		return err

@@ -178,6 +178,32 @@ func TestDiscoverAcceptsKubectlGenericListEnvelopes(t *testing.T) {
 	})
 }
 
+func TestDecodeListRejectsGenericItemTypeBeforeTypedDecode(t *testing.T) {
+	t.Parallel()
+	wrongService := strings.Replace(
+		serviceJSON("phoenix", "observability", "app", "phoenix", 6006),
+		`{"metadata"`,
+		`{"apiVersion":"batch/v1","kind":"Job","metadata"`,
+		1,
+	)
+	var services []serviceItem
+
+	err := decodeList(
+		[]byte(genericList(wrongService)),
+		"v1",
+		"ServiceList",
+		"Service",
+		&services,
+	)
+
+	if err == nil {
+		t.Fatal("decodeList() error = nil")
+	}
+	if services != nil {
+		t.Fatalf("generic item was decoded as a service: %+v", services)
+	}
+}
+
 func TestDiscoverReturnsStableCandidateErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
