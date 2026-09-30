@@ -19,12 +19,13 @@ case "$PREFIX" in
     ;;
 esac
 
-expected_files='checksums.sha256
-qodo-support-bundle-darwin-amd64
+expected_binaries='qodo-support-bundle-darwin-amd64
 qodo-support-bundle-darwin-arm64
 qodo-support-bundle-linux-amd64
 qodo-support-bundle-linux-arm64
 qodo-support-bundle-windows-amd64.exe'
+expected_files="checksums.sha256
+${expected_binaries}"
 
 actual_files="$(
   find "$DIST" -mindepth 1 -maxdepth 1 -type f -exec basename {} \; |
@@ -33,6 +34,22 @@ actual_files="$(
 [ "$actual_files" = "$expected_files" ] || {
   echo "publish-gcs: dist inventory does not match the release contract" >&2
   printf 'expected:\n%s\nactual:\n%s\n' "$expected_files" "$actual_files" >&2
+  exit 1
+}
+
+manifest_files="$(
+  awk '
+    NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ { exit 1 }
+    { print $2 }
+  ' "$DIST/checksums.sha256" |
+    LC_ALL=C sort
+)" || {
+  echo "publish-gcs: checksum manifest is malformed" >&2
+  exit 1
+}
+[ "$manifest_files" = "$expected_binaries" ] || {
+  echo "publish-gcs: checksum manifest inventory does not match the five binaries" >&2
+  printf 'expected:\n%s\nactual:\n%s\n' "$expected_binaries" "$manifest_files" >&2
   exit 1
 }
 
@@ -68,13 +85,17 @@ upload_immutable() {
   echo "publish-gcs: immutable object already matches: $destination" >&2
 }
 
-printf '%s\n' "$expected_files" | while IFS= read -r filename; do
+printf '%s\n' "$expected_binaries" | while IFS= read -r filename; do
   source_path="${DIST}/${filename}"
   destination="gs://${BUCKET}/${PREFIX}/releases/${VERSION}/${filename}"
   digest="$(sha256sum "$source_path" | cut -d' ' -f1)"
-  content_type=application/octet-stream
-  [ "$filename" = checksums.sha256 ] && content_type=text/plain
-  upload_immutable "$source_path" "$destination" "$content_type" "$digest"
+  upload_immutable "$source_path" "$destination" application/octet-stream "$digest"
 done
+
+filename=checksums.sha256
+source_path="${DIST}/${filename}"
+destination="gs://${BUCKET}/${PREFIX}/releases/${VERSION}/${filename}"
+digest="$(sha256sum "$source_path" | cut -d' ' -f1)"
+upload_immutable "$source_path" "$destination" text/plain "$digest"
 
 echo "publish-gcs: published ${VERSION} to gs://${BUCKET}/${PREFIX}/releases/${VERSION}/" >&2

@@ -18,12 +18,13 @@ case "$PREFIX" in
     ;;
 esac
 
-expected_files='checksums.sha256
-qodo-support-bundle-darwin-amd64
+expected_binaries='qodo-support-bundle-darwin-amd64
 qodo-support-bundle-darwin-arm64
 qodo-support-bundle-linux-amd64
 qodo-support-bundle-linux-arm64
 qodo-support-bundle-windows-amd64.exe'
+expected_files="checksums.sha256
+${expected_binaries}"
 
 work="$(mktemp -d)"
 existing="${work}/existing"
@@ -43,6 +44,22 @@ actual_files="$(
   echo "promote-gcs: downloaded inventory does not match the release contract" >&2
   exit 1
 }
+
+manifest_files="$(
+  awk '
+    NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ { exit 1 }
+    { print $2 }
+  ' "$work/checksums.sha256" |
+    LC_ALL=C sort
+)" || {
+  echo "promote-gcs: checksum manifest is malformed" >&2
+  exit 1
+}
+[ "$manifest_files" = "$expected_binaries" ] || {
+  echo "promote-gcs: checksum manifest inventory does not match the five binaries" >&2
+  exit 1
+}
+
 (cd "$work" && sha256sum --check checksums.sha256)
 
 upload_immutable() {
@@ -72,13 +89,17 @@ upload_immutable() {
   echo "promote-gcs: immutable object already matches: $destination" >&2
 }
 
-printf '%s\n' "$expected_files" | while IFS= read -r filename; do
+printf '%s\n' "$expected_binaries" | while IFS= read -r filename; do
   source_path="${work}/${filename}"
   destination="gs://${DESTINATION_BUCKET}/${PREFIX}/releases/${VERSION}/${filename}"
   digest="$(sha256sum "$source_path" | cut -d' ' -f1)"
-  content_type=application/octet-stream
-  [ "$filename" = checksums.sha256 ] && content_type=text/plain
-  upload_immutable "$source_path" "$destination" "$content_type" "$digest"
+  upload_immutable "$source_path" "$destination" application/octet-stream "$digest"
 done
+
+filename=checksums.sha256
+source_path="${work}/${filename}"
+destination="gs://${DESTINATION_BUCKET}/${PREFIX}/releases/${VERSION}/${filename}"
+digest="$(sha256sum "$source_path" | cut -d' ' -f1)"
+upload_immutable "$source_path" "$destination" text/plain "$digest"
 
 echo "promote-gcs: promoted ${VERSION} to gs://${DESTINATION_BUCKET}/${PREFIX}/releases/${VERSION}/" >&2
