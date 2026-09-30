@@ -509,6 +509,24 @@ gh attestation verify ./qodo-support-bundle-linux-amd64 \
   --repo qodo-ai/qodo-support-bundle
 ```
 
+Released bytes are also published to the existing Qodo CLI dev-canary bucket
+under an isolated prefix:
+
+```text
+gs://qodo-cli-public-dev/support-bundle/releases/<version>/
+```
+
+After canary validation, the manually approved promotion workflow copies the
+same verified bytes, without rebuilding, to:
+
+```text
+gs://qodo-cli-public/support-bundle/releases/<version>/
+https://get.qodo.ai/support-bundle/releases/<version>/
+```
+
+The Qodo CLI continues to own the bucket root. Support Bundle workflows read
+and write only the `support-bundle/` prefix.
+
 ## Customer delivery
 
 For a customer workstation that can reach GitHub, provide the matching binary,
