@@ -30,7 +30,7 @@ existing="${work}/existing"
 trap 'rm -rf "$work"' EXIT
 
 printf '%s\n' "$expected_files" | while IFS= read -r filename; do
-  gsutil cp \
+  gcloud storage cp \
     "gs://${SOURCE_BUCKET}/${PREFIX}/releases/${VERSION}/${filename}" \
     "${work}/${filename}"
 done
@@ -51,15 +51,15 @@ upload_immutable() {
   content_type=$3
   expected_sha=$4
 
-  if gsutil \
-    -h "Content-Type:${content_type}" \
-    -h "Cache-Control:public, max-age=31536000, immutable" \
-    -h "x-goog-if-generation-match:0" \
-    cp "$source_path" "$destination"; then
+  if gcloud storage cp \
+    --content-type="$content_type" \
+    --cache-control="public, max-age=31536000, immutable" \
+    --if-generation-match=0 \
+    "$source_path" "$destination"; then
     return
   fi
 
-  gsutil cp "$destination" "$existing" || {
+  gcloud storage cp "$destination" "$existing" || {
     echo "promote-gcs: immutable upload failed and existing object is unreadable: $destination" >&2
     return 1
   }

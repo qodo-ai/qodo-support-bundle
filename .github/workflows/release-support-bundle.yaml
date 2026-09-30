@@ -118,13 +118,14 @@ jobs:
           object="gs://${QODO_SUPPORT_BUNDLE_BUCKET}/${QODO_SUPPORT_BUNDLE_PREFIX}/ci-probes/${GITHUB_RUN_ID}"
           printf '%s\n' "$GITHUB_SHA" > "$probe"
           cleanup() {
-            gsutil -q rm "$object" >/dev/null 2>&1 || true
+            gcloud storage rm "$object" >/dev/null 2>&1 || true
             rm -f "$probe"
           }
           trap cleanup EXIT
-          gsutil -h "x-goog-if-generation-match:0" cp "$probe" "$object"
-          test "$(gsutil cat "$object")" = "$GITHUB_SHA"
-          gsutil rm "$object"
+          gcloud auth print-access-token >/dev/null
+          gcloud storage cp --if-generation-match=0 "$probe" "$object"
+          test "$(gcloud storage cat "$object")" = "$GITHUB_SHA"
+          gcloud storage rm "$object"
 
   release:
     if: ${{ github.event_name != 'pull_request' && inputs.verify_gcs_access_only != true }}

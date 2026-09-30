@@ -28,8 +28,9 @@ func TestGCSScriptsUseVersionedImmutableSupportBundlePrefix(t *testing.T) {
 				"QODO_SUPPORT_BUNDLE_PREFIX",
 				"support-bundle",
 				"releases/${VERSION}",
-				"x-goog-if-generation-match:0",
+				"--if-generation-match=0",
 				"max-age=31536000, immutable",
+				"gcloud storage",
 				"sha256sum",
 			} {
 				if !strings.Contains(text, required) {
