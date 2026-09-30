@@ -28,8 +28,10 @@ type listEnvelope struct {
 }
 
 type serviceItem struct {
-	Metadata discoveryMetadata `json:"metadata"`
-	Spec     struct {
+	APIVersion string            `json:"apiVersion"`
+	Kind       string            `json:"kind"`
+	Metadata   discoveryMetadata `json:"metadata"`
+	Spec       struct {
 		Ports []struct {
 			Port int `json:"port"`
 		} `json:"ports"`
@@ -37,8 +39,10 @@ type serviceItem struct {
 }
 
 type endpointSliceItem struct {
-	Metadata  discoveryMetadata `json:"metadata"`
-	Endpoints []struct {
+	APIVersion string            `json:"apiVersion"`
+	Kind       string            `json:"kind"`
+	Metadata   discoveryMetadata `json:"metadata"`
+	Endpoints  []struct {
 		Addresses  addressPresence `json:"addresses"`
 		Conditions struct {
 			Ready *bool `json:"ready"`
@@ -237,7 +241,9 @@ func decodeServices(data []byte, namespace string) ([]serviceItem, error) {
 	}
 	seen := make(map[string]struct{}, len(services))
 	for _, service := range services {
-		if !validDNSLabel(service.Metadata.Name) ||
+		if (service.APIVersion != "" && service.APIVersion != "v1") ||
+			(service.Kind != "" && service.Kind != "Service") ||
+			!validDNSLabel(service.Metadata.Name) ||
 			service.Metadata.Namespace != namespace {
 			return nil, ErrInvalidResponse
 		}
@@ -266,7 +272,9 @@ func decodeEndpointSlices(data []byte, namespace string) ([]endpointSliceItem, e
 	}
 	seen := make(map[string]struct{}, len(slices))
 	for _, slice := range slices {
-		if !validDNSSubdomain(slice.Metadata.Name) ||
+		if (slice.APIVersion != "" && slice.APIVersion != "discovery.k8s.io/v1") ||
+			(slice.Kind != "" && slice.Kind != "EndpointSlice") ||
+			!validDNSSubdomain(slice.Metadata.Name) ||
 			slice.Metadata.Namespace != namespace {
 			return nil, ErrInvalidResponse
 		}

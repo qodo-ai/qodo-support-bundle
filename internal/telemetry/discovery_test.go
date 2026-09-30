@@ -137,6 +137,45 @@ func TestDiscoverAcceptsKubectlGenericListEnvelopes(t *testing.T) {
 	if target != (Target{Service: "phoenix", Port: 6006}) {
 		t.Fatalf("target = %+v", target)
 	}
+
+	t.Run("rejects explicit mismatched service type", func(t *testing.T) {
+		wrongService := strings.Replace(
+			serviceJSON("phoenix", "observability", "app", "phoenix", 6006),
+			`{"metadata"`,
+			`{"apiVersion":"batch/v1","kind":"Job","metadata"`,
+			1,
+		)
+		runner := &discoveryRunner{
+			service: result(genericList(wrongService)),
+		}
+		if _, err := Discover(context.Background(), config, runner); !errors.Is(err, ErrInvalidResponse) {
+			t.Fatalf("Discover() error = %v", err)
+		}
+	})
+
+	t.Run("rejects explicit mismatched endpoint type", func(t *testing.T) {
+		wrongSlice := strings.Replace(
+			endpointSliceJSON(
+				"phoenix-abcde",
+				"observability",
+				"phoenix",
+				true,
+				`["10.0.0.8"]`,
+			),
+			`{"metadata"`,
+			`{"apiVersion":"v1","kind":"Service","metadata"`,
+			1,
+		)
+		runner := &discoveryRunner{
+			service: result(genericList(
+				serviceJSON("phoenix", "observability", "app", "phoenix", 6006),
+			)),
+			slices: result(genericList(wrongSlice)),
+		}
+		if _, err := Discover(context.Background(), config, runner); !errors.Is(err, ErrInvalidResponse) {
+			t.Fatalf("Discover() error = %v", err)
+		}
+	})
 }
 
 func TestDiscoverReturnsStableCandidateErrors(t *testing.T) {
