@@ -509,8 +509,9 @@ gh attestation verify ./qodo-support-bundle-linux-amd64 \
   --repo qodo-ai/qodo-support-bundle
 ```
 
-Released bytes are also published to the existing Qodo CLI dev-canary bucket
-under an isolated prefix:
+After a GitHub release is validated, the manually dispatched dev-publication
+workflow downloads and verifies its attestations before publishing the exact
+bytes to the existing Qodo CLI dev-canary bucket under an isolated prefix:
 
 ```text
 gs://qodo-cli-public-dev/support-bundle/releases/<version>/

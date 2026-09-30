@@ -21,10 +21,11 @@ env:
   QODO_SUPPORT_BUNDLE_DESTINATION_BUCKET: qodo-cli-public
   QODO_SUPPORT_BUNDLE_PREFIX: support-bundle
   GCP_PROJECT_NUMBER: "67590289846"
-  GCP_SERVICE_ACCOUNT: github-actions@codium-production.iam.gserviceaccount.com
+  GCP_SERVICE_ACCOUNT: qodo-support-bundle-publisher@codium-production.iam.gserviceaccount.com
 
 jobs:
   promote:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production

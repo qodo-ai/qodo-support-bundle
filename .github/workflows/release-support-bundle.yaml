@@ -8,13 +8,8 @@ on:
     inputs:
       tag:
         description: Existing release tag; dispatch this workflow from the same tag ref
-        required: false
+        required: true
         type: string
-      verify_gcs_access_only:
-        description: Verify dev-bucket OIDC access without publishing a release
-        required: false
-        type: boolean
-        default: false
 
 permissions: {}
 
@@ -88,47 +83,8 @@ jobs:
           test -f qodo-support-bundle-darwin-arm64
           test -f qodo-support-bundle-windows-amd64.exe
 
-  verify-gcs-access:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_gcs_access_only }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      QODO_SUPPORT_BUNDLE_BUCKET: qodo-cli-public-dev
-      QODO_SUPPORT_BUNDLE_PREFIX: support-bundle
-      GCP_PROJECT_NUMBER: "430654255805"
-      GCP_SERVICE_ACCOUNT: github-actions@codium-development.iam.gserviceaccount.com
-    steps:
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
-        with:
-          workload_identity_provider: projects/${{ env.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
-          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
-
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
-
-      - name: Verify scoped object write, read, and delete
-        shell: bash
-        run: |
-          set -euo pipefail
-          probe="$(mktemp)"
-          object="gs://${QODO_SUPPORT_BUNDLE_BUCKET}/${QODO_SUPPORT_BUNDLE_PREFIX}/ci-probes/${GITHUB_RUN_ID}"
-          printf '%s\n' "$GITHUB_SHA" > "$probe"
-          cleanup() {
-            gcloud storage rm "$object" >/dev/null 2>&1 || true
-            rm -f "$probe"
-          }
-          trap cleanup EXIT
-          gcloud auth print-access-token >/dev/null
-          gcloud storage cp --if-generation-match=0 "$probe" "$object"
-          test "$(gcloud storage cat "$object")" = "$GITHUB_SHA"
-          gcloud storage rm "$object"
-
   release:
-    if: ${{ github.event_name != 'pull_request' && inputs.verify_gcs_access_only != true }}
+    if: ${{ github.event_name != 'pull_request' }}
     needs: native-smoke
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -138,10 +94,6 @@ jobs:
       id-token: write
     env:
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      QODO_SUPPORT_BUNDLE_BUCKET: qodo-cli-public-dev
-      QODO_SUPPORT_BUNDLE_PREFIX: support-bundle
-      GCP_PROJECT_NUMBER: "430654255805"
-      GCP_SERVICE_ACCOUNT: github-actions@codium-development.iam.gserviceaccount.com
     steps:
       - name: Checkout release source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -220,17 +172,3 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$RELEASE_TAG" dist/* --clobber
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
-        with:
-          workload_identity_provider: projects/${{ env.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
-          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
-
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
-
-      - name: Publish release to dev canary bucket
-        env:
-          QODO_SUPPORT_BUNDLE_VERSION: ${{ steps.version.outputs.value }}
-        run: ./scripts/publish-gcs.sh

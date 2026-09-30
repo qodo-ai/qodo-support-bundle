@@ -52,9 +52,9 @@ func TestGCSScriptsUseVersionedImmutableSupportBundlePrefix(t *testing.T) {
 func TestGCSWorkflowsUseOIDCAndSeparateDevFromProduction(t *testing.T) {
 	t.Parallel()
 	root := repositoryRoot(t)
-	release := readText(t, filepath.Join(
+	publication := readText(t, filepath.Join(
 		root,
-		".github/workflows/release-support-bundle.yaml",
+		".github/workflows/publish-support-bundle.yaml",
 	))
 	promotion := readText(t, filepath.Join(
 		root,
@@ -66,11 +66,11 @@ func TestGCSWorkflowsUseOIDCAndSeparateDevFromProduction(t *testing.T) {
 		"qodo-cli-public-dev",
 		"google-github-actions/auth@",
 		"./scripts/publish-gcs.sh",
-		"verify_gcs_access_only",
-		"${QODO_SUPPORT_BUNDLE_PREFIX}/ci-probes/",
+		"qodo-support-bundle-publisher@codium-development",
+		"github.ref == 'refs/heads/main'",
 	} {
-		if !strings.Contains(release, required) {
-			t.Fatalf("release workflow does not contain %q", required)
+		if !strings.Contains(publication, required) {
+			t.Fatalf("publication workflow does not contain %q", required)
 		}
 	}
 	for _, required := range []string{
@@ -79,13 +79,15 @@ func TestGCSWorkflowsUseOIDCAndSeparateDevFromProduction(t *testing.T) {
 		"qodo-cli-public",
 		"google-github-actions/auth@",
 		"./scripts/promote-gcs.sh",
+		"qodo-support-bundle-publisher@codium-production",
+		"github.ref == 'refs/heads/main'",
 	} {
 		if !strings.Contains(promotion, required) {
 			t.Fatalf("promotion workflow does not contain %q", required)
 		}
 	}
-	if strings.Contains(release, "qodo-cli-public\n") {
-		t.Fatal("release workflow can write the production bucket directly")
+	if strings.Contains(publication, "qodo-cli-public\n") {
+		t.Fatal("publication workflow can write the production bucket directly")
 	}
 }
 
