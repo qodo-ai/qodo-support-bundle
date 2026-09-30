@@ -1,0 +1,51 @@
+name: Promote support bundle to production bucket
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact dev-canary version to promote
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: support-bundle-production-promotion
+  cancel-in-progress: false
+
+env:
+  QODO_SUPPORT_BUNDLE_SOURCE_BUCKET: qodo-cli-public-dev
+  QODO_SUPPORT_BUNDLE_DESTINATION_BUCKET: qodo-cli-public
+  QODO_SUPPORT_BUNDLE_PREFIX: support-bundle
+  GCP_PROJECT_NUMBER: "67590289846"
+  GCP_SERVICE_ACCOUNT: qodo-support-bundle-publisher@codium-production.iam.gserviceaccount.com
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Checkout promotion logic
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: projects/${{ env.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Promote byte-identical release
+        env:
+          QODO_SUPPORT_BUNDLE_VERSION: ${{ inputs.version }}
+        run: ./scripts/promote-gcs.sh
