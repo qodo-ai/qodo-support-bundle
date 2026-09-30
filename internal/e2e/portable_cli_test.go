@@ -65,7 +65,11 @@ func TestNativeCLICollectsBundleWithFakeKubectl(t *testing.T) {
 	command.Env = append(os.Environ(), fakeKubectlEnvironment+"=1")
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("collect bundle: %v\n%s", err, output)
+		issues := []byte(nil)
+		if _, statErr := os.Stat(archivePath); statErr == nil {
+			issues = readArchive(t, archivePath)["collection-issues.jsonl"]
+		}
+		t.Fatalf("collect bundle: %v\n%s\n%s", err, output, issues)
 	}
 
 	files := readArchive(t, archivePath)
@@ -76,6 +80,10 @@ func TestNativeCLICollectsBundleWithFakeKubectl(t *testing.T) {
 		"kubernetes/pods.jsonl",
 		"kubernetes/events.jsonl",
 		"kubernetes/logs/app-0/app.log",
+		"kubernetes/workloads.jsonl",
+		"kubernetes/services.jsonl",
+		"kubernetes/autoscalers.jsonl",
+		"kubernetes/storage.jsonl",
 		"kubernetes/workload-coverage.json",
 	} {
 		if _, exists := files[path]; !exists {
@@ -139,7 +147,7 @@ func readArchive(t *testing.T, path string) map[string][]byte {
 			t.Fatalf("archive contains unsafe path %q", header.Name)
 		}
 		if header.Typeflag != tar.TypeReg {
-			continue
+			t.Fatalf("archive contains non-regular entry %q", header.Name)
 		}
 		if _, duplicate := files[clean]; duplicate {
 			t.Fatalf("archive contains duplicate path %q", clean)
@@ -189,13 +197,15 @@ func verifyChecksums(t *testing.T, files map[string][]byte) {
 }
 
 func runFakeKubectl(arguments []string, stdout io.Writer, stderr io.Writer) int {
-	if argumentAfter(arguments, "--context") != "portability-context" {
+	if argumentCount(arguments, "--context") != 1 ||
+		argumentAfter(arguments, "--context") != "portability-context" ||
+		argumentCount(arguments, "--kubeconfig") != 0 {
 		_, _ = fmt.Fprintln(stderr, "unexpected fake Kubernetes context")
 		return 1
 	}
 	switch {
 	case hasArguments(arguments, "get", "pods"):
-		if argumentAfter(arguments, "--namespace") != "portability-smoke" {
+		if !hasExpectedNamespace(arguments) {
 			_, _ = fmt.Fprintln(stderr, "unexpected fake pod namespace")
 			return 1
 		}
@@ -205,14 +215,20 @@ func runFakeKubectl(arguments []string, stdout io.Writer, stderr io.Writer) int 
 			`"status":{"phase":"Running","containerStatuses":[{`+
 			`"name":"app","ready":true,"restartCount":0}]}}]}`)
 	case hasArguments(arguments, "get", "events"):
-		if argumentAfter(arguments, "--namespace") != "portability-smoke" {
+		if !hasExpectedNamespace(arguments) {
 			_, _ = fmt.Fprintln(stderr, "unexpected fake event namespace")
 			return 1
 		}
 		_, _ = io.WriteString(stdout, `{"apiVersion":"v1","kind":"EventList","items":[]}`)
 	case hasArguments(arguments, "logs"):
-		if argumentAfter(arguments, "--namespace") != "portability-smoke" {
+		if !hasExpectedNamespace(arguments) {
 			_, _ = fmt.Fprintln(stderr, "unexpected fake log namespace")
+			return 1
+		}
+		if argumentCount(arguments, "--since") != 1 ||
+			argumentAfter(arguments, "--since") != "300s" ||
+			argumentCount(arguments, "--timestamps=true") != 1 {
+			_, _ = fmt.Fprintln(stderr, "unexpected fake log bounds")
 			return 1
 		}
 		_, _ = io.WriteString(
@@ -221,6 +237,10 @@ func runFakeKubectl(arguments []string, stdout io.Writer, stderr io.Writer) int 
 		)
 	case hasArguments(arguments, "get", "--raw"):
 		path := argumentAfter(arguments, "--raw")
+		if !strings.Contains(path, "/namespaces/portability-smoke/") {
+			_, _ = fmt.Fprintln(stderr, "unexpected fake workload namespace")
+			return 1
+		}
 		response, ok := fakeWorkloadResponse(path)
 		if !ok {
 			_, _ = fmt.Fprintln(stderr, "unsupported fake Kubernetes API path")
@@ -259,28 +279,81 @@ func argumentAfter(arguments []string, name string) string {
 	return ""
 }
 
+func argumentCount(arguments []string, name string) int {
+	count := 0
+	for _, argument := range arguments {
+		if argument == name {
+			count++
+		}
+	}
+	return count
+}
+
+func hasExpectedNamespace(arguments []string) bool {
+	return argumentCount(arguments, "--namespace") == 1 &&
+		argumentAfter(arguments, "--namespace") == "portability-smoke"
+}
+
 func fakeWorkloadResponse(path string) (string, bool) {
 	resources := []struct {
 		segment    string
 		apiVersion string
 		kind       string
+		items      string
 	}{
-		{"/deployments?", "apps/v1", "DeploymentList"},
-		{"/statefulsets?", "apps/v1", "StatefulSetList"},
-		{"/daemonsets?", "apps/v1", "DaemonSetList"},
-		{"/jobs?", "batch/v1", "JobList"},
-		{"/cronjobs?", "batch/v1", "CronJobList"},
-		{"/services?", "v1", "ServiceList"},
-		{"/endpointslices?", "discovery.k8s.io/v1", "EndpointSliceList"},
-		{"/horizontalpodautoscalers?", "autoscaling/v2", "HorizontalPodAutoscalerList"},
-		{"/persistentvolumeclaims?", "v1", "PersistentVolumeClaimList"},
+		{
+			"/deployments?",
+			"apps/v1",
+			"DeploymentList",
+			`[{"apiVersion":"apps/v1","kind":"Deployment",` +
+				`"metadata":{"name":"app","namespace":"portability-smoke"},` +
+				`"spec":{"replicas":1,"template":{"spec":{"containers":[` +
+				`{"name":"app","image":"example/app:1"}]}}},` +
+				`"status":{"replicas":1,"readyReplicas":1,"availableReplicas":1}}]`,
+		},
+		{"/statefulsets?", "apps/v1", "StatefulSetList", "[]"},
+		{"/daemonsets?", "apps/v1", "DaemonSetList", "[]"},
+		{"/jobs?", "batch/v1", "JobList", "[]"},
+		{"/cronjobs?", "batch/v1", "CronJobList", "[]"},
+		{
+			"/services?",
+			"v1",
+			"ServiceList",
+			`[{"apiVersion":"v1","kind":"Service",` +
+				`"metadata":{"name":"app","namespace":"portability-smoke"},` +
+				`"spec":{"type":"ClusterIP","ports":[{"name":"http",` +
+				`"protocol":"TCP","port":80,"targetPort":8080}]}}]`,
+		},
+		{"/endpointslices?", "discovery.k8s.io/v1", "EndpointSliceList", "[]"},
+		{
+			"/horizontalpodautoscalers?",
+			"autoscaling/v2",
+			"HorizontalPodAutoscalerList",
+			`[{"apiVersion":"autoscaling/v2","kind":"HorizontalPodAutoscaler",` +
+				`"metadata":{"name":"app","namespace":"portability-smoke"},` +
+				`"spec":{"scaleTargetRef":{"apiVersion":"apps/v1",` +
+				`"kind":"Deployment","name":"app"},"minReplicas":1,"maxReplicas":2},` +
+				`"status":{"currentReplicas":1,"desiredReplicas":1}}]`,
+		},
+		{
+			"/persistentvolumeclaims?",
+			"v1",
+			"PersistentVolumeClaimList",
+			`[{"apiVersion":"v1","kind":"PersistentVolumeClaim",` +
+				`"metadata":{"name":"data","namespace":"portability-smoke"},` +
+				`"spec":{"accessModes":["ReadWriteOnce"],` +
+				`"resources":{"requests":{"storage":"1Gi"}},` +
+				`"storageClassName":"standard","volumeMode":"Filesystem"},` +
+				`"status":{"phase":"Bound"}}]`,
+		},
 	}
 	for _, resource := range resources {
 		if strings.Contains(path, resource.segment) {
 			return fmt.Sprintf(
-				`{"apiVersion":%q,"kind":%q,"items":[]}`,
+				`{"apiVersion":%q,"kind":%q,"items":%s}`,
 				resource.apiVersion,
 				resource.kind,
+				resource.items,
 			), true
 		}
 	}
