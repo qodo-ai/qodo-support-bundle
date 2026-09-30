@@ -548,7 +548,13 @@ make release VERSION=1.0.0
 the network tests never silently skip. The release workflow creates the same
 environment in both validation and release jobs before testing.
 
-The release workflow tests the module, cross-compiles all five platforms,
+Pull requests and releases run an end-to-end CLI smoke test on GitHub-hosted
+Linux, macOS, and Windows runners. The test builds the native binary, executes
+it against a controlled fake `kubectl`, and validates the resulting archive,
+checksums, and redaction without using cluster credentials.
+
+The release workflow also tests the module, cross-compiles all five platforms,
 generates `dist/checksums.sha256`, attests all assets, stores the workflow
-artifact, and uploads assets to an existing matching GitHub release. Manual
-dispatch must run from the same release tag ref and provide that tag.
+artifact, and uploads assets to an existing matching GitHub release. Release
+publishing waits for every native smoke job. Manual dispatch must run from the
+same release tag ref and provide that tag.
