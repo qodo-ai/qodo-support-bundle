@@ -294,8 +294,9 @@ func decodeList(data []byte, apiVersion string, kind string, destination any) er
 	if err := requireJSONEOF(decoder); err != nil {
 		return err
 	}
-	if envelope.APIVersion != apiVersion ||
-		envelope.Kind != kind ||
+	typedList := envelope.APIVersion == apiVersion && envelope.Kind == kind
+	genericKubectlList := envelope.APIVersion == "v1" && envelope.Kind == "List"
+	if (!typedList && !genericKubectlList) ||
 		len(envelope.Items) == 0 ||
 		bytes.Equal(bytes.TrimSpace(envelope.Items), []byte("null")) {
 		return errors.New("unexpected list shape")

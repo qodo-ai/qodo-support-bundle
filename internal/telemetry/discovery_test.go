@@ -110,6 +110,35 @@ func TestDiscoverValidServiceUsesNamespaceScopedBoundedQueries(t *testing.T) {
 	}
 }
 
+func TestDiscoverAcceptsKubectlGenericListEnvelopes(t *testing.T) {
+	t.Parallel()
+	runner := &discoveryRunner{
+		service: result(genericList(
+			serviceJSON("phoenix", "observability", "app", "phoenix", 6006),
+		)),
+		slices: result(genericList(
+			endpointSliceJSON(
+				"phoenix-abcde",
+				"observability",
+				"phoenix",
+				true,
+				`["10.0.0.8"]`,
+			),
+		)),
+	}
+	config := validDiscoveryConfig()
+	config.LabelMatchers = map[string]string{"app": "phoenix"}
+	config.ExpectedPort = 6006
+
+	target, err := Discover(context.Background(), config, runner)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	if target != (Target{Service: "phoenix", Port: 6006}) {
+		t.Fatalf("target = %+v", target)
+	}
+}
+
 func TestDiscoverReturnsStableCandidateErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -493,6 +522,11 @@ func serviceJSON(
 func endpointSliceList(items ...string) string {
 	return `{"apiVersion":"discovery.k8s.io/v1",` +
 		`"kind":"EndpointSliceList","items":[` +
+		strings.Join(items, ",") + `]}`
+}
+
+func genericList(items ...string) string {
+	return `{"apiVersion":"v1","kind":"List","items":[` +
 		strings.Join(items, ",") + `]}`
 }
 

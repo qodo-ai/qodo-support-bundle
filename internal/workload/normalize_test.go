@@ -715,6 +715,19 @@ func TestNormalizeListJSONPreservesPointerPresence(t *testing.T) {
 	}
 }
 
+func TestValidateItemKindAcceptsOmittedKubernetesTypeMeta(t *testing.T) {
+	t.Parallel()
+	if err := validateItemKind("", DeploymentKind, 0); err != nil {
+		t.Fatalf("validateItemKind() rejected omitted TypeMeta: %v", err)
+	}
+	if err := validateItemKind("Deployment", DeploymentKind, 0); err != nil {
+		t.Fatalf("validateItemKind() rejected matching TypeMeta: %v", err)
+	}
+	if err := validateItemKind("Job", DeploymentKind, 0); err == nil {
+		t.Fatal("validateItemKind() accepted mismatched TypeMeta")
+	}
+}
+
 func TestNormalizeListJSONRejectsMalformedAndAmbiguousInput(t *testing.T) {
 	t.Parallel()
 	validPrefix := `{"kind":"DeploymentList","items":[{"kind":"Deployment","metadata":{"name":"api","namespace":"platform"},`
