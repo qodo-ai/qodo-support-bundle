@@ -55,6 +55,7 @@ func TestNativeCLICollectsBundleWithFakeKubectl(t *testing.T) {
 		binary,
 		"collect",
 		"--namespace", "portability-smoke",
+		"--context", "portability-context",
 		"--kubectl", helper,
 		"--since", "5m",
 		"--log-workers", "1",
@@ -158,10 +159,19 @@ func verifyChecksums(t *testing.T, files map[string][]byte) {
 	if len(lines) == 0 {
 		t.Fatal("checksum manifest is empty")
 	}
+	unchecked := make(map[string]struct{}, len(files)-1)
+	for path := range files {
+		if path != "checksums.sha256" {
+			unchecked[path] = struct{}{}
+		}
+	}
 	for _, line := range lines {
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
 			t.Fatalf("invalid checksum line %q", line)
+		}
+		if _, expected := unchecked[fields[1]]; !expected {
+			t.Fatalf("checksum references unexpected or duplicate file %q", fields[1])
 		}
 		data, exists := files[fields[1]]
 		if !exists {
@@ -171,20 +181,40 @@ func verifyChecksums(t *testing.T, files map[string][]byte) {
 		if hex.EncodeToString(digest[:]) != fields[0] {
 			t.Fatalf("checksum mismatch for %q", fields[1])
 		}
+		delete(unchecked, fields[1])
+	}
+	if len(unchecked) != 0 {
+		t.Fatalf("checksum manifest omits files: %v", unchecked)
 	}
 }
 
 func runFakeKubectl(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	if argumentAfter(arguments, "--context") != "portability-context" {
+		_, _ = fmt.Fprintln(stderr, "unexpected fake Kubernetes context")
+		return 1
+	}
 	switch {
 	case hasArguments(arguments, "get", "pods"):
+		if argumentAfter(arguments, "--namespace") != "portability-smoke" {
+			_, _ = fmt.Fprintln(stderr, "unexpected fake pod namespace")
+			return 1
+		}
 		_, _ = io.WriteString(stdout, `{"apiVersion":"v1","kind":"PodList","items":[{`+
 			`"metadata":{"name":"app-0","namespace":"portability-smoke"},`+
 			`"spec":{"containers":[{"name":"app","image":"example/app:1"}]},`+
 			`"status":{"phase":"Running","containerStatuses":[{`+
 			`"name":"app","ready":true,"restartCount":0}]}}]}`)
 	case hasArguments(arguments, "get", "events"):
+		if argumentAfter(arguments, "--namespace") != "portability-smoke" {
+			_, _ = fmt.Fprintln(stderr, "unexpected fake event namespace")
+			return 1
+		}
 		_, _ = io.WriteString(stdout, `{"apiVersion":"v1","kind":"EventList","items":[]}`)
-	case len(arguments) > 0 && arguments[0] == "logs":
+	case hasArguments(arguments, "logs"):
+		if argumentAfter(arguments, "--namespace") != "portability-smoke" {
+			_, _ = fmt.Fprintln(stderr, "unexpected fake log namespace")
+			return 1
+		}
 		_, _ = io.WriteString(
 			stdout,
 			"2026-09-30T08:00:00Z customer@example.com token=raw-secret-token\n",
