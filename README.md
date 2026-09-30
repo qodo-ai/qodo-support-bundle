@@ -3,8 +3,8 @@
 `qodo-support-bundle` is a portable, read-only CLI for collecting bounded and
 redacted Kubernetes diagnostics. It collects pod metadata, events, current and
 previous container logs, normalized namespace-scoped workload context, optional
-namespace-scoped Prometheus telemetry, and an optional Platform-to-Zitadel
-connectivity report.
+namespace-scoped Prometheus telemetry, optional bounded Arize Phoenix traces,
+and an optional Platform-to-Zitadel connectivity report.
 
 ## Prerequisites and scope
 
@@ -14,8 +14,8 @@ connectivity report.
   in each collected namespace.
 - Cluster-scoped `list` access to namespaces only when automatic discovery or
   `--all-namespaces` is used.
-- `create` on `pods/portforward` in the Prometheus service namespace only when
-  `--collect-prometheus` is requested.
+- `create` on `pods/portforward` in each selected Prometheus or Phoenix service
+  namespace only when that telemetry source is requested.
 - `pods/exec` permission only when `--check-zitadel` is requested.
 
 The collector never requests Secrets or ConfigMaps. Workload artifacts omit raw
@@ -51,9 +51,9 @@ rules:
 For the optional probe, add `create` on `pods/exec` only in the selected
 Platform namespace and remove temporary bindings after collection.
 
-For optional Prometheus collection, bind the baseline Service and EndpointSlice
-read permissions in the Prometheus service namespace and add this rule there.
-Remove temporary bindings after collection:
+For optional Prometheus or Phoenix collection, bind the baseline Service and
+EndpointSlice read permissions in each telemetry service namespace and add this
+rule there. Remove temporary bindings after collection:
 
 ```yaml
 - apiGroups: [""]
@@ -161,6 +161,55 @@ coverage with no data. Discovery, forwarding, or query failures produce a
 usable partial bundle with sanitized coverage; cancellation and artifact
 staging failures publish no bundle.
 
+## Optional Phoenix trace telemetry
+
+Phoenix collection is opt-in. General mode collects a bounded time window ending
+at the collection timestamp:
+
+```bash
+qodo-support-bundle collect \
+  --namespace qodo-onprem \
+  --collect-phoenix \
+  --phoenix-namespace qodo-onprem \
+  --since 30m
+```
+
+Exact mode adds one trace ID. The value must be exactly 32 hexadecimal
+characters and is normalized to lowercase:
+
+```bash
+qodo-support-bundle collect \
+  --namespace qodo-onprem \
+  --collect-phoenix \
+  --phoenix-namespace qodo-onprem \
+  --trace-id 0123456789ABCDEF0123456789ABCDEF
+```
+
+`--trace-id` and `--phoenix-namespace` are rejected unless
+`--collect-phoenix` is enabled. With exactly one explicit collection namespace,
+the Phoenix namespace may be omitted and is inferred. It is required for
+multi-namespace, automatic, or all-namespace collection. Phoenix collection
+uses `--since`, with a maximum window of 24 hours.
+
+The collector discovers a Phoenix service with fixed application labels and
+port `6006`. It never accepts an arbitrary URL, host, port, or query. It starts
+`kubectl port-forward --address=127.0.0.1`, talks only to the resulting
+loopback HTTP endpoint, and supervises and reaps the child process. Prometheus
+and Phoenix run sequentially. They share one forwarder configuration when
+their service namespace is the same; separate namespace-bound forwarders are
+used when the namespaces differ.
+
+Phoenix requests use fixed deadlines, pagination bounds, project/trace/span
+limits, response limits, and per-trace and total retained-byte budgets. Output
+contains normalized trace and span fields plus a non-reversible project
+surrogate; raw project identifiers, responses, attributes, names, events,
+status messages, and credentials are not retained. A successful no-data
+response is complete coverage and may omit `phoenix/traces.jsonl`. Discovery,
+forwarding, HTTP, schema, pagination, or retention-limit failures produce a
+usable partial bundle with stable reason codes in `phoenix/coverage.json` and
+`collection-issues.jsonl`. Cancellation and artifact staging failures publish
+no bundle.
+
 ## Optional Zitadel connectivity probe
 
 The probe runs only when explicitly requested:
@@ -243,6 +292,8 @@ kubernetes/storage.jsonl                   # present when records are retained
 kubernetes/workload-coverage.json
 prometheus/metrics.jsonl                  # optional; present when records exist
 prometheus/coverage.json                  # present when Prometheus is requested
+phoenix/traces.jsonl                      # optional; present when traces exist
+phoenix/coverage.json                     # present when Phoenix is requested
 connectivity/zitadel.json                 # optional
 collection-issues.jsonl                   # partial collection only
 ```
@@ -254,6 +305,8 @@ Categories with no retained records have no JSONL file. The schema-version 4
 manifest identifies the normalized workload-context format and records
 collector version, timestamp, redaction rules, scope, limits, Kubernetes
 statistics, connectivity metadata, and each artifact's size and SHA-256.
+It also records bounded Prometheus and Phoenix configuration and aggregate
+coverage metadata when those sources are requested.
 `checksums.sha256` includes every artifact and the manifest.
 
 After safe extraction, verify embedded integrity:
@@ -365,6 +418,83 @@ tar -xzf "$ARCHIVE" -C "$TEST_DIR/extracted"
 Inspect `prometheus/coverage.json` even when `metrics.jsonl` is absent. Verify
 that retained labels contain only the selected workload namespace and that no
 `kubectl port-forward` child remains after the command exits.
+
+### Manual Phoenix smoke test
+
+Choose the namespace containing the Phoenix service. This procedure accepts
+either a complete run (exit `0`) or a usable partial run (exit `3`); it does not
+claim live acceptance until an operator runs it against the target cluster.
+Leave `TRACE_ID` empty for general-window mode, or set an exact 32-character
+hexadecimal ID:
+
+```bash
+(
+  set -e
+  NAMESPACE=qodo-onprem
+  PHOENIX_NAMESPACE=qodo-onprem
+  TRACE_ID=
+
+  make build VERSION=manual
+  TEST_DIR="$(mktemp -d)"
+  ARCHIVE="$TEST_DIR/bundle.tar.gz"
+  EXTRACTED="$TEST_DIR/extracted"
+  mkdir "$EXTRACTED"
+
+  set -- \
+    ./dist/qodo-support-bundle collect \
+    --namespace "$NAMESPACE" \
+    --collect-phoenix \
+    --phoenix-namespace "$PHOENIX_NAMESPACE" \
+    --since 30m \
+    --output "$ARCHIVE"
+  if [ -n "$TRACE_ID" ]; then
+    set -- "$@" --trace-id "$TRACE_ID"
+  fi
+
+  if "$@"; then
+    STATUS=0
+  else
+    STATUS=$?
+  fi
+  [ "$STATUS" -eq 0 ] || [ "$STATUS" -eq 3 ]
+
+  tar -xzf "$ARCHIVE" -C "$EXTRACTED"
+  cd "$EXTRACTED"
+  shasum -a 256 -c checksums.sha256
+  jq -e '.schema_version == "4"' manifest.json
+  jq -e '
+    .contract_version == "arize-phoenix-rest-v1-15.5.1" and
+    (.mode == "window" or .mode == "trace_id") and
+    (.state == "complete" or .state == "partial" or .state == "failed") and
+    (.coverage.state == "collected" or
+     .coverage.state == "no_data" or
+     .coverage.state == "partial" or
+     .coverage.state == "failed")
+  ' phoenix/coverage.json
+
+  if [ -f phoenix/traces.jsonl ]; then
+    jq -e -s '
+      length > 0 and
+      all(.[];
+        .schema_version == "1" and
+        (.trace_id | test("^[0-9a-f]{32}$")) and
+        (.spans | type == "array"))
+    ' phoenix/traces.jsonl
+  fi
+  if [ -f collection-issues.jsonl ]; then
+    jq -e -s 'all(.[]; type == "object")' collection-issues.jsonl
+  fi
+
+  if pgrep -f '[k]ubectl.*port-forward.*:6006' >/dev/null; then
+    echo "Phoenix kubectl port-forward process remains" >&2
+    exit 1
+  fi
+)
+```
+
+Inspect `phoenix/coverage.json` even when `phoenix/traces.jsonl` is absent.
+Exit `3` is expected for bounded partial behavior; review the stable reason and
+`collection-issues.jsonl` before sharing the bundle.
 
 Checksums detect corruption but do not authenticate provenance. Treat bundles
 as sensitive, review them before sharing, and use an approved authenticated

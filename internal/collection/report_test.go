@@ -179,6 +179,7 @@ func TestBuildCollectionManifestExactShape(t *testing.T) {
 				"connectivity":              connectivity,
 				"coverage":                  InitializeCoverage(nil),
 				"prometheus":                map[string]any{"enabled": false},
+				"phoenix":                   map[string]any{"enabled": false},
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("BuildCollectionManifest() = %#v, want %#v", got, want)
