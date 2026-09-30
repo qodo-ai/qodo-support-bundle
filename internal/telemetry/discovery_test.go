@@ -110,6 +110,100 @@ func TestDiscoverValidServiceUsesNamespaceScopedBoundedQueries(t *testing.T) {
 	}
 }
 
+func TestDiscoverAcceptsKubectlGenericListEnvelopes(t *testing.T) {
+	t.Parallel()
+	runner := &discoveryRunner{
+		service: result(genericList(
+			serviceJSON("phoenix", "observability", "app", "phoenix", 6006),
+		)),
+		slices: result(genericList(
+			endpointSliceJSON(
+				"phoenix-abcde",
+				"observability",
+				"phoenix",
+				true,
+				`["10.0.0.8"]`,
+			),
+		)),
+	}
+	config := validDiscoveryConfig()
+	config.LabelMatchers = map[string]string{"app": "phoenix"}
+	config.ExpectedPort = 6006
+
+	target, err := Discover(context.Background(), config, runner)
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	if target != (Target{Service: "phoenix", Port: 6006}) {
+		t.Fatalf("target = %+v", target)
+	}
+
+	t.Run("rejects explicit mismatched service type", func(t *testing.T) {
+		wrongService := strings.Replace(
+			serviceJSON("phoenix", "observability", "app", "phoenix", 6006),
+			`{"metadata"`,
+			`{"apiVersion":"batch/v1","kind":"Job","metadata"`,
+			1,
+		)
+		runner := &discoveryRunner{
+			service: result(genericList(wrongService)),
+		}
+		if _, err := Discover(context.Background(), config, runner); !errors.Is(err, ErrInvalidResponse) {
+			t.Fatalf("Discover() error = %v", err)
+		}
+	})
+
+	t.Run("rejects explicit mismatched endpoint type", func(t *testing.T) {
+		wrongSlice := strings.Replace(
+			endpointSliceJSON(
+				"phoenix-abcde",
+				"observability",
+				"phoenix",
+				true,
+				`["10.0.0.8"]`,
+			),
+			`{"metadata"`,
+			`{"apiVersion":"v1","kind":"Service","metadata"`,
+			1,
+		)
+		runner := &discoveryRunner{
+			service: result(genericList(
+				serviceJSON("phoenix", "observability", "app", "phoenix", 6006),
+			)),
+			slices: result(genericList(wrongSlice)),
+		}
+		if _, err := Discover(context.Background(), config, runner); !errors.Is(err, ErrInvalidResponse) {
+			t.Fatalf("Discover() error = %v", err)
+		}
+	})
+}
+
+func TestDecodeListRejectsGenericItemTypeBeforeTypedDecode(t *testing.T) {
+	t.Parallel()
+	wrongService := strings.Replace(
+		serviceJSON("phoenix", "observability", "app", "phoenix", 6006),
+		`{"metadata"`,
+		`{"apiVersion":"batch/v1","kind":"Job","metadata"`,
+		1,
+	)
+	var services []serviceItem
+
+	err := decodeList(
+		[]byte(genericList(wrongService)),
+		"v1",
+		"ServiceList",
+		"Service",
+		&services,
+	)
+
+	if err == nil {
+		t.Fatal("decodeList() error = nil")
+	}
+	if services != nil {
+		t.Fatalf("generic item was decoded as a service: %+v", services)
+	}
+}
+
 func TestDiscoverReturnsStableCandidateErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -493,6 +587,11 @@ func serviceJSON(
 func endpointSliceList(items ...string) string {
 	return `{"apiVersion":"discovery.k8s.io/v1",` +
 		`"kind":"EndpointSliceList","items":[` +
+		strings.Join(items, ",") + `]}`
+}
+
+func genericList(items ...string) string {
+	return `{"apiVersion":"v1","kind":"List","items":[` +
 		strings.Join(items, ",") + `]}`
 }
 

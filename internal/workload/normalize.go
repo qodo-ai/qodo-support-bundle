@@ -480,7 +480,9 @@ func validateListKind(actual string, kind Kind) error {
 }
 
 func validateItemKind(actual string, expected Kind, index int) error {
-	if actual != string(expected) {
+	// Kubernetes list responses may omit TypeMeta from each item because the
+	// enclosing resource endpoint and list kind already establish its type.
+	if actual != "" && actual != string(expected) {
 		return fmt.Errorf(
 			"decode %s list: item %d kind %q, want %q",
 			expected,

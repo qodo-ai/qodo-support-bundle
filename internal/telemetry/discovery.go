@@ -27,9 +27,16 @@ type listEnvelope struct {
 	Items      json.RawMessage `json:"items"`
 }
 
+type typeMeta struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+}
+
 type serviceItem struct {
-	Metadata discoveryMetadata `json:"metadata"`
-	Spec     struct {
+	APIVersion string            `json:"apiVersion"`
+	Kind       string            `json:"kind"`
+	Metadata   discoveryMetadata `json:"metadata"`
+	Spec       struct {
 		Ports []struct {
 			Port int `json:"port"`
 		} `json:"ports"`
@@ -37,8 +44,10 @@ type serviceItem struct {
 }
 
 type endpointSliceItem struct {
-	Metadata  discoveryMetadata `json:"metadata"`
-	Endpoints []struct {
+	APIVersion string            `json:"apiVersion"`
+	Kind       string            `json:"kind"`
+	Metadata   discoveryMetadata `json:"metadata"`
+	Endpoints  []struct {
 		Addresses  addressPresence `json:"addresses"`
 		Conditions struct {
 			Ready *bool `json:"ready"`
@@ -232,12 +241,14 @@ func runDiscoveryQuery(
 
 func decodeServices(data []byte, namespace string) ([]serviceItem, error) {
 	var services []serviceItem
-	if err := decodeList(data, "v1", "ServiceList", &services); err != nil {
+	if err := decodeList(data, "v1", "ServiceList", "Service", &services); err != nil {
 		return nil, ErrInvalidResponse
 	}
 	seen := make(map[string]struct{}, len(services))
 	for _, service := range services {
-		if !validDNSLabel(service.Metadata.Name) ||
+		if (service.APIVersion != "" && service.APIVersion != "v1") ||
+			(service.Kind != "" && service.Kind != "Service") ||
+			!validDNSLabel(service.Metadata.Name) ||
 			service.Metadata.Namespace != namespace {
 			return nil, ErrInvalidResponse
 		}
@@ -260,13 +271,16 @@ func decodeEndpointSlices(data []byte, namespace string) ([]endpointSliceItem, e
 		data,
 		"discovery.k8s.io/v1",
 		"EndpointSliceList",
+		"EndpointSlice",
 		&slices,
 	); err != nil {
 		return nil, ErrInvalidResponse
 	}
 	seen := make(map[string]struct{}, len(slices))
 	for _, slice := range slices {
-		if !validDNSSubdomain(slice.Metadata.Name) ||
+		if (slice.APIVersion != "" && slice.APIVersion != "discovery.k8s.io/v1") ||
+			(slice.Kind != "" && slice.Kind != "EndpointSlice") ||
+			!validDNSSubdomain(slice.Metadata.Name) ||
 			slice.Metadata.Namespace != namespace {
 			return nil, ErrInvalidResponse
 		}
@@ -282,7 +296,13 @@ func decodeEndpointSlices(data []byte, namespace string) ([]endpointSliceItem, e
 	return slices, nil
 }
 
-func decodeList(data []byte, apiVersion string, kind string, destination any) error {
+func decodeList(
+	data []byte,
+	apiVersion string,
+	listKind string,
+	itemKind string,
+	destination any,
+) error {
 	if len(data) == 0 {
 		return errors.New("empty response")
 	}
@@ -294,11 +314,28 @@ func decodeList(data []byte, apiVersion string, kind string, destination any) er
 	if err := requireJSONEOF(decoder); err != nil {
 		return err
 	}
-	if envelope.APIVersion != apiVersion ||
-		envelope.Kind != kind ||
+	typedList := envelope.APIVersion == apiVersion && envelope.Kind == listKind
+	genericKubectlList := envelope.APIVersion == "v1" && envelope.Kind == "List"
+	if (!typedList && !genericKubectlList) ||
 		len(envelope.Items) == 0 ||
 		bytes.Equal(bytes.TrimSpace(envelope.Items), []byte("null")) {
 		return errors.New("unexpected list shape")
+	}
+	if genericKubectlList {
+		var items []json.RawMessage
+		if err := json.Unmarshal(envelope.Items, &items); err != nil {
+			return err
+		}
+		for _, item := range items {
+			var metadata typeMeta
+			if err := json.Unmarshal(item, &metadata); err != nil {
+				return err
+			}
+			if (metadata.APIVersion != "" && metadata.APIVersion != apiVersion) ||
+				(metadata.Kind != "" && metadata.Kind != itemKind) {
+				return errors.New("unexpected item type")
+			}
+		}
 	}
 	if err := json.Unmarshal(envelope.Items, destination); err != nil {
 		return err
