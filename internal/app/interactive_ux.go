@@ -60,9 +60,7 @@ func contextOptions(
 	}
 	friendlyCounts := make(map[string]int)
 	for _, contextName := range contexts {
-		if _, ok := parseGKEContextName(contextName); ok {
-			friendlyCounts[contextDisplayLabel(contextName, "")]++
-		}
+		friendlyCounts[contextDisplayLabel(contextName, "")]++
 	}
 	for _, contextName := range contexts {
 		label := contextDisplayLabel(contextName, currentContext)

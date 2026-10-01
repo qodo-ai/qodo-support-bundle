@@ -161,6 +161,7 @@ func TestContextOptionsDisambiguateOnlyDuplicateFriendlyLabels(t *testing.T) {
 		"gke_project_europe-west1_shared",
 		"gke_other_us-central1_unique",
 		"customer-context",
+		"shared (project)",
 	}
 	options := contextOptions(contexts, "", false)
 	if len(options) != len(contexts) {
@@ -177,9 +178,36 @@ func TestContextOptionsDisambiguateOnlyDuplicateFriendlyLabels(t *testing.T) {
 	if options[3].Key != contexts[3] {
 		t.Fatalf("unknown context changed: %q", options[3].Key)
 	}
+	if options[4].Key == contexts[4] ||
+		!strings.Contains(options[4].Key, contexts[4]) ||
+		!strings.Contains(options[0].Key, contexts[0]) ||
+		!strings.Contains(options[1].Key, contexts[1]) {
+		t.Fatalf("cross-format collision was not disambiguated: %v", options)
+	}
 	for index, option := range options {
 		if option.Value != contexts[index] {
 			t.Fatalf("option %d value=%q want=%q", index, option.Value, contexts[index])
+		}
+	}
+}
+
+func TestContextOptionsDisambiguateGKEAndRawLabelCollision(t *testing.T) {
+	t.Parallel()
+	contexts := []string{
+		"gke_project_us-central1_shared",
+		"shared (project)",
+	}
+	options := contextOptions(contexts, "", false)
+	if len(options) != len(contexts) {
+		t.Fatalf("options=%v", options)
+	}
+	if options[0].Key == options[1].Key {
+		t.Fatalf("distinct contexts have identical labels: %v", options)
+	}
+	for index, option := range options {
+		if option.Value != contexts[index] ||
+			!strings.Contains(option.Key, contexts[index]) {
+			t.Fatalf("option %d was not safely disambiguated: %v", index, options)
 		}
 	}
 }
