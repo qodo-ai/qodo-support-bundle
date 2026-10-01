@@ -234,6 +234,29 @@ func TestContextOptionsDisambiguateCurrentMarkerCollision(t *testing.T) {
 	}
 }
 
+func TestContextOptionsGuaranteeUniqueFinalLabels(t *testing.T) {
+	t.Parallel()
+	contexts := []string{
+		"gke_project_us-central1_shared",
+		"gke_project_europe-west1_shared",
+		"shared (project) — gke_project_us-central1_shared",
+	}
+	options := contextOptions(contexts, "", false)
+	if len(options) != len(contexts) {
+		t.Fatalf("options=%v", options)
+	}
+	labels := make(map[string]struct{}, len(options))
+	for index, option := range options {
+		if option.Value != contexts[index] {
+			t.Fatalf("option %d value=%q want=%q", index, option.Value, contexts[index])
+		}
+		if _, exists := labels[option.Key]; exists {
+			t.Fatalf("duplicate final label %q: %v", option.Key, options)
+		}
+		labels[option.Key] = struct{}{}
+	}
+}
+
 func TestValidateContextChoiceAllowsChooseAnotherTransition(t *testing.T) {
 	t.Parallel()
 	if err := validateContextChoice(chooseAnotherContextValue); err != nil {

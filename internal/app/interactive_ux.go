@@ -64,11 +64,20 @@ func contextOptions(
 		labels[index] = contextDisplayLabel(contextName, currentContext)
 		labelCounts[labels[index]]++
 	}
+	usedLabels := make(map[string]struct{}, len(contexts))
 	for index, contextName := range contexts {
 		label := labels[index]
 		if labelCounts[label] > 1 {
 			label += " — " + contextName
 		}
+		baseLabel := label
+		for suffix := 2; ; suffix++ {
+			if _, exists := usedLabels[label]; !exists {
+				break
+			}
+			label = fmt.Sprintf("%s [%d]", baseLabel, suffix)
+		}
+		usedLabels[label] = struct{}{}
 		options = append(
 			options,
 			huh.NewOption(
