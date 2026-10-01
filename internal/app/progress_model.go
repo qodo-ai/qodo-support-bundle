@@ -110,9 +110,7 @@ func (model progressModel) View() string {
 		lines = append(lines, "Qodo Scout summary")
 		for _, id := range model.stageOrder {
 			state := model.stages[id]
-			if state.update.Level == 1 {
-				lines = append(lines, model.formatUpdate(state.update, state.elapsed))
-			}
+			lines = append(lines, model.formatUpdate(state.update, state.elapsed))
 		}
 		lines = append(
 			lines,

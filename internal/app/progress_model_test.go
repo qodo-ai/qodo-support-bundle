@@ -83,6 +83,13 @@ func TestProgressModelSummaryPreservesMajorOutcomes(t *testing.T) {
 		},
 		At: start.Add(800 * time.Millisecond),
 	})
+	model = updateProgressModel(t, model, progressUpdateMsg{
+		Update: progressUpdate{
+			ID: "workload-scan", Label: "Namespace scan", Level: 2,
+			Status: progressCompleted, Current: 3, Total: 3, Unit: "pods",
+		},
+		At: start.Add(time.Second),
+	})
 	model = updateProgressModel(t, model, progressSummaryMsg{
 		Summary: progressSummary{ArchivePath: "/tmp/bundle.tar.gz", ArchiveSize: 2048},
 		At:      start.Add(2300 * time.Millisecond),
@@ -91,6 +98,7 @@ func TestProgressModelSummaryPreservesMajorOutcomes(t *testing.T) {
 	const want = "" +
 		"Qodo Scout summary\n" +
 		"  ! Workload context - partial (800ms)\n" +
+		"    ✓ Namespace scan - 3/3 pods\n" +
 		"Total duration: 2.3s\n" +
 		"Archive: /tmp/bundle.tar.gz (2.0 KiB)\n" +
 		"Saved locally. Share separately through an approved support channel."

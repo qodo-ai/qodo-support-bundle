@@ -525,6 +525,7 @@ func TestInteractiveSummarySanitizesOutputPath(t *testing.T) {
 	got := interactiveSummary(
 		"customer",
 		"selected",
+		false,
 		[]string{"qodo"},
 		"30m",
 		"",
@@ -533,6 +534,33 @@ func TestInteractiveSummarySanitizesOutputPath(t *testing.T) {
 	)
 	if strings.ContainsAny(got, "\x1b\n\r") {
 		t.Fatalf("summary retained terminal controls: %q", got)
+	}
+}
+
+func TestAllNamespaceScopeLabelReflectsSystemNamespaceSetting(t *testing.T) {
+	t.Parallel()
+	if got := allNamespaceScopeLabel(true); got != "All application namespaces" {
+		t.Fatalf("excluded-system label=%q", got)
+	}
+	if got := allNamespaceScopeLabel(false); got != "All namespaces (including system namespaces)" {
+		t.Fatalf("system-inclusive label=%q", got)
+	}
+}
+
+func TestInteractiveSummaryShowsSystemInclusiveScope(t *testing.T) {
+	t.Parallel()
+	got := interactiveSummary(
+		"customer",
+		"all",
+		false,
+		nil,
+		"30m",
+		"",
+		nil,
+		"",
+	)
+	if !strings.Contains(got, "scope all namespaces (including system namespaces)") {
+		t.Fatalf("summary understated namespace scope: %q", got)
 	}
 }
 

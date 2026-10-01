@@ -27,21 +27,22 @@ var (
 )
 
 type interactiveSettings struct {
-	Context             string
-	AllNamespaces       bool
-	Namespaces          []string
-	Since               time.Duration
-	Prometheus          bool
-	PrometheusNamespace string
-	Phoenix             bool
-	PhoenixNamespace    string
-	TraceID             string
-	Zitadel             bool
-	PlatformNamespace   string
-	PlatformPod         string
-	PlatformContainer   string
-	Output              string
-	Confirmed           bool
+	Context                 string
+	AllNamespaces           bool
+	ExcludeSystemNamespaces bool
+	Namespaces              []string
+	Since                   time.Duration
+	Prometheus              bool
+	PrometheusNamespace     string
+	Phoenix                 bool
+	PhoenixNamespace        string
+	TraceID                 string
+	Zitadel                 bool
+	PlatformNamespace       string
+	PlatformPod             string
+	PlatformContainer       string
+	Output                  string
+	Confirmed               bool
 }
 
 type interactiveDiscovery interface {

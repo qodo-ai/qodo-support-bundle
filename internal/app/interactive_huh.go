@@ -122,7 +122,10 @@ func (forms huhInteractiveForms) Configure(
 				Title("Namespace scope").
 				Description(wizardDescription("", false)).
 				Options(
-					huh.NewOption("All application namespaces", "all"),
+					huh.NewOption(
+						allNamespaceScopeLabel(settings.ExcludeSystemNamespaces),
+						"all",
+					),
 					huh.NewOption("Selected namespaces", "selected"),
 				).
 				Value(&scope),
@@ -284,6 +287,7 @@ func (forms huhInteractiveForms) Configure(
 					return interactiveSummary(
 						settings.Context,
 						scope,
+						settings.ExcludeSystemNamespaces,
 						settings.Namespaces,
 						durationPreset,
 						customDuration,
@@ -434,13 +438,14 @@ func requiredInteractiveValue(label string) func(string) error {
 func interactiveSummary(
 	kubeContext string,
 	scope string,
+	excludeSystemNamespaces bool,
 	namespaces []string,
 	durationPreset string,
 	customDuration string,
 	collectors []string,
 	output string,
 ) string {
-	scopeText := "all application namespaces"
+	scopeText := strings.ToLower(allNamespaceScopeLabel(excludeSystemNamespaces))
 	if scope == "selected" {
 		scopeText = strings.Join(namespaces, ", ")
 	}
@@ -464,4 +469,11 @@ func interactiveSummary(
 		strings.Join(collectors, ", "),
 		output,
 	)
+}
+
+func allNamespaceScopeLabel(excludeSystemNamespaces bool) string {
+	if excludeSystemNamespaces {
+		return "All application namespaces"
+	}
+	return "All namespaces (including system namespaces)"
 }
