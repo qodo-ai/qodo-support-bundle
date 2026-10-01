@@ -106,6 +106,8 @@ func runCollect(
 		"Maximum bytes retained across Kubernetes metadata records",
 	)
 	logWorkers := flags.Int("log-workers", defaultLogWorkers, "Concurrent log readers")
+	noProgress := flags.Bool("no-progress", false, "Suppress routine progress output")
+	mascot := flags.Bool("mascot", false, "Use the Qodo Scout anteater animation in interactive terminals")
 	activity := flags.String("activity", "", "Customer description of current activity")
 	problem := flags.String("problem", "", "Customer description of the failure")
 	checkZitadel := flags.Bool(
@@ -308,13 +310,22 @@ func runCollect(
 		}
 		_, _ = fmt.Fprintln(stderr, message)
 	}
+	progress := newCLIProgressRenderer(stderr, !*noProgress, *mascot)
+	defer progress.Close()
+	progress.Stage("prepare", "Preparing Qodo Scout collection...")
+
 	var builder *bundle.Builder
-	if usedDefaultOutput {
-		builder, err = bundle.New(*output, bundle.OmitAbsolutePaths())
-	} else {
-		builder, err = bundle.New(*output)
+	bundleOptions := []bundle.Option{
+		bundle.WithProgress(func(event bundle.Progress) {
+			writeBundleProgress(progress, event)
+		}),
 	}
+	if usedDefaultOutput {
+		bundleOptions = append(bundleOptions, bundle.OmitAbsolutePaths())
+	}
+	builder, err = bundle.New(*output, bundleOptions...)
 	if err != nil {
+		progress.Close()
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
@@ -325,12 +336,14 @@ func runCollect(
 		}
 	}()
 
+	progress.Stage("resolve_kubectl", "Resolving kubectl executable...")
 	resolvedKubectl, err := resolveKubectl(*kubectl)
 	if err != nil {
+		progress.Close()
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
-	_, _ = fmt.Fprintln(stderr, "Using kubectl: resolved executable")
+	progress.Stage("kubectl_resolved", "Using kubectl: resolved executable")
 	runner := kubernetes.ExecRunner{Binary: resolvedKubectl}
 	collectors := collection.DefaultCollectors()
 	if prometheusConfig != nil || phoenixConfig != nil {
@@ -348,6 +361,7 @@ func runCollect(
 			factory,
 		)
 		if err != nil {
+			progress.Close()
 			_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 			return 1
 		}
@@ -365,8 +379,8 @@ func runCollect(
 		MaxLogBytes:             *maxLogBytes,
 		MaxTotalLogBytes:        *maxTotalLogBytes,
 		LogWorkers:              *logWorkers,
-		Progress: func(progress kubernetes.Progress) {
-			writeCollectionProgress(stderr, redactor, progress)
+		Progress: func(event kubernetes.Progress) {
+			writeCollectionProgress(progress, redactor, event)
 		},
 	}
 	var zitadelConfig *zitadel.Config
@@ -395,7 +409,7 @@ func runCollect(
 			Phoenix:    phoenixConfig,
 			Zitadel:    zitadelConfig,
 			Progress: func(event collection.Event) {
-				writeCollectionEvent(stderr, event)
+				writeCollectionEvent(progress, event)
 			},
 		},
 		runner,
@@ -404,20 +418,32 @@ func runCollect(
 		collectors,
 	)
 	if result.CanceledBeforeBundle {
+		progress.Close()
 		_, _ = fmt.Fprintln(stderr, "Collection canceled; no bundle was published.")
 		return 1
 	}
 	if err != nil {
 		if errors.Is(err, bundle.ErrCleanup) {
+			progress.Stage(
+				"saved_locally",
+				"Qodo Scout saved the support bundle locally. Share it separately through your approved support channel.",
+			)
+			progress.Close()
 			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
 			_, _ = fmt.Fprintln(stderr, "Bundle created, but temporary data cleanup failed.")
 			return 1
 		}
+		progress.Close()
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
 	cleanupPending = false
 
+	progress.Stage(
+		"saved_locally",
+		"Qodo Scout saved the support bundle locally. Share it separately through your approved support channel.",
+	)
+	progress.Close()
 	_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
 	_, _ = fmt.Fprintf(
 		stdout,
@@ -621,11 +647,16 @@ func configureTelemetryForwarders(
 }
 
 func printUsage(writer io.Writer) {
-	_, _ = fmt.Fprintln(writer, `Usage:
+	_, _ = fmt.Fprintln(writer, `Qodo Scout
+
+Usage:
   qodo-support-bundle collect [options]
   qodo-support-bundle version
   qodo-support-bundle help
 
 Collect bounded, redacted Kubernetes metadata, events, and container logs.
-The optional --check-zitadel probe runs inside one selected Platform container.`)
+The optional --check-zitadel probe runs inside one selected Platform container.
+Use --no-progress to suppress routine progress or --mascot for the interactive
+ASCII anteater animation. The resulting archive is saved locally; this CLI
+does not upload it. Share it separately through an approved support channel.`)
 }

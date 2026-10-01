@@ -145,6 +145,190 @@ func TestExecutePublishesCompleteKubernetesCollection(t *testing.T) {
 	}
 }
 
+func TestExecuteReportsKubernetesWorkloadAndSummaryStages(t *testing.T) {
+	t.Parallel()
+	archive := &recordingArchive{}
+	var events []Event
+
+	_, err := Execute(
+		context.Background(),
+		Request{
+			CurrentTime: time.Now,
+			Kubernetes: kubernetes.Config{
+				Namespaces:       []string{"qodo", "qodo"},
+				Since:            time.Hour,
+				MaxMetadataBytes: 1024,
+			},
+			Progress: func(event Event) {
+				events = append(events, event)
+			},
+		},
+		unusedRunner{},
+		archive,
+		redact.New(),
+		Collectors{
+			Kubernetes: successfulKubernetesCollector,
+			Workload: func(
+				_ context.Context,
+				config workload.Config,
+				_ kubernetes.Runner,
+				_ kubernetes.Sink,
+				_ *redact.Redactor,
+			) (workload.Report, error) {
+				if !reflect.DeepEqual(config.Namespaces, []string{"qodo"}) {
+					t.Fatalf("workload namespaces were not normalized: %v", config.Namespaces)
+				}
+				config.Progress(workload.Progress{
+					Stage:   workload.ProgressNamespaceComplete,
+					Current: 1,
+					Total:   1,
+				})
+				return successfulWorkloadCollector(
+					context.Background(),
+					config,
+					nil,
+					nil,
+					nil,
+				)
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var kinds []EventKind
+	for _, event := range events {
+		kinds = append(kinds, event.Kind)
+	}
+	want := []EventKind{
+		EventKubernetesStarted,
+		EventKubernetesComplete,
+		EventWorkloadStarted,
+		EventWorkloadProgress,
+		EventWorkloadComplete,
+		EventArchiveSummary,
+	}
+	if !reflect.DeepEqual(kinds, want) {
+		t.Fatalf("events=%+v want=%v", events, want)
+	}
+	if events[3].Current != 1 || events[3].Total != 1 {
+		t.Fatalf("workload counts were not forwarded: %+v", events[3])
+	}
+	if events[4].Current != 1 || events[4].Total != 1 {
+		t.Fatalf("workload completion changed count units: %+v", events[4])
+	}
+}
+
+func TestExecuteReportsWorkloadFailureWithoutClaimingCompletion(t *testing.T) {
+	t.Parallel()
+	var events []Event
+	_, err := Execute(
+		context.Background(),
+		Request{
+			CurrentTime: time.Now,
+			Kubernetes: kubernetes.Config{
+				Namespaces:       []string{"qodo"},
+				Since:            time.Hour,
+				MaxMetadataBytes: 1024,
+			},
+			Progress: func(event Event) {
+				events = append(events, event)
+			},
+		},
+		unusedRunner{},
+		&recordingArchive{},
+		redact.New(),
+		Collectors{
+			Kubernetes: successfulKubernetesCollector,
+			Workload: func(
+				context.Context,
+				workload.Config,
+				kubernetes.Runner,
+				kubernetes.Sink,
+				*redact.Redactor,
+			) (workload.Report, error) {
+				return workload.Report{}, errors.New("password=private-workload-error")
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundUnavailable bool
+	for _, event := range events {
+		if event.Kind == EventWorkloadComplete {
+			t.Fatalf("failed workload reported complete: %+v", events)
+		}
+		if event.Kind == EventWorkloadUnavailable {
+			foundUnavailable = true
+			if event.Reason != "" {
+				t.Fatalf("raw workload error reached progress: %+v", event)
+			}
+		}
+	}
+	if !foundUnavailable {
+		t.Fatalf("missing workload unavailable event: %+v", events)
+	}
+}
+
+func TestExecuteReportsKubernetesPartialWithoutClaimingCompletion(t *testing.T) {
+	t.Parallel()
+	var events []Event
+	_, err := Execute(
+		context.Background(),
+		Request{
+			CurrentTime: time.Now,
+			Kubernetes: kubernetes.Config{
+				Namespaces:       []string{"qodo"},
+				Since:            time.Hour,
+				MaxMetadataBytes: 1024,
+			},
+			Progress: func(event Event) {
+				events = append(events, event)
+			},
+		},
+		unusedRunner{},
+		&recordingArchive{},
+		redact.New(),
+		Collectors{
+			Kubernetes: func(
+				context.Context,
+				kubernetes.Config,
+				kubernetes.Runner,
+				kubernetes.Sink,
+				*redact.Redactor,
+			) (kubernetes.Report, error) {
+				return kubernetes.Report{
+					Namespaces:           []string{"qodo"},
+					CollectionNamespaces: []string{"qodo"},
+					NamespacesRequested:  1,
+					Issues: []kubernetes.Issue{{
+						Operation: "collect pods",
+						Message:   "request failed",
+					}},
+				}, nil
+			},
+			Workload: successfulWorkloadCollector,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundPartial bool
+	for _, event := range events {
+		if event.Kind == EventKubernetesComplete {
+			t.Fatalf("partial Kubernetes collection reported complete: %+v", events)
+		}
+		if event.Kind == EventKubernetesPartial {
+			foundPartial = true
+		}
+	}
+	if !foundPartial {
+		t.Fatalf("missing Kubernetes partial event: %+v", events)
+	}
+}
+
 func TestExecuteTreatsCollectedZitadelFailureAsComplete(t *testing.T) {
 	t.Parallel()
 	archive := &recordingArchive{}
@@ -208,9 +392,10 @@ func TestExecuteTreatsCollectedZitadelFailureAsComplete(t *testing.T) {
 	if string(archive.files[zitadelArtifactPath]) != `{"schema_version":1}` {
 		t.Fatalf("probe artifact was not staged: %+v", archive.files)
 	}
-	if len(events) != 2 ||
-		events[0].Kind != EventZitadelStarted ||
-		events[1].Kind != EventZitadelDiagnosticFailure {
+	sourceEvents := optionalSourceEvents(events)
+	if len(sourceEvents) != 2 ||
+		sourceEvents[0].Kind != EventZitadelStarted ||
+		sourceEvents[1].Kind != EventZitadelDiagnosticFailure {
 		t.Fatalf("unexpected events: %+v", events)
 	}
 }
@@ -370,7 +555,8 @@ func TestExecuteSanitizesCollectorFailureReason(t *testing.T) {
 	}
 	issues := string(archive.files[issuesArtifactPath])
 	summary := string(archive.files[summaryArtifactPath])
-	eventReason := events[len(events)-1].Reason
+	sourceEvents := optionalSourceEvents(events)
+	eventReason := sourceEvents[len(sourceEvents)-1].Reason
 	for name, value := range map[string]string{
 		"result":  result.ConnectivityFailure,
 		"issues":  issues,
@@ -829,6 +1015,27 @@ func successfulKubernetesCollector(
 		CollectionNamespaces: []string{"qodo"},
 		NamespacesRequested:  1,
 	}, nil
+}
+
+func optionalSourceEvents(events []Event) []Event {
+	filtered := make([]Event, 0, len(events))
+	for _, event := range events {
+		switch event.Kind {
+		case EventKubernetesStarted,
+			EventKubernetesComplete,
+			EventKubernetesPartial,
+			EventWorkloadStarted,
+			EventWorkloadProgress,
+			EventWorkloadComplete,
+			EventWorkloadPartial,
+			EventWorkloadUnavailable,
+			EventArchiveSummary:
+			continue
+		default:
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
 }
 
 func successfulWorkloadCollector(

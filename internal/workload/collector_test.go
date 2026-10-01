@@ -793,6 +793,46 @@ func expectedAPIPaths(namespace string) []string {
 	}
 }
 
+func TestCollectReportsCompletedNamespaceCounts(t *testing.T) {
+	t.Parallel()
+	runner := &collectorRunner{
+		run: func(
+			_ context.Context,
+			_ int64,
+			arguments []string,
+		) (kubernetes.CommandResult, error) {
+			apiPath := arguments[len(arguments)-1]
+			namespace := namespaceFromAPIPath(t, apiPath)
+			return kubernetes.CommandResult{
+				Stdout: []byte(responseForAPIPath(t, apiPath, namespace, false)),
+			}, nil
+		},
+	}
+	config := testCollectorConfig("zeta", "alpha")
+	var progress []Progress
+	config.Progress = func(event Progress) {
+		progress = append(progress, event)
+	}
+
+	if _, err := Collect(
+		context.Background(),
+		config,
+		runner,
+		&collectorSink{},
+		redact.New(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []Progress{
+		{Stage: ProgressNamespaceComplete, Current: 1, Total: 2},
+		{Stage: ProgressNamespaceComplete, Current: 2, Total: 2},
+	}
+	if !reflect.DeepEqual(progress, want) {
+		t.Fatalf("progress=%+v want=%+v", progress, want)
+	}
+}
+
 func namespaceFromAPIPath(t *testing.T, apiPath string) string {
 	t.Helper()
 	const marker = "/namespaces/"

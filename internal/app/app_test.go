@@ -64,6 +64,31 @@ func TestRunOnlyExposesSupportedCommands(t *testing.T) {
 	}
 }
 
+func TestHelpUsesQodoScoutBrandWithoutRenamingExecutable(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	if code := Run(
+		context.Background(),
+		[]string{"help"},
+		&stdout,
+		&bytes.Buffer{},
+	); code != 0 {
+		t.Fatalf("help exit=%d", code)
+	}
+	for _, expected := range []string{
+		"Qodo Scout",
+		"qodo-support-bundle collect",
+		"saved locally",
+		"does not upload",
+		"--no-progress",
+		"--mascot",
+	} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("help missing %q:\n%s", expected, stdout.String())
+		}
+	}
+}
+
 func TestCollectRejectsPositionalAndUnsupportedInput(t *testing.T) {
 	t.Parallel()
 	for _, arguments := range [][]string{
@@ -124,6 +149,130 @@ func TestCollectOmitsUsernameFromResolvedKubectlLog(t *testing.T) {
 	}
 	if strings.Contains(logged, username) || strings.Contains(logged, kubectl) {
 		t.Fatalf("stderr leaked identifying kubectl path: %s", logged)
+	}
+}
+
+func TestCollectKeepsStdoutStableAndReportsQodoScoutStages(t *testing.T) {
+	root := t.TempDir()
+	kubectl := fakeKubectl(t, root, "")
+	output := filepath.Join(root, "bundle.tar.gz")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run(
+		context.Background(),
+		[]string{
+			"collect",
+			"--namespace", "qodo",
+			"--kubectl", kubectl,
+			"--output", output,
+		},
+		&stdout,
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	wantStdout := fmt.Sprintf(
+		"Support bundle created: %s\n"+
+			"Kubernetes scope: 1/1 namespaces, 1 pods, 1 containers (0 init, 0 ephemeral)\n",
+		output,
+	)
+	if stdout.String() != wantStdout {
+		t.Fatalf("stdout changed:\ngot  %q\nwant %q", stdout.String(), wantStdout)
+	}
+	for _, expected := range []string{
+		"Preparing Qodo Scout collection...",
+		"Checking cluster access...",
+		"Kubernetes diagnostics: complete.",
+		"Collecting workload context for 1 namespace...",
+		"Workload context: 1/1 namespaces processed.",
+		"Workload context: complete.",
+		"Preparing archive summary...",
+		"Creating archive manifest...",
+		"Writing archive checksums...",
+		"Packing archive...",
+		"Finalizing archive...",
+		"Archive finalized.",
+		"Qodo Scout saved the support bundle locally. Share it separately through your approved support channel.",
+	} {
+		if !strings.Contains(stderr.String(), expected) {
+			t.Fatalf("stderr missing %q:\n%s", expected, stderr.String())
+		}
+	}
+	if strings.Contains(stderr.String(), kubectl) {
+		t.Fatalf("stderr leaked resolved kubectl path: %s", stderr.String())
+	}
+}
+
+func TestCollectNoProgressPreservesWarningsAndStdout(t *testing.T) {
+	root := t.TempDir()
+	kubectl := fakeKubectl(t, root, "")
+	output := filepath.Join(root, "bundle.tar.gz")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run(
+		context.Background(),
+		[]string{
+			"collect",
+			"--no-progress",
+			"--kubectl", kubectl,
+			"--output", output,
+		},
+		&stdout,
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Support bundle created: "+output) {
+		t.Fatalf("missing stdout result: %q", stdout.String())
+	}
+	if !strings.Contains(
+		stderr.String(),
+		"Scope: all application namespaces; Kubernetes system namespaces are excluded.",
+	) {
+		t.Fatalf("warning/scope output was suppressed: %q", stderr.String())
+	}
+	for _, routine := range []string{
+		"Qodo Scout",
+		"Checking cluster access",
+		"Using kubectl",
+		"Discovering Kubernetes",
+		"Workload context",
+		"archive",
+	} {
+		if strings.Contains(stderr.String(), routine) {
+			t.Fatalf("--no-progress emitted %q: %s", routine, stderr.String())
+		}
+	}
+}
+
+func TestCollectMascotIsQuietWhenStderrIsNotTTY(t *testing.T) {
+	root := t.TempDir()
+	kubectl := fakeKubectl(t, root, "")
+	output := filepath.Join(root, "bundle.tar.gz")
+	var stderr bytes.Buffer
+
+	code := Run(
+		context.Background(),
+		[]string{
+			"collect",
+			"--namespace", "qodo",
+			"--mascot",
+			"--kubectl", kubectl,
+			"--output", output,
+		},
+		&bytes.Buffer{},
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	if strings.ContainsAny(stderr.String(), "\r\x1b") ||
+		strings.Contains(stderr.String(), "~(____:>") {
+		t.Fatalf("non-TTY mascot emitted animation controls: %q", stderr.String())
 	}
 }
 
@@ -904,10 +1053,22 @@ func TestTelemetryProgressDoesNotRenderEventReason(t *testing.T) {
 			collection.EventPhoenixUnavailable,
 			"Phoenix telemetry: unavailable; diagnostic recorded.\n",
 		},
+		{
+			collection.EventZitadelUnavailable,
+			"Zitadel connectivity probe: unavailable; diagnostic recorded.\n",
+		},
+		{
+			collection.EventWorkloadUnavailable,
+			"Workload context: unavailable; diagnostic recorded.\n",
+		},
 	}
 	for _, test := range tests {
 		var output bytes.Buffer
-		writeCollectionEvent(&output, collection.Event{
+		renderer := newProgressRenderer(progressRendererOptions{
+			Writer:  &output,
+			Enabled: true,
+		})
+		writeCollectionEvent(renderer, collection.Event{
 			Kind:   test.kind,
 			Reason: "password=private-progress-canary",
 		})

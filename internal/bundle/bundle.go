@@ -46,6 +46,22 @@ type ManifestFile struct {
 	SHA256 string `json:"sha256"`
 }
 
+// ProgressStage values are stable presentation hooks and never contain file paths.
+type ProgressStage string
+
+const (
+	ProgressManifest   ProgressStage = "archive_manifest"
+	ProgressChecksums  ProgressStage = "archive_checksums"
+	ProgressPacking    ProgressStage = "archive_packing"
+	ProgressFinalizing ProgressStage = "archive_finalizing"
+	ProgressComplete   ProgressStage = "archive_complete"
+)
+
+// Progress reports archive stages without exposing staged paths or contents.
+type Progress struct {
+	Stage ProgressStage
+}
+
 // Builder stages sanitized data and creates a checksummed tar.gz archive.
 type Builder struct {
 	outputPath           string
@@ -59,6 +75,7 @@ type Builder struct {
 	temporaryArchivePath string
 	retractPublishedPath string
 	hideAbsolutePaths    bool
+	progress             func(Progress)
 }
 
 // HideAbsolutePaths omits filesystem locations from retract and cleanup errors.
@@ -73,6 +90,13 @@ type Option func(*Builder)
 func OmitAbsolutePaths() Option {
 	return func(builder *Builder) {
 		builder.hideAbsolutePaths = true
+	}
+}
+
+// WithProgress reports stable archive-finalization stages.
+func WithProgress(progress func(Progress)) Option {
+	return func(builder *Builder) {
+		builder.progress = progress
 	}
 }
 
@@ -173,6 +197,7 @@ func (builder *Builder) FinalizeContext(
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	builder.reportProgress(ProgressManifest)
 	manifest.SchemaVersion = schemaVersion
 	artifacts, err := builder.manifestFiles(ctx)
 	if err != nil {
@@ -189,23 +214,33 @@ func (builder *Builder) FinalizeContext(
 		return "", err
 	}
 
+	builder.reportProgress(ProgressChecksums)
 	if err := builder.AddStream("checksums.sha256", func(writer io.Writer) error {
 		return builder.writeChecksums(ctx, writer, manifest.Artifacts)
 	}); err != nil {
 		return "", err
 	}
 
+	builder.reportProgress(ProgressPacking)
 	if err := builder.createArchive(ctx, manifest.GeneratedAt); err != nil {
 		if errors.Is(err, ErrCleanup) {
 			return builder.outputPath, err
 		}
 		return "", err
 	}
+	builder.reportProgress(ProgressFinalizing)
 	if err := builder.removeAll(builder.stagingDir); err != nil {
 		return builder.outputPath, ErrCleanup
 	}
 	builder.closed = true
+	builder.reportProgress(ProgressComplete)
 	return builder.outputPath, nil
+}
+
+func (builder *Builder) reportProgress(stage ProgressStage) {
+	if builder.progress != nil {
+		builder.progress(Progress{Stage: stage})
+	}
 }
 
 func (builder *Builder) manifestFiles(ctx context.Context) ([]ManifestFile, error) {
