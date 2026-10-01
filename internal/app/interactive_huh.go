@@ -32,57 +32,64 @@ func (forms huhInteractiveForms) ChooseContext(
 	stdin io.Reader,
 	stderr io.Writer,
 ) error {
+	primaryContext := settings.Context
+	showAll := false
 	for {
-		productionApproved := false
+		choice := primaryContext
+		title := "Cluster context"
+		options := primaryContextOptions(primaryContext, catalog.Current)
+		if showAll {
+			choice = settings.Context
+			title = "Available clusters"
+			options = contextOptions(catalog.Names, catalog.Current, false)
+		}
 		form := huh.NewForm(
 			wizardGroup(
 				1,
 				"Choose a Kubernetes cluster",
 				false,
-				huh.NewSelect[string]().
-					Title("Cluster context").
+				newContextSelect(title, options, &choice).
 					Description(wizardDescription(
-						"Friendly labels include the exact kubeconfig context.",
+						"Friendly labels keep the exact context for collection and confirmation.",
 						false,
 					)).
-					Options(contextOptions(
-						catalog.Names,
-						catalog.Current,
-						settings.Context == "",
-					)...).
-					Value(&settings.Context).
-					Validate(func(value string) error {
-						if value == "" {
-							return errors.New("choose a Kubernetes context")
-						}
-						return nil
-					}),
+					Validate(validateContextChoice),
 			),
-			wizardGroup(
-				1,
-				"Confirm production cluster",
-				false,
-				huh.NewConfirm().
-					TitleFunc(func() string {
-						return productionContextWarning(settings.Context)
-					}, &settings.Context).
-					Description(wizardDescription(
-						"Continue or go back to choose another cluster.",
-						false,
-					)).
-					Affirmative("Continue").
-					Negative("Go back").
-					Value(&productionApproved),
-			).WithHideFunc(func() bool {
-				return !isProductionContext(settings.Context)
-			}),
 		)
 		if err := forms.run(ctx, form, stdin, stderr); err != nil {
 			return err
 		}
-		if !isProductionContext(settings.Context) || productionApproved {
+		if choice == chooseAnotherContextValue {
+			showAll = true
+			continue
+		}
+		productionApproved := false
+		if isProductionContext(choice) {
+			productionForm := huh.NewForm(
+				wizardGroup(
+					1,
+					"Confirm production cluster",
+					false,
+					huh.NewConfirm().
+						Title(productionContextWarning(choice)).
+						Description(wizardDescription(
+							"Continue or go back to choose another cluster.",
+							false,
+						)).
+						Affirmative("Continue").
+						Negative("Go back").
+						Value(&productionApproved),
+				),
+			)
+			if err := forms.run(ctx, productionForm, stdin, stderr); err != nil {
+				return err
+			}
+		}
+		settings.Context = choice
+		if !isProductionContext(choice) || productionApproved {
 			return nil
 		}
+		showAll = false
 	}
 }
 

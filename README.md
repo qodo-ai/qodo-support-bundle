@@ -158,21 +158,37 @@ collection, so no archive is created. Existing flags remain the automation
 interface; when combined with `--interactive`, supported flags become initial
 answers that can be reviewed and edited.
 
-The wizard first selects a Kubernetes context, then discovers namespace names
-through that context. It asks for namespace scope, log lookback, optional
-Prometheus, Phoenix, or Zitadel diagnostics and their dependent settings, the
-output path, and final confirmation. It never requests credentials or lists
-Kubernetes Secrets. GKE contexts receive a friendly cluster/location/project
-label while retaining the exact kubeconfig name, and the kubeconfig's actual
-current context is marked `CURRENT`. Recognized production GKE cluster names
-receive a factual read-only/sensitive-diagnostics confirmation. A typical flow
-is:
+The wizard first offers the effective Kubernetes context: the explicit
+`--context` value when supplied, otherwise the kubeconfig's current context.
+Choose `Choose another cluster` to open the complete context list; press `/` in
+that list to filter it. Namespace discovery and cluster authentication happen
+only after a context is selected. The wizard then asks for namespace scope, log
+lookback, optional Prometheus, Phoenix, or Zitadel diagnostics and their
+dependent settings, the output path, and final confirmation. It never requests
+credentials or lists Kubernetes Secrets.
+
+Recognized GKE contexts use compact `<cluster> (<project>)` labels. The exact
+kubeconfig context remains the internal value and appears in final
+confirmation; duplicate friendly labels include enough exact context detail to
+remain unambiguous. Unknown context formats are displayed unchanged. Only the
+kubeconfig's actual current context is marked `CURRENT`, so an explicit
+`--context` default that differs from it is not mislabeled. Recognized
+production GKE cluster names receive a factual read-only/sensitive-diagnostics
+confirmation. A typical flow is:
 
 ```text
 Step 1 of 5 · Choose a Kubernetes cluster
 Qodo Scout · Secure diagnostics for Qodo on-prem environments
-CURRENT · development-cluster · us-central1 · codium-development
-  — gke_codium-development_us-central1_development-cluster
+CURRENT · development-cluster (codium-development)
+Choose another cluster
+Use arrows to navigate · / to filter · Enter to select or continue
+
+# Only after choosing "Choose another cluster":
+Available clusters
+CURRENT · development-cluster (codium-development)
+customer-cluster (customer-project)
+Press / and type to filter the available clusters.
+
 Checking cluster access and discovering namespaces…
 
 Step 2 of 5 · Choose namespace scope
@@ -184,7 +200,7 @@ Prometheus telemetry
 Step 4 of 5 · Choose output path
 automatic default
 Step 5 of 5 · Review and confirm
-Collect
+Collect context gke_codium-development_us-central1_development-cluster; …
 ```
 
 Set `ACCESSIBLE=1` to use Huh's plain accessible form mode. `--mascot` and
