@@ -517,8 +517,10 @@ bytes to the existing Qodo CLI dev-canary bucket under an isolated prefix:
 gs://qodo-cli-public-dev/support-bundle/releases/<version>/
 ```
 
-After canary validation, the manually approved promotion workflow copies the
-same verified bytes, without rebuilding, to:
+After canary validation, the manually approved promotion workflow independently
+downloads and verifies the attested GitHub release, rejects any dev-canary
+object that is not byte-identical to it, and then copies those bytes without
+rebuilding to:
 
 ```text
 gs://qodo-cli-public/support-bundle/releases/<version>/

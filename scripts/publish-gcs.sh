@@ -27,6 +27,10 @@ qodo-support-bundle-windows-amd64.exe'
 expected_files="checksums.sha256
 ${expected_binaries}"
 
+manifest_entries="$(mktemp)"
+existing="$(mktemp)"
+trap 'rm -f "$manifest_entries" "$existing"' EXIT
+
 actual_files="$(
   find "$DIST" -mindepth 1 -maxdepth 1 -type f -exec basename {} \; |
     LC_ALL=C sort
@@ -37,26 +41,21 @@ actual_files="$(
   exit 1
 }
 
-manifest_files="$(
-  awk '
+if ! awk '
     NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ { exit 1 }
     { print $2 }
-  ' "$DIST/checksums.sha256" |
-    LC_ALL=C sort
-)" || {
+  ' "$DIST/checksums.sha256" > "$manifest_entries"; then
   echo "publish-gcs: checksum manifest is malformed" >&2
   exit 1
-}
+fi
+manifest_files="$(LC_ALL=C sort "$manifest_entries")"
 [ "$manifest_files" = "$expected_binaries" ] || {
   echo "publish-gcs: checksum manifest inventory does not match the five binaries" >&2
   printf 'expected:\n%s\nactual:\n%s\n' "$expected_binaries" "$manifest_files" >&2
   exit 1
 }
 
-(cd "$DIST" && sha256sum --check checksums.sha256)
-
-existing="$(mktemp)"
-trap 'rm -f "$existing"' EXIT
+(cd "$DIST" && sha256sum --strict --check checksums.sha256)
 
 upload_immutable() {
   source_path=$1
