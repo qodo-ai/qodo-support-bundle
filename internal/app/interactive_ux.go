@@ -58,13 +58,15 @@ func contextOptions(
 	if includePlaceholder {
 		options = append(options, huh.NewOption("Choose a context", ""))
 	}
-	friendlyCounts := make(map[string]int)
-	for _, contextName := range contexts {
-		friendlyCounts[contextDisplayLabel(contextName, "")]++
+	labels := make([]string, len(contexts))
+	labelCounts := make(map[string]int)
+	for index, contextName := range contexts {
+		labels[index] = contextDisplayLabel(contextName, currentContext)
+		labelCounts[labels[index]]++
 	}
-	for _, contextName := range contexts {
-		label := contextDisplayLabel(contextName, currentContext)
-		if friendlyCounts[contextDisplayLabel(contextName, "")] > 1 {
+	for index, contextName := range contexts {
+		label := labels[index]
+		if labelCounts[label] > 1 {
 			label += " — " + contextName
 		}
 		options = append(

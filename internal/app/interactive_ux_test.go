@@ -212,6 +212,28 @@ func TestContextOptionsDisambiguateGKEAndRawLabelCollision(t *testing.T) {
 	}
 }
 
+func TestContextOptionsDisambiguateCurrentMarkerCollision(t *testing.T) {
+	t.Parallel()
+	const current = "gke_project_us-central1_shared"
+	contexts := []string{
+		current,
+		"CURRENT · shared (project)",
+	}
+	options := contextOptions(contexts, current, false)
+	if len(options) != len(contexts) {
+		t.Fatalf("options=%v", options)
+	}
+	if options[0].Key == options[1].Key {
+		t.Fatalf("current marker collision left identical labels: %v", options)
+	}
+	for index, option := range options {
+		if option.Value != contexts[index] ||
+			!strings.Contains(option.Key, contexts[index]) {
+			t.Fatalf("option %d was not safely disambiguated: %v", index, options)
+		}
+	}
+}
+
 func TestValidateContextChoiceAllowsChooseAnotherTransition(t *testing.T) {
 	t.Parallel()
 	if err := validateContextChoice(chooseAnotherContextValue); err != nil {
