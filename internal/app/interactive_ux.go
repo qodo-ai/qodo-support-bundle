@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,9 +10,10 @@ import (
 )
 
 const (
-	wizardPurpose         = "Qodo Scout · Secure diagnostics for Qodo on-prem environments"
-	wizardNavigationHelp  = "Use arrows to navigate · / to filter · Enter to select or continue · Ctrl+C to cancel"
-	wizardMultiSelectHelp = "Use arrows to move · Space or x to toggle multiple · Enter to continue · Ctrl+C to cancel"
+	wizardPurpose             = "Qodo Scout · Secure diagnostics for Qodo on-prem environments"
+	wizardNavigationHelp      = "Use arrows to navigate · / to filter · Enter to select or continue · Ctrl+C to cancel"
+	wizardMultiSelectHelp     = "Use arrows to move · Space or x to toggle multiple · Enter to continue · Ctrl+C to cancel"
+	chooseAnotherContextValue = "\x00choose-another-context"
 )
 
 type gkeContextName struct {
@@ -39,13 +41,7 @@ func parseGKEContextName(value string) (gkeContextName, bool) {
 func contextDisplayLabel(contextName string, currentContext string) string {
 	label := contextName
 	if parsed, ok := parseGKEContextName(contextName); ok {
-		label = fmt.Sprintf(
-			"%s · %s · %s — %s",
-			parsed.Cluster,
-			parsed.Location,
-			parsed.Project,
-			contextName,
-		)
+		label = fmt.Sprintf("%s (%s)", parsed.Cluster, parsed.Project)
 	}
 	if contextName == currentContext {
 		label = "CURRENT · " + label
@@ -62,16 +58,78 @@ func contextOptions(
 	if includePlaceholder {
 		options = append(options, huh.NewOption("Choose a context", ""))
 	}
-	for _, contextName := range contexts {
+	labels := make([]string, len(contexts))
+	labelCounts := make(map[string]int)
+	for index, contextName := range contexts {
+		labels[index] = contextDisplayLabel(contextName, currentContext)
+		labelCounts[labels[index]]++
+	}
+	usedLabels := make(map[string]struct{}, len(contexts))
+	for index, contextName := range contexts {
+		label := labels[index]
+		if labelCounts[label] > 1 {
+			label += " — " + contextName
+		}
+		baseLabel := label
+		for suffix := 2; ; suffix++ {
+			if _, exists := usedLabels[label]; !exists {
+				break
+			}
+			label = fmt.Sprintf("%s [%d]", baseLabel, suffix)
+		}
+		usedLabels[label] = struct{}{}
 		options = append(
 			options,
 			huh.NewOption(
-				contextDisplayLabel(contextName, currentContext),
+				label,
 				contextName,
 			),
 		)
 	}
 	return options
+}
+
+func primaryContextOptions(
+	primaryContext string,
+	currentContext string,
+) []huh.Option[string] {
+	options := make([]huh.Option[string], 0, 2)
+	if primaryContext != "" {
+		options = append(
+			options,
+			huh.NewOption(
+				contextDisplayLabel(primaryContext, currentContext),
+				primaryContext,
+			),
+		)
+	}
+	return append(
+		options,
+		huh.NewOption("Choose another cluster", chooseAnotherContextValue),
+	)
+}
+
+func newContextSelect(
+	title string,
+	options []huh.Option[string],
+	value *string,
+) *huh.Select[string] {
+	return huh.NewSelect[string]().
+		Title(title).
+		Description(wizardDescription(
+			"Press / and type to filter the available clusters.",
+			false,
+		)).
+		Options(options...).
+		Filtering(true).
+		Value(value)
+}
+
+func validateContextChoice(choice string) error {
+	if choice == "" {
+		return errors.New("choose a Kubernetes context")
+	}
+	return nil
 }
 
 func isProductionContext(contextName string) bool {
