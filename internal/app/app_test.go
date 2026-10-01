@@ -196,10 +196,14 @@ func TestCollectKeepsStdoutStableAndReportsQodoScoutStages(t *testing.T) {
 		"  [active] Archive - packing",
 		"  [active] Archive - finalizing",
 		"  [done] Archive",
-		"Qodo Scout summary",
-		"Total duration:",
-		"Archive: " + output,
-		"Saved locally. Share separately through an approved support channel.",
+		"Qodo Scout\n",
+		"Bundle created",
+		"1 namespace | 1 pod | 1 log stream |",
+		"[ok] Kubernetes diagnostics",
+		"[ok] Workload context",
+		"[ok] Archive ready |",
+		"Saved locally:\n" + output,
+		"Review collection-issues.jsonl before sharing.",
 	} {
 		if !strings.Contains(stderr.String(), expected) {
 			t.Fatalf("stderr missing %q:\n%s", expected, stderr.String())

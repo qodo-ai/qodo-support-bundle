@@ -186,8 +186,9 @@ func TestProgressRendererBubbleTeaRunsInlineAndStopsSynchronously(t *testing.T) 
 	renderer.Close()
 
 	got := output.String()
-	if !strings.Contains(got, "Qodo Scout summary") ||
-		!strings.Contains(got, "Archive: /tmp/bundle.tar.gz (2.0 KiB)") {
+	if !strings.Contains(got, "Qodo Scout\r\nBundle created") ||
+		!strings.Contains(got, "✓ Archive ready · 2.0 KiB") ||
+		!strings.Contains(got, "Saved locally:\r\n/tmp/bundle.tar.gz") {
 		t.Fatalf("Bubble Tea final view missing: %q", got)
 	}
 	if !strings.Contains(got, "\x1b") {
@@ -234,8 +235,20 @@ func TestProgressRendererTTYHierarchyGoldenTranscript(t *testing.T) {
 		Status: progressWarning, Detail: "partial",
 	})
 	renderer.Summary(progressSummary{
-		ArchivePath: "/tmp/bundle.tar.gz",
-		ArchiveSize: 2048,
+		ArchivePath:  "/tmp/bundle.tar.gz",
+		ArchiveSize:  2048,
+		Namespaces:   2,
+		Pods:         18,
+		LogStreams:   37,
+		WarningCount: 1,
+		SourceOutcomes: []progressSummaryOutcome{
+			{Label: "Kubernetes diagnostics", Status: progressCompleted},
+			{
+				Label:   "Workload context incomplete",
+				Status:  progressWarning,
+				Message: progressIssueGuidance,
+			},
+		},
 	})
 
 	const want = "" +
@@ -244,12 +257,16 @@ func TestProgressRendererTTYHierarchyGoldenTranscript(t *testing.T) {
 		"  ✓ Kubernetes diagnostics - 2/2 namespaces (1.5s)\n" +
 		"  ● Workload context\n" +
 		"  ! Workload context - partial (800ms)\n" +
-		"Qodo Scout summary\n" +
-		"  ✓ Kubernetes diagnostics - 2/2 namespaces (1.5s)\n" +
-		"  ! Workload context - partial (800ms)\n" +
-		"Total duration: 2.3s\n" +
-		"Archive: /tmp/bundle.tar.gz (2.0 KiB)\n" +
-		"Saved locally. Share separately through an approved support channel.\n"
+		"Qodo Scout\n" +
+		"Bundle created with 1 warning\n" +
+		"2 namespaces · 18 pods · 37 log streams · 2.3s\n\n" +
+		"✓ Kubernetes diagnostics\n" +
+		"! Workload context incomplete\n" +
+		"  Review collection-issues.jsonl for details.\n" +
+		"✓ Archive ready · 2.0 KiB\n\n" +
+		"Saved locally:\n" +
+		"/tmp/bundle.tar.gz\n" +
+		"Review collection-issues.jsonl before sharing.\n"
 	if output.String() != want {
 		t.Fatalf("TTY transcript mismatch:\ngot:\n%s\nwant:\n%s", output.String(), want)
 	}

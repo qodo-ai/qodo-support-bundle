@@ -565,7 +565,14 @@ func runCollect(
 				ID: "archive", Label: "Archive", Level: 1,
 				Status: progressWarning, Detail: "saved; cleanup incomplete",
 			})
-			writeProgressSummary(progress, redactor, result)
+			writeProgressSummary(
+				progress,
+				redactor,
+				result,
+				prometheusConfig,
+				phoenixConfig,
+				true,
+			)
 			closeProgress(progress, stderr)
 			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
 			_, _ = fmt.Fprintln(stderr, "Bundle created, but temporary data cleanup failed.")
@@ -581,7 +588,14 @@ func runCollect(
 	}
 	cleanupPending = false
 
-	writeProgressSummary(progress, redactor, result)
+	writeProgressSummary(
+		progress,
+		redactor,
+		result,
+		prometheusConfig,
+		phoenixConfig,
+		false,
+	)
 	closeProgress(progress, stderr)
 	_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
 	_, _ = fmt.Fprintf(
@@ -595,10 +609,12 @@ func runCollect(
 		result.KubernetesReport.EphemeralContainers,
 	)
 	if result.Status == collection.CoveragePartial.String() {
-		_, _ = fmt.Fprintln(
-			stderr,
-			"Warning: collection was partial; inspect collection-issues.jsonl.",
-		)
+		if !progress.enabled {
+			_, _ = fmt.Fprintln(
+				stderr,
+				"Warning: collection was partial; inspect collection-issues.jsonl.",
+			)
+		}
 		return 3
 	}
 	return 0
@@ -608,6 +624,9 @@ func writeProgressSummary(
 	progress *progressRenderer,
 	redactor *redact.Redactor,
 	result collection.Result,
+	prometheusConfig *prometheus.Config,
+	phoenixConfig *phoenix.Config,
+	cleanupIncomplete bool,
 ) {
 	status := progressCompleted
 	detail := ""
@@ -623,10 +642,18 @@ func writeProgressSummary(
 	if info, err := os.Stat(result.ArchivePath); err == nil {
 		archiveSize = info.Size()
 	}
-	progress.Summary(progressSummary{
-		ArchivePath: progressArchivePath(redactor, result.ArchivePath),
-		ArchiveSize: archiveSize,
-	})
+	options := progressSummaryOptions{
+		ArchivePath:       progressArchivePath(redactor, result.ArchivePath),
+		ArchiveSize:       archiveSize,
+		CleanupIncomplete: cleanupIncomplete,
+	}
+	if prometheusConfig != nil {
+		options.PrometheusNamespace = terminalText(redactor, prometheusConfig.Namespace)
+	}
+	if phoenixConfig != nil {
+		options.PhoenixNamespace = terminalText(redactor, phoenixConfig.Namespace)
+	}
+	progress.Summary(buildProgressSummary(result, options))
 }
 
 func progressArchivePath(redactor *redact.Redactor, archivePath string) string {

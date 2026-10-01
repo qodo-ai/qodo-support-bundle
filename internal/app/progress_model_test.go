@@ -61,7 +61,7 @@ func TestProgressModelTickAndMascotAreExplicit(t *testing.T) {
 	}
 }
 
-func TestProgressModelSummaryPreservesMajorOutcomes(t *testing.T) {
+func TestProgressModelSummaryCompactsSuccessfulNestedStages(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)
 	model := newProgressModel(progressModelOptions{
@@ -91,17 +91,36 @@ func TestProgressModelSummaryPreservesMajorOutcomes(t *testing.T) {
 		At: start.Add(time.Second),
 	})
 	model = updateProgressModel(t, model, progressSummaryMsg{
-		Summary: progressSummary{ArchivePath: "/tmp/bundle.tar.gz", ArchiveSize: 2048},
-		At:      start.Add(2300 * time.Millisecond),
+		Summary: progressSummary{
+			ArchivePath:  "/tmp/bundle.tar.gz",
+			ArchiveSize:  2048,
+			Namespaces:   1,
+			Pods:         18,
+			LogStreams:   37,
+			WarningCount: 1,
+			SourceOutcomes: []progressSummaryOutcome{
+				{Label: "Kubernetes diagnostics", Status: progressCompleted},
+				{
+					Label:   "Workload context incomplete",
+					Status:  progressWarning,
+					Message: "Review collection-issues.jsonl for details.",
+				},
+			},
+		},
+		At: start.Add(2300 * time.Millisecond),
 	})
 
 	const want = "" +
-		"Qodo Scout summary\n" +
-		"  ! Workload context - partial (800ms)\n" +
-		"    ✓ Namespace scan - 3/3 pods\n" +
-		"Total duration: 2.3s\n" +
-		"Archive: /tmp/bundle.tar.gz (2.0 KiB)\n" +
-		"Saved locally. Share separately through an approved support channel."
+		"Qodo Scout\n" +
+		"Bundle created with 1 warning\n" +
+		"1 namespace · 18 pods · 37 log streams · 2.3s\n\n" +
+		"✓ Kubernetes diagnostics\n" +
+		"! Workload context incomplete\n" +
+		"  Review collection-issues.jsonl for details.\n" +
+		"✓ Archive ready · 2.0 KiB\n\n" +
+		"Saved locally:\n" +
+		"/tmp/bundle.tar.gz\n" +
+		"Review collection-issues.jsonl before sharing."
 	if got := model.View(); got != want {
 		t.Fatalf("summary mismatch:\ngot:\n%s\nwant:\n%s", got, want)
 	}

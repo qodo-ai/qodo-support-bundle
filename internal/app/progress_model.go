@@ -83,8 +83,7 @@ func (model progressModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.stages[update.ID] = state
 		return model, nil
 	case progressSummaryMsg:
-		summary := message.Summary
-		summary.ArchivePath = terminalLine(summary.ArchivePath)
+		summary := sanitizeProgressSummary(message.Summary)
 		model.summary = &summary
 		model.finishedAt = message.At
 		if model.finishedAt.IsZero() {
@@ -107,26 +106,13 @@ func (model progressModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 func (model progressModel) View() string {
 	lines := make([]string, 0, len(model.stageOrder)+2)
 	if model.summary != nil {
-		lines = append(lines, "Qodo Scout summary")
-		for _, id := range model.stageOrder {
-			state := model.stages[id]
-			lines = append(lines, model.formatUpdate(state.update, state.elapsed))
-		}
 		lines = append(
 			lines,
-			"Total duration: "+
-				formatProgressDuration(max(model.finishedAt.Sub(model.startedAt), 0)),
-		)
-		if model.summary.ArchivePath != "" {
-			archive := "Archive: " + model.summary.ArchivePath
-			if model.summary.ArchiveSize >= 0 {
-				archive += " (" + formatProgressBytes(model.summary.ArchiveSize) + ")"
-			}
-			lines = append(lines, archive)
-		}
-		lines = append(
-			lines,
-			"Saved locally. Share separately through an approved support channel.",
+			progressSummaryLines(
+				*model.summary,
+				max(model.finishedAt.Sub(model.startedAt), 0),
+				model.unicode,
+			)...,
 		)
 	} else {
 		lines = append(lines, "Qodo Scout interactive display")

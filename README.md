@@ -111,17 +111,30 @@ logs, workload, optional telemetry, and archive work. Interactive terminals use
 completed, active, warning/partial, and failed markers, with ASCII-safe markers
 when Unicode is unavailable. Reliable counts and elapsed times are shown when
 known; lines are shortened to the terminal width. A final stderr summary lists
-major outcomes, total duration, and the local archive path and size. For
-example, redirected output uses stable lines such as:
+compact counts, successful top-level sources, actionable warnings, duration,
+and the local archive path and size. Successful nested stages are not repeated.
+Only known safe explanations appear in this summary; detailed diagnostics stay
+in `collection-issues.jsonl`. For example, redirected output uses stable lines
+such as:
 
 ```text
 [active] Qodo Scout collection
   [active] Kubernetes diagnostics
     [done] Namespace discovery - 2/2 namespaces
   [done] Kubernetes diagnostics - 2/2 namespaces
-Qodo Scout summary
-Archive: /secure/cases/case-123.tar.gz (2.4 MiB)
-Saved locally. Share separately through an approved support channel.
+Qodo Scout
+Bundle created with 1 warning
+2 namespaces | 18 pods | 37 log streams | 38.7s
+
+[done] Kubernetes diagnostics
+[done] Workload context
+[warning] Prometheus not collected
+  No Prometheus service found in monitoring.
+[done] Archive ready | 2.4 MiB
+
+Saved locally:
+/secure/cases/case-123.tar.gz
+Review collection-issues.jsonl before sharing.
 ```
 
 ```bash

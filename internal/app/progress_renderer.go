@@ -55,8 +55,13 @@ type progressUpdate struct {
 }
 
 type progressSummary struct {
-	ArchivePath string
-	ArchiveSize int64
+	ArchivePath    string
+	ArchiveSize    int64
+	Namespaces     int
+	Pods           int
+	LogStreams     int
+	WarningCount   int
+	SourceOutcomes []progressSummaryOutcome
 }
 
 type progressStageState struct {
@@ -215,7 +220,7 @@ func (renderer *progressRenderer) Summary(summary progressSummary) {
 	if renderer == nil || !renderer.enabled {
 		return
 	}
-	summary.ArchivePath = terminalLine(summary.ArchivePath)
+	summary = sanitizeProgressSummary(summary)
 	if renderer.bubbleTea {
 		renderer.program.Send(progressSummaryMsg{Summary: summary, At: renderer.now()})
 		return
@@ -223,27 +228,13 @@ func (renderer *progressRenderer) Summary(summary progressSummary) {
 	renderer.mu.Lock()
 	defer renderer.mu.Unlock()
 	renderer.clearLocked()
-	renderer.writeLineLocked("Qodo Scout summary")
-	for _, id := range renderer.stageOrder {
-		state := renderer.stages[id]
-		if state.update.Level != 1 {
-			continue
-		}
-		renderer.writeLineLocked(renderer.formatUpdate(state.update, state.elapsed))
+	for _, line := range progressSummaryLines(
+		summary,
+		max(renderer.now().Sub(renderer.startedAt), 0),
+		renderer.unicode,
+	) {
+		renderer.writeLineLocked(line)
 	}
-	renderer.writeLineLocked(
-		"Total duration: " + formatProgressDuration(max(renderer.now().Sub(renderer.startedAt), 0)),
-	)
-	if summary.ArchivePath != "" {
-		archive := "Archive: " + summary.ArchivePath
-		if summary.ArchiveSize >= 0 {
-			archive += " (" + formatProgressBytes(summary.ArchiveSize) + ")"
-		}
-		renderer.writeLineLocked(archive)
-	}
-	renderer.writeLineLocked(
-		"Saved locally. Share separately through an approved support channel.",
-	)
 }
 
 // Stage sanitizes messages and replaces any active frame before presenting them.
