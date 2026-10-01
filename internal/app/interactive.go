@@ -24,6 +24,9 @@ var (
 	errNamespaceDiscoveryForbidden = errors.New(
 		"namespace discovery is not permitted",
 	)
+	errDiscoveryErrorOutputTruncated = errors.New(
+		"kubectl discovery failed; error output exceeded the safe limit",
+	)
 )
 
 type interactiveSettings struct {
@@ -275,6 +278,9 @@ func (discovery kubernetesWizardDiscovery) run(
 	}
 	result, err := discovery.Runner.Run(ctx, interactiveDiscoveryLimit, arguments...)
 	if err != nil {
+		if result.StderrTruncated {
+			return nil, errDiscoveryErrorOutputTruncated
+		}
 		stderr := strings.ToLower(string(result.Stderr))
 		if strings.Contains(stderr, "forbidden") ||
 			strings.Contains(stderr, "permission denied") {

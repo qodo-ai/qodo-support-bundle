@@ -234,9 +234,10 @@ func safeProgressReason(
 		"project_limit_exceeded", "trace_limit_exceeded", "span_limit_exceeded",
 		"page_limit_exceeded", "response_byte_limit_exceeded",
 		"per_query_byte_budget_exceeded", "per_trace_byte_budget_exceeded",
-		"total_byte_budget_exceeded", "query_coverage_incomplete",
-		"trace_coverage_incomplete":
+		"total_byte_budget_exceeded":
 		return sourceName + " reached a configured collection limit. " + progressIssueGuidance
+	case "query_coverage_incomplete", "trace_coverage_incomplete":
+		return sourceName + " coverage is incomplete. " + progressIssueGuidance
 	case "timeout", "request_deadline_exceeded", "idle_deadline_exceeded":
 		return sourceName + " collection timed out. " + progressIssueGuidance
 	case "forward_failed", "tunnel_unavailable":

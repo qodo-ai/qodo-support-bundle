@@ -12,9 +12,12 @@ type Sink interface {
 
 // CommandResult contains bounded command output.
 type CommandResult struct {
-	Stdout    []byte
-	Stderr    []byte
+	Stdout []byte
+	Stderr []byte
+	// Truncated reports that stdout exceeded the caller-provided limit.
 	Truncated bool
+	// StderrTruncated reports that stderr exceeded its fixed safety limit.
+	StderrTruncated bool
 }
 
 // Runner executes kubectl without invoking a shell.

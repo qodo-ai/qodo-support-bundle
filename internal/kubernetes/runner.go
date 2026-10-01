@@ -35,8 +35,9 @@ func (runner ExecRunner) Run(
 		err = nil
 	}
 	return CommandResult{
-		Stdout:    stdout.Bytes(),
-		Stderr:    stderr.Bytes(),
-		Truncated: stdout.Truncated(),
+		Stdout:          stdout.Bytes(),
+		Stderr:          stderr.Bytes(),
+		Truncated:       stdout.Truncated(),
+		StderrTruncated: stderr.Truncated(),
 	}, err
 }

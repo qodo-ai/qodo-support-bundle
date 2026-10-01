@@ -118,6 +118,28 @@ func TestBuildProgressSummaryMapsDiscoveryFailureSafely(t *testing.T) {
 	}
 }
 
+func TestBuildProgressSummaryDoesNotCallIncompleteCoverageALimit(t *testing.T) {
+	result := collection.Result{
+		Status: collection.CoveragePartial.String(),
+		Coverage: map[collection.Source]collection.Coverage{
+			collection.SourcePrometheus: {
+				State:  collection.CoveragePartial,
+				Reason: "query_coverage_incomplete",
+			},
+		},
+	}
+
+	summary := buildProgressSummary(result, progressSummaryOptions{})
+	got := strings.Join(progressSummaryLines(summary, time.Second, false), "\n")
+
+	if !strings.Contains(got, "Prometheus coverage is incomplete.") {
+		t.Fatalf("summary omitted neutral incomplete-coverage message:\n%s", got)
+	}
+	if strings.Contains(got, "configured collection limit") {
+		t.Fatalf("summary mislabeled incomplete coverage as a limit:\n%s", got)
+	}
+}
+
 func TestProgressSummaryPlainModeUsesASCII(t *testing.T) {
 	summary := progressSummary{
 		Namespaces:   2,

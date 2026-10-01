@@ -636,18 +636,86 @@ func TestKubernetesWizardDiscoveryUsesFixedBoundedArguments(t *testing.T) {
 	}
 }
 
-func TestKubernetesWizardDiscoveryClassifiesNamespacePermissionDenial(t *testing.T) {
+func TestKubernetesWizardDiscoveryClassifiesCompleteNamespacePermissionDenial(t *testing.T) {
 	t.Parallel()
+	for _, message := range []string{
+		"Error from server (Forbidden): namespaces is forbidden",
+		"permission denied while listing namespaces",
+	} {
+		message := message
+		t.Run(message, func(t *testing.T) {
+			t.Parallel()
+			runner := &wizardRunnerStub{
+				results: []kubernetes.CommandResult{{Stderr: []byte(message)}},
+				errors:  []error{errors.New("kubectl exited with status 1")},
+			}
+			discovery := kubernetesWizardDiscovery{Runner: runner}
+
+			_, err := discovery.Namespaces(context.Background(), "customer")
+			if !errors.Is(err, errNamespaceDiscoveryForbidden) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestKubernetesWizardDiscoveryRejectsTruncatedPermissionErrors(t *testing.T) {
+	t.Parallel()
+	for _, stderr := range []string{
+		"bounded output without the truncated Forbidden suffix",
+		"Error from server (Forbidden): prefix followed by truncated output",
+	} {
+		stderr := stderr
+		t.Run(stderr, func(t *testing.T) {
+			t.Parallel()
+			runner := &wizardRunnerStub{
+				results: []kubernetes.CommandResult{{
+					Stderr:          []byte(stderr),
+					StderrTruncated: true,
+				}},
+				errors: []error{errors.New("kubectl exited with status 1")},
+			}
+			discovery := kubernetesWizardDiscovery{Runner: runner}
+
+			_, err := discovery.Namespaces(context.Background(), "customer")
+			if !errors.Is(err, errDiscoveryErrorOutputTruncated) {
+				t.Fatalf("error=%v", err)
+			}
+			if errors.Is(err, errNamespaceDiscoveryForbidden) ||
+				strings.Contains(strings.ToLower(err.Error()), "forbidden") {
+				t.Fatalf("truncated stderr was classified as a permission denial: %v", err)
+			}
+		})
+	}
+}
+
+func TestKubernetesWizardDiscoveryPreservesUnrelatedCommandFailure(t *testing.T) {
+	t.Parallel()
+	runErr := errors.New("kubectl exited with status 7")
 	runner := &wizardRunnerStub{
-		results: []kubernetes.CommandResult{
-			{Stderr: []byte("Error from server (Forbidden): namespaces is forbidden")},
-		},
-		errors: []error{errors.New("kubectl exited with status 1")},
+		results: []kubernetes.CommandResult{{Stderr: []byte("connection refused")}},
+		errors:  []error{runErr},
 	}
 	discovery := kubernetesWizardDiscovery{Runner: runner}
 
 	_, err := discovery.Namespaces(context.Background(), "customer")
-	if !errors.Is(err, errNamespaceDiscoveryForbidden) {
+	if !errors.Is(err, runErr) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestKubernetesWizardDiscoveryRejectsTruncatedStdout(t *testing.T) {
+	t.Parallel()
+	runner := &wizardRunnerStub{
+		results: []kubernetes.CommandResult{{
+			Stdout:    []byte("qodo\n"),
+			Truncated: true,
+		}},
+	}
+	discovery := kubernetesWizardDiscovery{Runner: runner}
+
+	_, err := discovery.Namespaces(context.Background(), "customer")
+	if err == nil || !strings.Contains(err.Error(), "output exceeded the safe limit") {
 		t.Fatalf("error=%v", err)
 	}
 }
