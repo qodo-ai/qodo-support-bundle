@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -540,6 +541,37 @@ func TestFinalizeCleanupFailureCanBeRetriedByClose(t *testing.T) {
 	}
 	if _, err := os.Stat(builder.stagingDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("staging directory still exists: %v", err)
+	}
+}
+
+func TestFinalizeReportsArchiveStagesInOrder(t *testing.T) {
+	t.Parallel()
+	var stages []ProgressStage
+	output := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	builder, err := New(output, WithProgress(func(progress Progress) {
+		stages = append(stages, progress.Stage)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := builder.Add("summary.md", []byte("summary\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := builder.FinalizeContext(context.Background(), Manifest{
+		GeneratedAt: time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC),
+		Collection:  map[string]any{"status": "complete"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []ProgressStage{
+		ProgressManifest,
+		ProgressChecksums,
+		ProgressPacking,
+		ProgressFinalizing,
+		ProgressComplete,
+	}
+	if !reflect.DeepEqual(stages, want) {
+		t.Fatalf("stages=%v want=%v", stages, want)
 	}
 }
 

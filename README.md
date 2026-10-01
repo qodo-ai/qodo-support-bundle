@@ -1,10 +1,12 @@
-# Qodo Support Bundle
+# Qodo Scout
 
-`qodo-support-bundle` is a portable, read-only CLI for collecting bounded and
-redacted Kubernetes diagnostics. It collects pod metadata, events, current and
-previous container logs, normalized namespace-scoped workload context, optional
-namespace-scoped Prometheus telemetry, optional bounded Arize Phoenix traces,
-and an optional Platform-to-Zitadel connectivity report.
+Qodo Scout is a portable, read-only CLI for collecting bounded and redacted
+Kubernetes diagnostics. The executable, release assets, and archive filenames
+remain `qodo-support-bundle` for compatibility. It collects pod metadata,
+events, current and previous container logs, normalized namespace-scoped
+workload context, optional namespace-scoped Prometheus telemetry, optional
+bounded Arize Phoenix traces, and an optional Platform-to-Zitadel connectivity
+report.
 
 ## Prerequisites and scope
 
@@ -98,6 +100,40 @@ qodo-support-bundle collect \
   --output /secure/cases/case-123.tar.gz
 ```
 
+Routine progress is written to stderr so stdout remains stable for scripts. In
+an interactive terminal, Qodo Scout displays a subtle heartbeat between
+newline-terminated stage messages. Redirected stderr and CI output contain only
+stable lines, without animation or carriage returns.
+
+Progress is grouped into high-level stages with nested discovery, scanning,
+logs, workload, optional telemetry, and archive work. Interactive terminals use
+completed, active, warning/partial, and failed markers, with ASCII-safe markers
+when Unicode is unavailable. Reliable counts and elapsed times are shown when
+known; lines are shortened to the terminal width. A final stderr summary lists
+major outcomes, total duration, and the local archive path and size. For
+example, redirected output uses stable lines such as:
+
+```text
+[active] Qodo Scout collection
+  [active] Kubernetes diagnostics
+    [done] Namespace discovery - 2/2 namespaces
+  [done] Kubernetes diagnostics - 2/2 namespaces
+Qodo Scout summary
+Archive: /secure/cases/case-123.tar.gz (2.4 MiB)
+Saved locally. Share separately through an approved support channel.
+```
+
+```bash
+# Suppress routine progress; warnings, errors, and stdout results remain.
+qodo-support-bundle collect --no-progress
+
+# Replace the interactive spinner with a small ASCII anteater.
+qodo-support-bundle collect --mascot
+```
+
+`--mascot` automatically falls back to stable stage lines when stderr is not a
+TTY and is disabled by `--no-progress`.
+
 Use `--namespaces qodo-onprem,rabbitmq-system` for several explicit namespaces,
 or `--all-namespaces` for literal cluster-wide collection. The latter can
 include unrelated workloads in shared clusters. `--selector` narrows pod
@@ -132,6 +168,10 @@ are removed before files are staged.
 Exit code `0` means collection completed. Exit code `3` means a usable partial
 bundle was created; inspect `collection-issues.jsonl`. Fatal setup, cancellation,
 or archive failures return `1`; invalid CLI usage returns `2`.
+
+Qodo Scout saves the archive locally. It does not upload or send the bundle.
+Review it, then share it separately through the support channel approved for
+the customer.
 
 ## Optional Prometheus telemetry
 

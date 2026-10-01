@@ -298,11 +298,12 @@ func TestExecuteCollectsPrometheusBetweenWorkloadAndZitadel(t *testing.T) {
 		archive.addCalls[prometheus.MetricsArtifactPath] != 0 {
 		t.Fatalf("Prometheus artifacts were duplicated: %+v", archive.addCalls)
 	}
-	if len(events) != 4 ||
-		events[0].Kind != EventPrometheusStarted ||
-		events[1].Kind != EventPrometheusComplete ||
-		events[2].Kind != EventZitadelStarted ||
-		events[3].Kind != EventZitadelPassed {
+	sourceEvents := optionalSourceEvents(events)
+	if len(sourceEvents) != 4 ||
+		sourceEvents[0].Kind != EventPrometheusStarted ||
+		sourceEvents[1].Kind != EventPrometheusComplete ||
+		sourceEvents[2].Kind != EventZitadelStarted ||
+		sourceEvents[3].Kind != EventZitadelPassed {
 		t.Fatalf("unexpected events: %+v", events)
 	}
 	assertPrometheusManifestAndSummary(t, archive, *config, result.Coverage)
@@ -376,10 +377,11 @@ func TestExecuteRepresentsPrometheusPartialAndUnavailableAsUsableBundles(t *test
 				archive.finalizeCalls != 1 {
 				t.Fatalf("unexpected source gap result: %+v", result)
 			}
-			if len(events) != 2 ||
-				events[0].Kind != EventPrometheusStarted ||
-				events[1].Kind != test.wantEvent ||
-				events[1].Reason != test.wantReason {
+			sourceEvents := optionalSourceEvents(events)
+			if len(sourceEvents) != 2 ||
+				sourceEvents[0].Kind != EventPrometheusStarted ||
+				sourceEvents[1].Kind != test.wantEvent ||
+				sourceEvents[1].Reason != test.wantReason {
 				t.Fatalf("unexpected events: %+v", events)
 			}
 			issues := string(archive.files[issuesArtifactPath])

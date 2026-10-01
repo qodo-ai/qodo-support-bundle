@@ -27,6 +27,16 @@ const (
 type EventKind string
 
 const (
+	EventKubernetesStarted   EventKind = "kubernetes_started"
+	EventKubernetesComplete  EventKind = "kubernetes_complete"
+	EventKubernetesPartial   EventKind = "kubernetes_partial"
+	EventWorkloadStarted     EventKind = "workload_started"
+	EventWorkloadProgress    EventKind = "workload_progress"
+	EventWorkloadComplete    EventKind = "workload_complete"
+	EventWorkloadPartial     EventKind = "workload_partial"
+	EventWorkloadUnavailable EventKind = "workload_unavailable"
+	EventArchiveSummary      EventKind = "archive_summary"
+
 	EventPrometheusStarted     EventKind = "prometheus_started"
 	EventPrometheusComplete    EventKind = "prometheus_complete"
 	EventPrometheusPartial     EventKind = "prometheus_partial"
@@ -45,8 +55,10 @@ const (
 
 // Event carries a stable event kind and an optional sanitized reason.
 type Event struct {
-	Kind   EventKind
-	Reason string
+	Kind    EventKind
+	Reason  string
+	Current int
+	Total   int
 }
 
 // Request contains validated inputs for one collection.
@@ -189,6 +201,7 @@ func Execute(
 	}
 	result := Result{Coverage: InitializeCoverage(requested)}
 
+	reportEvent(request.Progress, Event{Kind: EventKubernetesStarted})
 	kubernetesReport, kubernetesErr := collectors.Kubernetes(
 		ctx,
 		request.Kubernetes,
@@ -211,11 +224,29 @@ func Execute(
 		kubernetesReport,
 		kubernetesErr,
 	)
+	if result.Coverage[SourceKubernetes].State == CoverageComplete {
+		reportEvent(request.Progress, Event{
+			Kind:    EventKubernetesComplete,
+			Current: len(kubernetesReport.Namespaces),
+			Total:   kubernetesReport.NamespacesRequested,
+		})
+	} else {
+		reportEvent(request.Progress, Event{
+			Kind:    EventKubernetesPartial,
+			Current: len(kubernetesReport.Namespaces),
+			Total:   kubernetesReport.NamespacesRequested,
+		})
+	}
 
+	workloadNamespaces := workloadCollectionNamespaces(request.Kubernetes, kubernetesReport)
+	reportEvent(request.Progress, Event{
+		Kind:  EventWorkloadStarted,
+		Total: len(workloadNamespaces),
+	})
 	workloadReport, workloadErr := collectors.Workload(
 		ctx,
 		workload.Config{
-			Namespaces:       workloadCollectionNamespaces(request.Kubernetes, kubernetesReport),
+			Namespaces:       workloadNamespaces,
 			Context:          request.Kubernetes.Context,
 			Kubeconfig:       request.Kubernetes.Kubeconfig,
 			Timeout:          request.Kubernetes.Timeout,
@@ -224,6 +255,13 @@ func Execute(
 			MaxTotalBytes:    workload.DefaultMaxTotalBytes,
 			MaxNamespaces:    workload.DefaultMaxNamespaces,
 			MaxDuration:      workload.DefaultMaxCollectionDuration,
+			Progress: func(progress workload.Progress) {
+				reportEvent(request.Progress, Event{
+					Kind:    EventWorkloadProgress,
+					Current: progress.Current,
+					Total:   progress.Total,
+				})
+			},
 		},
 		runner,
 		archive,
@@ -241,7 +279,21 @@ func Execute(
 	if err := archive.Add(workloadReportPath, workloadReportData); err != nil {
 		return result, err
 	}
-	result.Coverage[SourceWorkload] = WorkloadCoverage(workloadReport, workloadErr)
+	workloadCoverage := WorkloadCoverage(workloadReport, workloadErr)
+	result.Coverage[SourceWorkload] = workloadCoverage
+	workloadEvent := Event{
+		Current: len(workloadReport.Namespaces),
+		Total:   len(workloadNamespaces),
+	}
+	switch workloadCoverage.State {
+	case CoverageComplete:
+		workloadEvent.Kind = EventWorkloadComplete
+	case CoveragePartial:
+		workloadEvent.Kind = EventWorkloadPartial
+	default:
+		workloadEvent.Kind = EventWorkloadUnavailable
+	}
+	reportEvent(request.Progress, workloadEvent)
 	kubernetesReport.Issues = append(
 		kubernetesReport.Issues,
 		workloadCollectionIssues(workloadReport, workloadErr, redactor)...,
@@ -434,6 +486,7 @@ func Execute(
 		request.Problem,
 		redactor,
 	)
+	reportEvent(request.Progress, Event{Kind: EventArchiveSummary})
 	summary := BuildSummary(
 		generatedAt,
 		result.Status,
@@ -589,16 +642,25 @@ func workloadCollectionNamespaces(
 	config kubernetes.Config,
 	report kubernetes.Report,
 ) []string {
+	var namespaces []string
 	if config.AllNamespaces {
-		return append([]string(nil), report.CollectionNamespaces...)
+		namespaces = report.CollectionNamespaces
+	} else if len(config.Namespaces) > 0 {
+		namespaces = config.Namespaces
+	} else if config.Namespace != "" {
+		namespaces = []string{config.Namespace}
 	}
-	if len(config.Namespaces) > 0 {
-		return append([]string(nil), config.Namespaces...)
+	seen := make(map[string]struct{}, len(namespaces))
+	normalized := make([]string, 0, len(namespaces))
+	for _, value := range namespaces {
+		namespace := strings.TrimSpace(value)
+		if _, exists := seen[namespace]; exists {
+			continue
+		}
+		seen[namespace] = struct{}{}
+		normalized = append(normalized, namespace)
 	}
-	if config.Namespace != "" {
-		return []string{config.Namespace}
-	}
-	return nil
+	return normalized
 }
 
 func effectivePrometheusConfig(

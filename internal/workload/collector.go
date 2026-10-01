@@ -64,6 +64,19 @@ type Config struct {
 	MaxTotalBytes    int64
 	MaxNamespaces    int
 	MaxDuration      time.Duration
+	Progress         func(Progress)
+}
+
+// ProgressStage values expose aggregate counts without namespace names.
+type ProgressStage string
+
+const ProgressNamespaceComplete ProgressStage = "workload_namespace_complete"
+
+// Progress reports completed workload namespace counts without resource data.
+type Progress struct {
+	Stage   ProgressStage
+	Current int
+	Total   int
 }
 
 // CoverageState describes one namespace/resource API collection result.
@@ -315,12 +328,23 @@ func Collect(
 			}
 			report.Coverage = append(report.Coverage, coverage)
 		}
+		reportProgress(config, Progress{
+			Stage:   ProgressNamespaceComplete,
+			Current: namespaceIndex + 1,
+			Total:   len(namespaces),
+		})
 	}
 
 	if err := stageArtifacts(collectionCtx, sink, recordsByArtifact, &report); err != nil {
 		return report, err
 	}
 	return report, nil
+}
+
+func reportProgress(config Config, progress Progress) {
+	if config.Progress != nil {
+		config.Progress(progress)
+	}
 }
 
 func validateCollection(

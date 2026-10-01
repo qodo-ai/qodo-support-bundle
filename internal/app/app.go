@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -106,6 +108,8 @@ func runCollect(
 		"Maximum bytes retained across Kubernetes metadata records",
 	)
 	logWorkers := flags.Int("log-workers", defaultLogWorkers, "Concurrent log readers")
+	noProgress := flags.Bool("no-progress", false, "Suppress routine progress output")
+	mascot := flags.Bool("mascot", false, "Use the Qodo Scout anteater animation in interactive terminals")
 	activity := flags.String("activity", "", "Customer description of current activity")
 	problem := flags.String("problem", "", "Customer description of the failure")
 	checkZitadel := flags.Bool(
@@ -308,13 +312,24 @@ func runCollect(
 		}
 		_, _ = fmt.Fprintln(stderr, message)
 	}
+	progress := newCLIProgressRenderer(stderr, !*noProgress, *mascot)
+	defer progress.Close()
+	progress.Update(progressUpdate{
+		ID: "collection", Label: "Qodo Scout collection", Status: progressActive,
+	})
+
 	var builder *bundle.Builder
-	if usedDefaultOutput {
-		builder, err = bundle.New(*output, bundle.OmitAbsolutePaths())
-	} else {
-		builder, err = bundle.New(*output)
+	bundleOptions := []bundle.Option{
+		bundle.WithProgress(func(event bundle.Progress) {
+			writeBundleProgress(progress, event)
+		}),
 	}
+	if usedDefaultOutput {
+		bundleOptions = append(bundleOptions, bundle.OmitAbsolutePaths())
+	}
+	builder, err = bundle.New(*output, bundleOptions...)
 	if err != nil {
+		progress.Close()
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
@@ -325,12 +340,24 @@ func runCollect(
 		}
 	}()
 
+	progress.Update(progressUpdate{
+		ID: "preflight", Label: "Preflight checks", Level: 1,
+		Status: progressActive,
+	})
 	resolvedKubectl, err := resolveKubectl(*kubectl)
 	if err != nil {
+		progress.Update(progressUpdate{
+			ID: "preflight", Label: "Preflight checks", Level: 1,
+			Status: progressFailed,
+		})
+		progress.Close()
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
-	_, _ = fmt.Fprintln(stderr, "Using kubectl: resolved executable")
+	progress.Update(progressUpdate{
+		ID: "preflight", Label: "Preflight checks", Level: 1,
+		Status: progressCompleted,
+	})
 	runner := kubernetes.ExecRunner{Binary: resolvedKubectl}
 	collectors := collection.DefaultCollectors()
 	if prometheusConfig != nil || phoenixConfig != nil {
@@ -348,6 +375,7 @@ func runCollect(
 			factory,
 		)
 		if err != nil {
+			progress.Close()
 			_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 			return 1
 		}
@@ -365,8 +393,8 @@ func runCollect(
 		MaxLogBytes:             *maxLogBytes,
 		MaxTotalLogBytes:        *maxTotalLogBytes,
 		LogWorkers:              *logWorkers,
-		Progress: func(progress kubernetes.Progress) {
-			writeCollectionProgress(stderr, redactor, progress)
+		Progress: func(event kubernetes.Progress) {
+			writeCollectionProgress(progress, redactor, event)
 		},
 	}
 	var zitadelConfig *zitadel.Config
@@ -395,7 +423,7 @@ func runCollect(
 			Phoenix:    phoenixConfig,
 			Zitadel:    zitadelConfig,
 			Progress: func(event collection.Event) {
-				writeCollectionEvent(stderr, event)
+				writeCollectionEvent(progress, event)
 			},
 		},
 		runner,
@@ -404,20 +432,34 @@ func runCollect(
 		collectors,
 	)
 	if result.CanceledBeforeBundle {
+		progress.Close()
 		_, _ = fmt.Fprintln(stderr, "Collection canceled; no bundle was published.")
 		return 1
 	}
 	if err != nil {
 		if errors.Is(err, bundle.ErrCleanup) {
+			progress.Update(progressUpdate{
+				ID: "archive", Label: "Archive", Level: 1,
+				Status: progressWarning, Detail: "saved; cleanup incomplete",
+			})
+			writeProgressSummary(progress, redactor, result)
+			progress.Close()
 			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
 			_, _ = fmt.Fprintln(stderr, "Bundle created, but temporary data cleanup failed.")
 			return 1
 		}
+		progress.Update(progressUpdate{
+			ID: "collection", Label: "Qodo Scout collection",
+			Status: progressFailed,
+		})
+		progress.Close()
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
 	cleanupPending = false
 
+	writeProgressSummary(progress, redactor, result)
+	progress.Close()
 	_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
 	_, _ = fmt.Fprintf(
 		stdout,
@@ -437,6 +479,50 @@ func runCollect(
 		return 3
 	}
 	return 0
+}
+
+func writeProgressSummary(
+	progress *progressRenderer,
+	redactor *redact.Redactor,
+	result collection.Result,
+) {
+	// Stop the heartbeat before writing the final static transcript.
+	progress.Close()
+	status := progressCompleted
+	detail := ""
+	if result.Status == collection.CoveragePartial.String() {
+		status = progressWarning
+		detail = "partial"
+	}
+	progress.Update(progressUpdate{
+		ID: "collection", Label: "Qodo Scout collection",
+		Status: status, Detail: detail,
+	})
+	archiveSize := int64(-1)
+	if info, err := os.Stat(result.ArchivePath); err == nil {
+		archiveSize = info.Size()
+	}
+	progress.Summary(progressSummary{
+		ArchivePath: progressArchivePath(redactor, result.ArchivePath),
+		ArchiveSize: archiveSize,
+	})
+}
+
+func progressArchivePath(redactor *redact.Redactor, archivePath string) string {
+	cleanPath := filepath.Clean(archivePath)
+	home, err := homeDirectory()
+	if err == nil && filepath.IsAbs(home) {
+		if relative, relativeErr := filepath.Rel(home, cleanPath); relativeErr == nil &&
+			relative != ".." &&
+			!strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			if relative == "." {
+				cleanPath = "~"
+			} else {
+				cleanPath = filepath.Join("~", relative)
+			}
+		}
+	}
+	return terminalText(redactor, cleanPath)
 }
 
 type telemetryForwarderFactory func(
@@ -621,11 +707,17 @@ func configureTelemetryForwarders(
 }
 
 func printUsage(writer io.Writer) {
-	_, _ = fmt.Fprintln(writer, `Usage:
+	_, _ = fmt.Fprintln(writer, `Qodo Scout
+
+Usage:
   qodo-support-bundle collect [options]
   qodo-support-bundle version
   qodo-support-bundle help
 
 Collect bounded, redacted Kubernetes metadata, events, and container logs.
-The optional --check-zitadel probe runs inside one selected Platform container.`)
+The optional --check-zitadel probe runs inside one selected Platform container.
+Hierarchical progress and the final local-archive summary are written to stderr.
+Use --no-progress to suppress routine progress or --mascot for the interactive
+ASCII anteater animation. The resulting archive is saved locally.
+This CLI does not upload it. Share it separately through an approved support channel.`)
 }

@@ -218,13 +218,14 @@ func TestExecuteCollectsPhoenixAfterPrometheusBeforeZitadel(t *testing.T) {
 		result.Status != CoverageComplete.String() {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	if len(events) != 6 ||
-		events[0].Kind != EventPrometheusStarted ||
-		events[1].Kind != EventPrometheusComplete ||
-		events[2].Kind != EventPhoenixStarted ||
-		events[3].Kind != EventPhoenixComplete ||
-		events[4].Kind != EventZitadelStarted ||
-		events[5].Kind != EventZitadelPassed {
+	sourceEvents := optionalSourceEvents(events)
+	if len(sourceEvents) != 6 ||
+		sourceEvents[0].Kind != EventPrometheusStarted ||
+		sourceEvents[1].Kind != EventPrometheusComplete ||
+		sourceEvents[2].Kind != EventPhoenixStarted ||
+		sourceEvents[3].Kind != EventPhoenixComplete ||
+		sourceEvents[4].Kind != EventZitadelStarted ||
+		sourceEvents[5].Kind != EventZitadelPassed {
 		t.Fatalf("unexpected events: %+v", events)
 	}
 	metadata, ok := archive.manifest.Collection["phoenix"].(map[string]any)
@@ -289,10 +290,11 @@ func TestExecuteRecordsPhoenixPartialAndTreatsStagingAsFatal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sourceEvents := optionalSourceEvents(events)
 	if result.Status != CoveragePartial.String() ||
 		result.Coverage[SourcePhoenix].Reason != "span_limit_exceeded" ||
-		len(events) != 2 ||
-		events[1].Kind != EventPhoenixPartial ||
+		len(sourceEvents) != 2 ||
+		sourceEvents[1].Kind != EventPhoenixPartial ||
 		!strings.Contains(string(archive.files[issuesArtifactPath]), "collect Phoenix telemetry") {
 		t.Fatalf("partial Phoenix collection was not represented: result=%+v events=%+v", result, events)
 	}
