@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
 )
 
@@ -30,6 +31,7 @@ type progressRendererOptions struct {
 	Unicode     bool
 	Width       int
 	Now         func() time.Time
+	BubbleTea   bool
 }
 
 type progressStatus string
@@ -81,6 +83,10 @@ type progressRenderer struct {
 	stop        chan struct{}
 	done        chan struct{}
 	closeOnce   sync.Once
+	bubbleTea   bool
+	program     *tea.Program
+	programDone chan struct{}
+	programErr  error
 }
 
 func newProgressRenderer(options progressRendererOptions) *progressRenderer {
@@ -98,6 +104,7 @@ func newProgressRenderer(options progressRendererOptions) *progressRenderer {
 		now:         now,
 		startedAt:   now(),
 		stages:      make(map[string]progressStageState),
+		bubbleTea:   options.BubbleTea,
 	}
 }
 
@@ -114,6 +121,7 @@ func newCLIProgressRenderer(
 		Mascot:      mascot,
 		Unicode:     interactive && terminalUnicode(),
 		Width:       terminalWidth(writer),
+		BubbleTea:   interactive,
 	})
 	renderer.Start()
 	return renderer
@@ -121,7 +129,32 @@ func newCLIProgressRenderer(
 
 // Start begins the interactive heartbeat. Non-interactive renderers remain synchronous.
 func (renderer *progressRenderer) Start() {
-	if renderer == nil || !renderer.interactive || renderer.stop != nil {
+	if renderer == nil ||
+		!renderer.interactive ||
+		renderer.stop != nil ||
+		renderer.program != nil {
+		return
+	}
+	if renderer.bubbleTea {
+		renderer.program = tea.NewProgram(
+			newProgressModel(progressModelOptions{
+				Mascot:  renderer.mascot,
+				Unicode: renderer.unicode,
+				Width:   renderer.width,
+				Started: renderer.startedAt,
+			}),
+			tea.WithInput(nil),
+			tea.WithOutput(renderer.writer),
+			tea.WithoutSignalHandler(),
+		)
+		renderer.programDone = make(chan struct{})
+		go func() {
+			defer close(renderer.programDone)
+			_, err := renderer.program.Run()
+			renderer.mu.Lock()
+			renderer.programErr = err
+			renderer.mu.Unlock()
+		}()
 		return
 	}
 	renderer.stop = make(chan struct{})
@@ -153,6 +186,10 @@ func (renderer *progressRenderer) Update(update progressUpdate) {
 	if update.ID == "" || update.Label == "" {
 		return
 	}
+	if renderer.bubbleTea {
+		renderer.program.Send(progressUpdateMsg{Update: update, At: renderer.now()})
+		return
+	}
 	renderer.mu.Lock()
 	defer renderer.mu.Unlock()
 	renderer.clearLocked()
@@ -179,6 +216,10 @@ func (renderer *progressRenderer) Summary(summary progressSummary) {
 		return
 	}
 	summary.ArchivePath = terminalLine(summary.ArchivePath)
+	if renderer.bubbleTea {
+		renderer.program.Send(progressSummaryMsg{Summary: summary, At: renderer.now()})
+		return
+	}
 	renderer.mu.Lock()
 	defer renderer.mu.Unlock()
 	renderer.clearLocked()
@@ -225,6 +266,10 @@ func (renderer *progressRenderer) Step() {
 	if renderer == nil || !renderer.interactive {
 		return
 	}
+	if renderer.bubbleTea {
+		renderer.program.Send(progressTickMsg{})
+		return
+	}
 	renderer.mu.Lock()
 	defer renderer.mu.Unlock()
 	frames := spinnerFrames
@@ -245,11 +290,16 @@ func (renderer *progressRenderer) Step() {
 }
 
 // Close synchronously stops and clears the heartbeat. It is safe to call repeatedly.
-func (renderer *progressRenderer) Close() {
+func (renderer *progressRenderer) Close() error {
 	if renderer == nil {
-		return
+		return nil
 	}
 	renderer.closeOnce.Do(func() {
+		if renderer.bubbleTea && renderer.program != nil {
+			renderer.program.Send(progressQuitMsg{})
+			<-renderer.programDone
+			return
+		}
 		if renderer.stop != nil {
 			close(renderer.stop)
 			<-renderer.done
@@ -258,6 +308,22 @@ func (renderer *progressRenderer) Close() {
 		defer renderer.mu.Unlock()
 		renderer.clearLocked()
 	})
+	return renderer.Err()
+}
+
+func (renderer *progressRenderer) Err() error {
+	if renderer == nil {
+		return nil
+	}
+	renderer.mu.Lock()
+	defer renderer.mu.Unlock()
+	return renderer.programErr
+}
+
+func closeProgress(renderer *progressRenderer, stderr io.Writer) {
+	if err := renderer.Close(); err != nil {
+		_, _ = fmt.Fprintln(stderr, "Qodo Scout interactive display stopped unexpectedly.")
+	}
 }
 
 func (renderer *progressRenderer) clearLocked() {

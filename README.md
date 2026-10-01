@@ -101,9 +101,10 @@ qodo-support-bundle collect \
 ```
 
 Routine progress is written to stderr so stdout remains stable for scripts. In
-an interactive terminal, Qodo Scout displays a subtle heartbeat between
-newline-terminated stage messages. Redirected stderr and CI output contain only
-stable lines, without animation or carriage returns.
+an interactive terminal, Qodo Scout uses an inline Bubble Tea display that
+keeps the current hierarchy visible without entering the alternate screen, so
+terminal history remains available. Redirected stderr and CI output contain
+only stable lines, without animation or terminal control sequences.
 
 Progress is grouped into high-level stages with nested discovery, scanning,
 logs, workload, optional telemetry, and archive work. Interactive terminals use
@@ -124,6 +125,9 @@ Saved locally. Share separately through an approved support channel.
 ```
 
 ```bash
+# Launch the optional setup wizard. Bare `collect` never prompts.
+qodo-support-bundle collect --interactive
+
 # Suppress routine progress; warnings, errors, and stdout results remain.
 qodo-support-bundle collect --no-progress
 
@@ -133,6 +137,46 @@ qodo-support-bundle collect --mascot
 
 `--mascot` automatically falls back to stable stage lines when stderr is not a
 TTY and is disabled by `--no-progress`.
+
+The setup wizard requires both stdin and stderr to be interactive terminals.
+In CI or with redirected stderr it exits with usage code `2` instead of
+waiting for input. Escape or Ctrl+C cancels setup with exit code `1` before
+collection, so no archive is created. Existing flags remain the automation
+interface; when combined with `--interactive`, supported flags become initial
+answers that can be reviewed and edited.
+
+The wizard first selects a Kubernetes context, then discovers namespace names
+through that context. It asks for namespace scope, log lookback, optional
+Prometheus, Phoenix, or Zitadel diagnostics and their dependent settings, the
+output path, and final confirmation. It never requests credentials or lists
+Kubernetes Secrets. GKE contexts receive a friendly cluster/location/project
+label while retaining the exact kubeconfig name, and the kubeconfig's actual
+current context is marked `CURRENT`. Recognized production GKE cluster names
+receive a factual read-only/sensitive-diagnostics confirmation. A typical flow
+is:
+
+```text
+Step 1 of 5 · Choose a Kubernetes cluster
+Qodo Scout · Secure diagnostics for Qodo on-prem environments
+CURRENT · development-cluster · us-central1 · codium-development
+  — gke_codium-development_us-central1_development-cluster
+Checking cluster access and discovering namespaces…
+
+Step 2 of 5 · Choose namespace scope
+Selected namespaces: bundle-alon-google, monitoring
+Use arrows to move · Space or x to toggle multiple · Enter to continue
+
+Step 3 of 5 · Choose optional diagnostics
+Prometheus telemetry
+Step 4 of 5 · Choose output path
+automatic default
+Step 5 of 5 · Review and confirm
+Collect
+```
+
+Set `ACCESSIBLE=1` to use Huh's plain accessible form mode. `--mascot` and
+`--no-progress` affect collection progress after setup; they do not disable the
+wizard.
 
 Use `--namespaces qodo-onprem,rabbitmq-system` for several explicit namespaces,
 or `--all-namespaces` for literal cluster-wide collection. The latter can

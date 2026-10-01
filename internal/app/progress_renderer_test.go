@@ -156,6 +156,51 @@ func TestProgressRendererCloseStopsStartedHeartbeatAndIsIdempotent(t *testing.T)
 	}
 }
 
+func TestProgressRendererBubbleTeaRunsInlineAndStopsSynchronously(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)
+	var output bytes.Buffer
+	renderer := newProgressRenderer(progressRendererOptions{
+		Writer:      &output,
+		Enabled:     true,
+		Interactive: true,
+		Unicode:     true,
+		Width:       80,
+		Now:         func() time.Time { return now },
+		BubbleTea:   true,
+	})
+
+	renderer.Start()
+	renderer.Update(progressUpdate{
+		ID: "collection", Label: "Qodo Scout collection", Status: progressActive,
+	})
+	now = now.Add(time.Second)
+	renderer.Update(progressUpdate{
+		ID: "collection", Label: "Qodo Scout collection", Status: progressCompleted,
+	})
+	renderer.Summary(progressSummary{
+		ArchivePath: "/tmp/bundle.tar.gz",
+		ArchiveSize: 2048,
+	})
+	renderer.Close()
+	renderer.Close()
+
+	got := output.String()
+	if !strings.Contains(got, "Qodo Scout summary") ||
+		!strings.Contains(got, "Archive: /tmp/bundle.tar.gz (2.0 KiB)") {
+		t.Fatalf("Bubble Tea final view missing: %q", got)
+	}
+	if !strings.Contains(got, "\x1b") {
+		t.Fatalf("Bubble Tea renderer did not emit inline terminal controls: %q", got)
+	}
+	if strings.Contains(got, "\x1b[?1049h") || strings.Contains(got, "\x1b[?1049l") {
+		t.Fatalf("Bubble Tea used alternate screen controls: %q", got)
+	}
+	if err := renderer.Err(); err != nil {
+		t.Fatalf("Bubble Tea renderer error: %v", err)
+	}
+}
+
 func TestProgressRendererTTYHierarchyGoldenTranscript(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)

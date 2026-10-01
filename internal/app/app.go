@@ -48,13 +48,38 @@ var Version = "dev"
 
 // Run executes the support-bundle CLI and returns its process exit code.
 func Run(ctx context.Context, arguments []string, stdout io.Writer, stderr io.Writer) int {
+	return run(
+		ctx,
+		arguments,
+		os.Stdin,
+		stdout,
+		stderr,
+		defaultInteractiveRuntime(),
+	)
+}
+
+func run(
+	ctx context.Context,
+	arguments []string,
+	stdin io.Reader,
+	stdout io.Writer,
+	stderr io.Writer,
+	interactiveRuntime interactiveRuntime,
+) int {
 	if len(arguments) == 0 {
 		printUsage(stderr)
 		return 2
 	}
 	switch arguments[0] {
 	case "collect":
-		return runCollect(ctx, arguments[1:], stdout, stderr)
+		return runCollect(
+			ctx,
+			arguments[1:],
+			stdin,
+			stdout,
+			stderr,
+			interactiveRuntime,
+		)
 	case "version":
 		_, _ = fmt.Fprintln(stdout, Version)
 		return 0
@@ -71,8 +96,10 @@ func Run(ctx context.Context, arguments []string, stdout io.Writer, stderr io.Wr
 func runCollect(
 	ctx context.Context,
 	arguments []string,
+	stdin io.Reader,
 	stdout io.Writer,
 	stderr io.Writer,
+	interactiveRuntime interactiveRuntime,
 ) (exitCode int) {
 	collectionTime := currentTime().UTC()
 	flags := flag.NewFlagSet("collect", flag.ContinueOnError)
@@ -108,6 +135,7 @@ func runCollect(
 		"Maximum bytes retained across Kubernetes metadata records",
 	)
 	logWorkers := flags.Int("log-workers", defaultLogWorkers, "Concurrent log readers")
+	interactive := flags.Bool("interactive", false, "Launch the interactive collection setup wizard")
 	noProgress := flags.Bool("no-progress", false, "Suppress routine progress output")
 	mascot := flags.Bool("mascot", false, "Use the Qodo Scout anteater animation in interactive terminals")
 	activity := flags.String("activity", "", "Customer description of current activity")
@@ -201,6 +229,100 @@ func runCollect(
 		if err != nil {
 			_, _ = fmt.Fprintln(stderr, err)
 			return 2
+		}
+	}
+	if *interactive {
+		if interactiveRuntime.InputTTY == nil ||
+			interactiveRuntime.OutputTTY == nil ||
+			!interactiveRuntime.InputTTY(stdin) ||
+			!interactiveRuntime.OutputTTY(stderr) {
+			_, _ = fmt.Fprintln(stderr, errInteractiveRequiresTTY)
+			return 2
+		}
+		if interactiveRuntime.NewDiscovery == nil || interactiveRuntime.Forms == nil {
+			_, _ = fmt.Fprintln(stderr, "interactive setup is unavailable")
+			return 1
+		}
+		discovery, discoveryErr := interactiveRuntime.NewDiscovery(*kubectl, *kubeconfig)
+		if discoveryErr != nil {
+			_, _ = fmt.Fprintln(
+				stderr,
+				terminalText(redact.New(), discoveryErr.Error()),
+			)
+			return 1
+		}
+		settings, wizardErr := runInteractiveWizard(
+			ctx,
+			interactiveSettings{
+				Context:             *kubeContext,
+				AllNamespaces:       *allNamespaces,
+				Namespaces:          selectedNamespaces,
+				Since:               *since,
+				Prometheus:          *collectPrometheus,
+				PrometheusNamespace: *prometheusNamespace,
+				Phoenix:             *collectPhoenix,
+				PhoenixNamespace:    *phoenixNamespace,
+				TraceID:             *traceID,
+				Zitadel:             *checkZitadel,
+				PlatformNamespace:   *platformNamespace,
+				PlatformPod:         *platformPod,
+				PlatformContainer:   *platformContainer,
+				Output:              *output,
+				Confirmed:           true,
+			},
+			stdin,
+			stderr,
+			interactiveWizardDependencies{
+				InputTTY:  interactiveRuntime.InputTTY,
+				OutputTTY: interactiveRuntime.OutputTTY,
+				Discovery: discovery,
+				Forms:     interactiveRuntime.Forms,
+			},
+		)
+		if wizardErr != nil {
+			_, _ = fmt.Fprintln(stderr, wizardErr)
+			if errors.Is(wizardErr, errInteractiveCanceled) {
+				return 1
+			}
+			return 1
+		}
+		*kubeContext = settings.Context
+		*allNamespaces = settings.AllNamespaces
+		selectedNamespaces = append([]string(nil), settings.Namespaces...)
+		*since = settings.Since
+		*collectPrometheus = settings.Prometheus
+		*prometheusNamespace = settings.PrometheusNamespace
+		*collectPhoenix = settings.Phoenix
+		*phoenixNamespace = settings.PhoenixNamespace
+		*traceID = settings.TraceID
+		*checkZitadel = settings.Zitadel
+		*platformNamespace = settings.PlatformNamespace
+		*platformPod = settings.PlatformPod
+		*platformContainer = settings.PlatformContainer
+		*output = settings.Output
+		if !settings.Prometheus {
+			*prometheusNamespace = ""
+			visited["prometheus-namespace"] = false
+		}
+		if !settings.Phoenix {
+			*phoenixNamespace = ""
+			*traceID = ""
+			visited["phoenix-namespace"] = false
+			visited["trace-id"] = false
+		}
+		if !settings.Zitadel {
+			*platformNamespace = ""
+			*platformPod = ""
+			*platformContainer = ""
+			visited["platform-namespace"] = false
+			visited["platform-pod"] = false
+			visited["platform-container"] = false
+			visited["probe-timeout"] = false
+		}
+		if !settings.AllNamespaces {
+			*excludeSystemNamespaces = false
+		} else if !visited["exclude-system-namespaces"] {
+			*excludeSystemNamespaces = true
 		}
 	}
 	if err := validateCollectFlags(
@@ -313,7 +435,7 @@ func runCollect(
 		_, _ = fmt.Fprintln(stderr, message)
 	}
 	progress := newCLIProgressRenderer(stderr, !*noProgress, *mascot)
-	defer progress.Close()
+	defer closeProgress(progress, stderr)
 	progress.Update(progressUpdate{
 		ID: "collection", Label: "Qodo Scout collection", Status: progressActive,
 	})
@@ -329,7 +451,7 @@ func runCollect(
 	}
 	builder, err = bundle.New(*output, bundleOptions...)
 	if err != nil {
-		progress.Close()
+		closeProgress(progress, stderr)
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
@@ -350,7 +472,7 @@ func runCollect(
 			ID: "preflight", Label: "Preflight checks", Level: 1,
 			Status: progressFailed,
 		})
-		progress.Close()
+		closeProgress(progress, stderr)
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
@@ -375,7 +497,7 @@ func runCollect(
 			factory,
 		)
 		if err != nil {
-			progress.Close()
+			closeProgress(progress, stderr)
 			_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 			return 1
 		}
@@ -432,7 +554,7 @@ func runCollect(
 		collectors,
 	)
 	if result.CanceledBeforeBundle {
-		progress.Close()
+		closeProgress(progress, stderr)
 		_, _ = fmt.Fprintln(stderr, "Collection canceled; no bundle was published.")
 		return 1
 	}
@@ -443,7 +565,7 @@ func runCollect(
 				Status: progressWarning, Detail: "saved; cleanup incomplete",
 			})
 			writeProgressSummary(progress, redactor, result)
-			progress.Close()
+			closeProgress(progress, stderr)
 			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
 			_, _ = fmt.Fprintln(stderr, "Bundle created, but temporary data cleanup failed.")
 			return 1
@@ -452,14 +574,14 @@ func runCollect(
 			ID: "collection", Label: "Qodo Scout collection",
 			Status: progressFailed,
 		})
-		progress.Close()
+		closeProgress(progress, stderr)
 		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
 		return 1
 	}
 	cleanupPending = false
 
 	writeProgressSummary(progress, redactor, result)
-	progress.Close()
+	closeProgress(progress, stderr)
 	_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
 	_, _ = fmt.Fprintf(
 		stdout,
@@ -486,8 +608,6 @@ func writeProgressSummary(
 	redactor *redact.Redactor,
 	result collection.Result,
 ) {
-	// Stop the heartbeat before writing the final static transcript.
-	progress.Close()
 	status := progressCompleted
 	detail := ""
 	if result.Status == collection.CoveragePartial.String() {
@@ -718,6 +838,7 @@ Collect bounded, redacted Kubernetes metadata, events, and container logs.
 The optional --check-zitadel probe runs inside one selected Platform container.
 Hierarchical progress and the final local-archive summary are written to stderr.
 Use --no-progress to suppress routine progress or --mascot for the interactive
-ASCII anteater animation. The resulting archive is saved locally.
+ASCII anteater animation. Use collect --interactive for the optional setup
+wizard when stdin and stderr are terminals. The resulting archive is saved locally.
 This CLI does not upload it. Share it separately through an approved support channel.`)
 }
