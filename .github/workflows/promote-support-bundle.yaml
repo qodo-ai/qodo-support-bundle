@@ -9,6 +9,7 @@ on:
         type: string
 
 permissions:
+  attestations: read
   contents: read
   id-token: write
 
@@ -36,6 +37,57 @@ jobs:
           ref: main
           persist-credentials: false
 
+      - name: Resolve GitHub release tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RELEASE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REQUESTED_RELEASE" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Unsupported release version: $REQUESTED_RELEASE" >&2
+            exit 1
+          fi
+          candidates=("$REQUESTED_RELEASE")
+          if [[ "$REQUESTED_RELEASE" != v* ]]; then
+            candidates+=("v${REQUESTED_RELEASE}")
+          fi
+          release_tag=
+          for candidate in "${candidates[@]}"; do
+            if gh release view "$candidate" --json tagName >/dev/null 2>&1; then
+              release_tag="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$release_tag" ]]; then
+            echo "GitHub release not found: $REQUESTED_RELEASE" >&2
+            exit 1
+          fi
+          release_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$release_tag" --jq .sha)"
+          {
+            echo "tag=${release_tag}"
+            echo "version=${release_tag#v}"
+            echo "sha=${release_sha}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify GitHub release provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir release
+          gh release download "$RELEASE_TAG" --dir release
+          for asset in release/*; do
+            gh attestation verify "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-support-bundle.yaml" \
+              --source-digest "$RELEASE_SHA" \
+              --source-ref "refs/tags/$RELEASE_TAG"
+          done
+          (cd release && sha256sum --strict --check checksums.sha256)
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
@@ -47,5 +99,6 @@ jobs:
 
       - name: Promote byte-identical release
         env:
-          QODO_SUPPORT_BUNDLE_VERSION: ${{ inputs.version }}
+          QODO_SUPPORT_BUNDLE_RELEASE_DIR: ${{ github.workspace }}/release
+          QODO_SUPPORT_BUNDLE_VERSION: ${{ steps.release.outputs.version }}
         run: ./scripts/promote-gcs.sh

@@ -6,6 +6,7 @@ SOURCE_BUCKET="${QODO_SUPPORT_BUNDLE_SOURCE_BUCKET:-qodo-cli-public-dev}"
 DESTINATION_BUCKET="${QODO_SUPPORT_BUNDLE_DESTINATION_BUCKET:-qodo-cli-public}"
 PREFIX="${QODO_SUPPORT_BUNDLE_PREFIX:-support-bundle}"
 VERSION="${QODO_SUPPORT_BUNDLE_VERSION:?QODO_SUPPORT_BUNDLE_VERSION is required}"
+RELEASE_DIR="${QODO_SUPPORT_BUNDLE_RELEASE_DIR:?QODO_SUPPORT_BUNDLE_RELEASE_DIR is required}"
 
 case "$VERSION" in
   -*) echo "promote-gcs: version must not start with '-'" >&2; exit 1 ;;
@@ -45,22 +46,50 @@ actual_files="$(
   exit 1
 }
 
-manifest_files="$(
-  awk '
+if ! awk '
     NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ { exit 1 }
     { print $2 }
-  ' "$work/checksums.sha256" |
-    LC_ALL=C sort
-)" || {
+  ' "$work/checksums.sha256" > "$work/canary-manifest-files"; then
   echo "promote-gcs: checksum manifest is malformed" >&2
   exit 1
-}
+fi
+manifest_files="$(LC_ALL=C sort "$work/canary-manifest-files")"
 [ "$manifest_files" = "$expected_binaries" ] || {
   echo "promote-gcs: checksum manifest inventory does not match the five binaries" >&2
   exit 1
 }
 
-(cd "$work" && sha256sum --check checksums.sha256)
+(cd "$work" && sha256sum --strict --check checksums.sha256)
+
+release_files="$(
+  find "$RELEASE_DIR" -mindepth 1 -maxdepth 1 -type f -exec basename {} \; |
+    LC_ALL=C sort
+)"
+[ "$release_files" = "$expected_files" ] || {
+  echo "promote-gcs: authenticated release inventory does not match the release contract" >&2
+  exit 1
+}
+
+if ! awk '
+    NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ { exit 1 }
+    { print $2 }
+  ' "$RELEASE_DIR/checksums.sha256" > "$work/release-manifest-files"; then
+  echo "promote-gcs: authenticated release checksum manifest is malformed" >&2
+  exit 1
+fi
+release_manifest_files="$(LC_ALL=C sort "$work/release-manifest-files")"
+[ "$release_manifest_files" = "$expected_binaries" ] || {
+  echo "promote-gcs: authenticated release checksum inventory does not match the five binaries" >&2
+  exit 1
+}
+(cd "$RELEASE_DIR" && sha256sum --strict --check checksums.sha256)
+
+printf '%s\n' "$expected_files" | while IFS= read -r filename; do
+  cmp -s "${RELEASE_DIR}/${filename}" "${work}/${filename}" || {
+    echo "promote-gcs: dev canary differs from authenticated release: ${filename}" >&2
+    exit 1
+  }
+done
 
 upload_immutable() {
   source_path=$1
