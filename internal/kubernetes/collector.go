@@ -296,6 +296,11 @@ func Collect(
 			}
 		}
 	}
+	reportProgress(config, Progress{
+		Stage:   "scan_complete",
+		Current: len(report.Namespaces),
+		Total:   len(namespaces),
+	})
 	if len(report.Namespaces) == 0 {
 		return report, errors.New("could not collect pods from any requested namespace")
 	}
@@ -308,7 +313,7 @@ func Collect(
 		Total:   len(logRequests),
 		Workers: min(workers, len(logRequests)),
 	})
-	if err := collectLogs(
+	logsErr := collectLogs(
 		ctx,
 		config,
 		runner,
@@ -316,8 +321,16 @@ func Collect(
 		redactor,
 		logRequests,
 		&report,
-	); err != nil {
-		return report, err
+	)
+	if len(logRequests) > 0 {
+		reportProgress(config, Progress{
+			Stage:   "logs_complete",
+			Current: report.LogStreamsCollected,
+			Total:   len(logRequests),
+		})
+	}
+	if logsErr != nil {
+		return report, logsErr
 	}
 	return report, nil
 }

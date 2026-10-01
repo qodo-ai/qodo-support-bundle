@@ -105,6 +105,24 @@ an interactive terminal, Qodo Scout displays a subtle heartbeat between
 newline-terminated stage messages. Redirected stderr and CI output contain only
 stable lines, without animation or carriage returns.
 
+Progress is grouped into high-level stages with nested discovery, scanning,
+logs, workload, optional telemetry, and archive work. Interactive terminals use
+completed, active, warning/partial, and failed markers, with ASCII-safe markers
+when Unicode is unavailable. Reliable counts and elapsed times are shown when
+known; lines are shortened to the terminal width. A final stderr summary lists
+major outcomes, total duration, and the local archive path and size. For
+example, redirected output uses stable lines such as:
+
+```text
+[active] Qodo Scout collection
+  [active] Kubernetes diagnostics
+    [done] Namespace discovery - 2/2 namespaces
+  [done] Kubernetes diagnostics - 2/2 namespaces
+Qodo Scout summary
+Archive: /secure/cases/case-123.tar.gz (2.4 MiB)
+Saved locally. Share separately through an approved support channel.
+```
+
 ```bash
 # Suppress routine progress; warnings, errors, and stdout results remain.
 qodo-support-bundle collect --no-progress

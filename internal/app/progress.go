@@ -1,8 +1,6 @@
 package app
 
 import (
-	"fmt"
-
 	"github.com/qodo-ai/qodo-support-bundle/internal/bundle"
 	"github.com/qodo-ai/qodo-support-bundle/internal/collection"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
@@ -12,61 +10,118 @@ import (
 func writeCollectionEvent(renderer *progressRenderer, event collection.Event) {
 	switch event.Kind {
 	case collection.EventKubernetesStarted:
-		renderer.Stage(string(event.Kind), "Checking cluster access...")
+		renderer.Update(progressUpdate{
+			ID: "kubernetes", Label: "Kubernetes diagnostics", Level: 1,
+			Status: progressActive,
+		})
 	case collection.EventKubernetesComplete:
-		renderer.Stage(string(event.Kind), "Kubernetes diagnostics: complete.")
+		renderer.Update(progressUpdate{
+			ID: "kubernetes", Label: "Kubernetes diagnostics", Level: 1,
+			Status: progressCompleted, Current: event.Current, Total: event.Total,
+			Unit: plural(event.Total, "namespace", "namespaces"),
+		})
 	case collection.EventKubernetesPartial:
-		renderer.Stage(string(event.Kind), "Kubernetes diagnostics: partial collection recorded.")
+		renderer.Update(progressUpdate{
+			ID: "kubernetes", Label: "Kubernetes diagnostics", Level: 1,
+			Status: progressWarning, Detail: "partial",
+			Current: event.Current, Total: event.Total,
+			Unit: plural(event.Total, "namespace", "namespaces"),
+		})
 	case collection.EventWorkloadStarted:
-		renderer.Stage(
-			string(event.Kind),
-			fmt.Sprintf(
-				"Collecting workload context for %d %s...",
-				event.Total,
-				plural(event.Total, "namespace", "namespaces"),
-			),
-		)
+		renderer.Update(progressUpdate{
+			ID: "workload", Label: "Workload context", Level: 1,
+			Status: progressActive, Current: 0, Total: event.Total,
+			Unit: plural(event.Total, "namespace", "namespaces"),
+		})
 	case collection.EventWorkloadProgress:
-		renderer.Stage(
-			string(event.Kind),
-			fmt.Sprintf(
-				"Workload context: %d/%d namespaces processed.",
-				event.Current,
-				event.Total,
-			),
-		)
+		renderer.Update(progressUpdate{
+			ID: "workload", Label: "Workload context", Level: 1,
+			Status: progressActive, Current: event.Current, Total: event.Total,
+			Unit: plural(event.Total, "namespace", "namespaces"),
+		})
 	case collection.EventWorkloadComplete:
-		renderer.Stage(string(event.Kind), "Workload context: complete.")
+		renderer.Update(progressUpdate{
+			ID: "workload", Label: "Workload context", Level: 1,
+			Status: progressCompleted, Current: event.Current, Total: event.Total,
+			Unit: plural(event.Total, "namespace", "namespaces"),
+		})
 	case collection.EventWorkloadPartial:
-		renderer.Stage(string(event.Kind), "Workload context: partial collection recorded.")
+		renderer.Update(progressUpdate{
+			ID: "workload", Label: "Workload context", Level: 1,
+			Status: progressWarning, Detail: "partial",
+			Current: event.Current, Total: event.Total,
+			Unit: plural(event.Total, "namespace", "namespaces"),
+		})
 	case collection.EventWorkloadUnavailable:
-		renderer.Stage(string(event.Kind), "Workload context: unavailable; diagnostic recorded.")
+		renderer.Update(progressUpdate{
+			ID: "workload", Label: "Workload context", Level: 1,
+			Status: progressFailed, Detail: "unavailable",
+		})
 	case collection.EventArchiveSummary:
-		renderer.Stage(string(event.Kind), "Preparing archive summary...")
+		renderer.Update(progressUpdate{
+			ID: "archive", Label: "Archive", Level: 1,
+			Status: progressActive, Detail: "preparing summary",
+		})
 	case collection.EventPrometheusStarted:
-		renderer.Stage(string(event.Kind), "Collecting Prometheus telemetry...")
+		renderer.Update(progressUpdate{
+			ID: "prometheus", Label: "Prometheus telemetry", Level: 1,
+			Status: progressActive,
+		})
 	case collection.EventPrometheusComplete:
-		renderer.Stage(string(event.Kind), "Prometheus telemetry: complete.")
+		renderer.Update(progressUpdate{
+			ID: "prometheus", Label: "Prometheus telemetry", Level: 1,
+			Status: progressCompleted,
+		})
 	case collection.EventPrometheusPartial:
-		renderer.Stage(string(event.Kind), "Prometheus telemetry: partial collection recorded.")
+		renderer.Update(progressUpdate{
+			ID: "prometheus", Label: "Prometheus telemetry", Level: 1,
+			Status: progressWarning, Detail: "partial",
+		})
 	case collection.EventPrometheusUnavailable:
-		renderer.Stage(string(event.Kind), "Prometheus telemetry: unavailable; diagnostic recorded.")
+		renderer.Update(progressUpdate{
+			ID: "prometheus", Label: "Prometheus telemetry", Level: 1,
+			Status: progressFailed, Detail: "unavailable",
+		})
 	case collection.EventPhoenixStarted:
-		renderer.Stage(string(event.Kind), "Collecting Phoenix telemetry...")
+		renderer.Update(progressUpdate{
+			ID: "phoenix", Label: "Phoenix telemetry", Level: 1,
+			Status: progressActive,
+		})
 	case collection.EventPhoenixComplete:
-		renderer.Stage(string(event.Kind), "Phoenix telemetry: complete.")
+		renderer.Update(progressUpdate{
+			ID: "phoenix", Label: "Phoenix telemetry", Level: 1,
+			Status: progressCompleted,
+		})
 	case collection.EventPhoenixPartial:
-		renderer.Stage(string(event.Kind), "Phoenix telemetry: partial collection recorded.")
+		renderer.Update(progressUpdate{
+			ID: "phoenix", Label: "Phoenix telemetry", Level: 1,
+			Status: progressWarning, Detail: "partial",
+		})
 	case collection.EventPhoenixUnavailable:
-		renderer.Stage(string(event.Kind), "Phoenix telemetry: unavailable; diagnostic recorded.")
+		renderer.Update(progressUpdate{
+			ID: "phoenix", Label: "Phoenix telemetry", Level: 1,
+			Status: progressFailed, Detail: "unavailable",
+		})
 	case collection.EventZitadelStarted:
-		renderer.Stage(string(event.Kind), "Checking Platform-to-Zitadel connectivity...")
+		renderer.Update(progressUpdate{
+			ID: "zitadel", Label: "Zitadel connectivity", Level: 1,
+			Status: progressActive,
+		})
 	case collection.EventZitadelUnavailable:
-		renderer.Stage(string(event.Kind), "Zitadel connectivity probe: unavailable; diagnostic recorded.")
+		renderer.Update(progressUpdate{
+			ID: "zitadel", Label: "Zitadel connectivity", Level: 1,
+			Status: progressFailed, Detail: "unavailable",
+		})
 	case collection.EventZitadelDiagnosticFailure:
-		renderer.Stage(string(event.Kind), "Zitadel connectivity: diagnostic failure recorded.")
+		renderer.Update(progressUpdate{
+			ID: "zitadel", Label: "Zitadel connectivity", Level: 1,
+			Status: progressFailed, Detail: "diagnostic failure",
+		})
 	case collection.EventZitadelPassed:
-		renderer.Stage(string(event.Kind), "Zitadel connectivity: passed.")
+		renderer.Update(progressUpdate{
+			ID: "zitadel", Label: "Zitadel connectivity", Level: 1,
+			Status: progressCompleted,
+		})
 	}
 }
 
@@ -77,59 +132,102 @@ func writeCollectionProgress(
 ) {
 	switch progress.Stage {
 	case "discover_namespaces":
-		renderer.Stage(progress.Stage, "Discovering Kubernetes application namespaces...")
+		renderer.Update(progressUpdate{
+			ID: "kubernetes.discovery", Label: "Namespace discovery", Level: 2,
+			Status: progressActive,
+		})
 	case "namespaces_discovered":
-		renderer.Stage(
-			progress.Stage,
-			fmt.Sprintf("Discovered %d namespaces.", progress.Total),
-		)
+		renderer.Update(progressUpdate{
+			ID: "kubernetes.discovery", Label: "Namespace discovery", Level: 2,
+			Status: progressCompleted, Current: progress.Total, Total: progress.Total,
+			Unit: plural(progress.Total, "namespace", "namespaces"),
+		})
 	case "scan_namespace":
 		if progress.Current == 1 ||
 			progress.Current == progress.Total ||
 			progress.Current%5 == 0 {
-			renderer.Stage(
-				progress.Stage,
-				fmt.Sprintf(
-					"Scanning namespace %d/%d: %s",
-					progress.Current,
-					progress.Total,
-					terminalText(redactor, progress.Namespace),
-				),
-			)
+			renderer.Update(progressUpdate{
+				ID: "kubernetes.scan", Label: "Namespace scan", Level: 2,
+				Status: progressActive, Current: progress.Current, Total: progress.Total,
+				Unit:   plural(progress.Total, "namespace", "namespaces"),
+				Detail: terminalText(redactor, progress.Namespace),
+			})
 		}
+	case "scan_complete":
+		status := progressCompleted
+		detail := ""
+		if progress.Current < progress.Total {
+			status = progressWarning
+			detail = "partial"
+		}
+		renderer.Update(progressUpdate{
+			ID: "kubernetes.scan", Label: "Namespace scan", Level: 2,
+			Status: status, Current: progress.Current, Total: progress.Total,
+			Unit:   plural(progress.Total, "namespace", "namespaces"),
+			Detail: detail,
+		})
 	case "collect_logs":
-		renderer.Stage(
-			progress.Stage,
-			fmt.Sprintf(
-				"Collecting %d container log streams with %d workers...",
-				progress.Total,
-				progress.Workers,
-			),
-		)
+		if progress.Total == 0 {
+			renderer.Update(progressUpdate{
+				ID: "kubernetes.logs", Label: "Container logs", Level: 2,
+				Status: progressCompleted, Detail: "no streams",
+			})
+			break
+		}
+		renderer.Update(progressUpdate{
+			ID: "kubernetes.logs", Label: "Container logs", Level: 2,
+			Status: progressActive, Current: 0, Total: progress.Total,
+			Unit: plural(progress.Total, "stream", "streams"),
+		})
 	case "logs_progress":
-		renderer.Stage(
-			progress.Stage,
-			fmt.Sprintf(
-				"Collected log streams: %d/%d",
-				progress.Current,
-				progress.Total,
-			),
-		)
+		renderer.Update(progressUpdate{
+			ID: "kubernetes.logs", Label: "Container logs", Level: 2,
+			Status: progressActive, Current: progress.Current, Total: progress.Total,
+			Unit: plural(progress.Total, "stream", "streams"),
+		})
+	case "logs_complete":
+		status := progressCompleted
+		detail := ""
+		if progress.Current < progress.Total {
+			status = progressWarning
+			detail = "partial"
+		}
+		renderer.Update(progressUpdate{
+			ID: "kubernetes.logs", Label: "Container logs", Level: 2,
+			Status: status, Current: progress.Current, Total: progress.Total,
+			Unit:   plural(progress.Total, "stream", "streams"),
+			Detail: detail,
+		})
 	}
 }
 
 func writeBundleProgress(renderer *progressRenderer, progress bundle.Progress) {
 	switch progress.Stage {
 	case bundle.ProgressManifest:
-		renderer.Stage(string(progress.Stage), "Creating archive manifest...")
+		renderer.Update(progressUpdate{
+			ID: "archive", Label: "Archive", Level: 1,
+			Status: progressActive, Detail: "creating manifest",
+		})
 	case bundle.ProgressChecksums:
-		renderer.Stage(string(progress.Stage), "Writing archive checksums...")
+		renderer.Update(progressUpdate{
+			ID: "archive", Label: "Archive", Level: 1,
+			Status: progressActive, Detail: "writing checksums",
+		})
 	case bundle.ProgressPacking:
-		renderer.Stage(string(progress.Stage), "Packing archive...")
+		renderer.Update(progressUpdate{
+			ID: "archive", Label: "Archive", Level: 1,
+			Status: progressActive, Detail: "packing",
+		})
 	case bundle.ProgressFinalizing:
-		renderer.Stage(string(progress.Stage), "Finalizing archive...")
+		renderer.Update(progressUpdate{
+			ID: "archive", Label: "Archive", Level: 1,
+			Status: progressActive, Detail: "finalizing",
+		})
 	case bundle.ProgressComplete:
-		renderer.Stage(string(progress.Stage), "Archive finalized.")
+		renderer.Update(progressUpdate{
+			ID: "archive", Label: "Archive", Level: 1,
+			Status: progressCompleted,
+		})
 	}
 }
 

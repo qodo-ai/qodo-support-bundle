@@ -225,9 +225,17 @@ func Execute(
 		kubernetesErr,
 	)
 	if result.Coverage[SourceKubernetes].State == CoverageComplete {
-		reportEvent(request.Progress, Event{Kind: EventKubernetesComplete})
+		reportEvent(request.Progress, Event{
+			Kind:    EventKubernetesComplete,
+			Current: len(kubernetesReport.Namespaces),
+			Total:   kubernetesReport.NamespacesRequested,
+		})
 	} else {
-		reportEvent(request.Progress, Event{Kind: EventKubernetesPartial})
+		reportEvent(request.Progress, Event{
+			Kind:    EventKubernetesPartial,
+			Current: len(kubernetesReport.Namespaces),
+			Total:   kubernetesReport.NamespacesRequested,
+		})
 	}
 
 	workloadNamespaces := workloadCollectionNamespaces(request.Kubernetes, kubernetesReport)

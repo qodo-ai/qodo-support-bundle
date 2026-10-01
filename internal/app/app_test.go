@@ -144,8 +144,8 @@ func TestCollectOmitsUsernameFromResolvedKubectlLog(t *testing.T) {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
 	logged := stderr.String()
-	if !strings.Contains(logged, "Using kubectl:") {
-		t.Fatalf("missing kubectl status log: %s", logged)
+	if !strings.Contains(logged, "[done] Preflight checks") {
+		t.Fatalf("missing redacted preflight status: %s", logged)
 	}
 	if strings.Contains(logged, username) || strings.Contains(logged, kubectl) {
 		t.Fatalf("stderr leaked identifying kubectl path: %s", logged)
@@ -182,19 +182,23 @@ func TestCollectKeepsStdoutStableAndReportsQodoScoutStages(t *testing.T) {
 		t.Fatalf("stdout changed:\ngot  %q\nwant %q", stdout.String(), wantStdout)
 	}
 	for _, expected := range []string{
-		"Preparing Qodo Scout collection...",
-		"Checking cluster access...",
-		"Kubernetes diagnostics: complete.",
-		"Collecting workload context for 1 namespace...",
-		"Workload context: 1/1 namespaces processed.",
-		"Workload context: complete.",
-		"Preparing archive summary...",
-		"Creating archive manifest...",
-		"Writing archive checksums...",
-		"Packing archive...",
-		"Finalizing archive...",
-		"Archive finalized.",
-		"Qodo Scout saved the support bundle locally. Share it separately through your approved support channel.",
+		"[active] Qodo Scout collection",
+		"  [active] Preflight checks",
+		"  [done] Preflight checks",
+		"  [active] Kubernetes diagnostics",
+		"  [done] Kubernetes diagnostics - 1/1 namespace",
+		"  [active] Workload context - 0/1 namespace",
+		"  [done] Workload context - 1/1 namespace",
+		"  [active] Archive - preparing summary",
+		"  [active] Archive - creating manifest",
+		"  [active] Archive - writing checksums",
+		"  [active] Archive - packing",
+		"  [active] Archive - finalizing",
+		"  [done] Archive",
+		"Qodo Scout summary",
+		"Total duration:",
+		"Archive: " + output,
+		"Saved locally. Share separately through an approved support channel.",
 	} {
 		if !strings.Contains(stderr.String(), expected) {
 			t.Fatalf("stderr missing %q:\n%s", expected, stderr.String())
@@ -989,8 +993,8 @@ func TestCollectPrometheusUsesSingleCapturedTimeAndRequestedScope(t *testing.T) 
 			t.Fatalf("manifest missing %q: %s", expected, manifest)
 		}
 	}
-	if !strings.Contains(stderr.String(), "Collecting Prometheus telemetry...") ||
-		!strings.Contains(stderr.String(), "Prometheus telemetry: unavailable; diagnostic recorded.") {
+	if !strings.Contains(stderr.String(), "[active] Prometheus telemetry") ||
+		!strings.Contains(stderr.String(), "[failed] Prometheus telemetry - unavailable") {
 		t.Fatalf("missing Prometheus progress: %s", stderr.String())
 	}
 }
@@ -1033,33 +1037,33 @@ func TestTelemetryProgressDoesNotRenderEventReason(t *testing.T) {
 		kind collection.EventKind
 		want string
 	}{
-		{collection.EventPrometheusStarted, "Collecting Prometheus telemetry...\n"},
-		{collection.EventPrometheusComplete, "Prometheus telemetry: complete.\n"},
+		{collection.EventPrometheusStarted, "  [active] Prometheus telemetry\n"},
+		{collection.EventPrometheusComplete, "  [done] Prometheus telemetry\n"},
 		{
 			collection.EventPrometheusPartial,
-			"Prometheus telemetry: partial collection recorded.\n",
+			"  [warning] Prometheus telemetry - partial\n",
 		},
 		{
 			collection.EventPrometheusUnavailable,
-			"Prometheus telemetry: unavailable; diagnostic recorded.\n",
+			"  [failed] Prometheus telemetry - unavailable\n",
 		},
-		{collection.EventPhoenixStarted, "Collecting Phoenix telemetry...\n"},
-		{collection.EventPhoenixComplete, "Phoenix telemetry: complete.\n"},
+		{collection.EventPhoenixStarted, "  [active] Phoenix telemetry\n"},
+		{collection.EventPhoenixComplete, "  [done] Phoenix telemetry\n"},
 		{
 			collection.EventPhoenixPartial,
-			"Phoenix telemetry: partial collection recorded.\n",
+			"  [warning] Phoenix telemetry - partial\n",
 		},
 		{
 			collection.EventPhoenixUnavailable,
-			"Phoenix telemetry: unavailable; diagnostic recorded.\n",
+			"  [failed] Phoenix telemetry - unavailable\n",
 		},
 		{
 			collection.EventZitadelUnavailable,
-			"Zitadel connectivity probe: unavailable; diagnostic recorded.\n",
+			"  [failed] Zitadel connectivity - unavailable\n",
 		},
 		{
 			collection.EventWorkloadUnavailable,
-			"Workload context: unavailable; diagnostic recorded.\n",
+			"  [failed] Workload context - unavailable\n",
 		},
 	}
 	for _, test := range tests {
@@ -1076,6 +1080,48 @@ func TestTelemetryProgressDoesNotRenderEventReason(t *testing.T) {
 			strings.Contains(output.String(), "private-progress-canary") {
 			t.Fatalf("kind=%s output=%q", test.kind, output.String())
 		}
+	}
+}
+
+func TestKubernetesChildStagesFinishWithObservedOutcomes(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	renderer := newProgressRenderer(progressRendererOptions{
+		Writer:  &output,
+		Enabled: true,
+	})
+	sanitizer := redact.New()
+
+	writeCollectionProgress(renderer, sanitizer, kubernetes.Progress{
+		Stage: "scan_complete", Current: 1, Total: 2,
+	})
+	writeCollectionProgress(renderer, sanitizer, kubernetes.Progress{
+		Stage: "collect_logs", Total: 0,
+	})
+	writeCollectionProgress(renderer, sanitizer, kubernetes.Progress{
+		Stage: "logs_complete", Current: 1, Total: 2,
+	})
+
+	const want = "" +
+		"    [warning] Namespace scan - 1/2 namespaces, partial\n" +
+		"    [done] Container logs - no streams\n" +
+		"    [warning] Container logs - 1/2 streams, partial\n"
+	if output.String() != want {
+		t.Fatalf("child outcome transcript mismatch:\ngot:\n%s\nwant:\n%s", output.String(), want)
+	}
+}
+
+func TestProgressArchivePathMasksHomeDirectory(t *testing.T) {
+	oldHome := homeDirectory
+	homeDirectory = func() (string, error) { return "/Users/private-account", nil }
+	t.Cleanup(func() { homeDirectory = oldHome })
+
+	got := progressArchivePath(
+		redact.New(),
+		"/Users/private-account/qodo-support-bundles/bundle.tar.gz",
+	)
+	if got != "~/qodo-support-bundles/bundle.tar.gz" {
+		t.Fatalf("home directory was exposed in progress path: %q", got)
 	}
 }
 
