@@ -82,6 +82,7 @@ func TestHelpUsesQodoScoutBrandWithoutRenamingExecutable(t *testing.T) {
 		"does not upload",
 		"--no-progress",
 		"--mascot",
+		"--interactive",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("help missing %q:\n%s", expected, stdout.String())
@@ -195,10 +196,14 @@ func TestCollectKeepsStdoutStableAndReportsQodoScoutStages(t *testing.T) {
 		"  [active] Archive - packing",
 		"  [active] Archive - finalizing",
 		"  [done] Archive",
-		"Qodo Scout summary",
-		"Total duration:",
-		"Archive: " + output,
-		"Saved locally. Share separately through an approved support channel.",
+		"Qodo Scout\n",
+		"Bundle created",
+		"1 namespace | 1 pod | 1 log stream |",
+		"[ok] Kubernetes diagnostics",
+		"[ok] Workload context",
+		"[ok] Archive ready |",
+		"Saved locally:\n" + output,
+		"Review collection-issues.jsonl before sharing.",
 	} {
 		if !strings.Contains(stderr.String(), expected) {
 			t.Fatalf("stderr missing %q:\n%s", expected, stderr.String())
@@ -277,6 +282,29 @@ func TestCollectMascotIsQuietWhenStderrIsNotTTY(t *testing.T) {
 	if strings.ContainsAny(stderr.String(), "\r\x1b") ||
 		strings.Contains(stderr.String(), "~(____:>") {
 		t.Fatalf("non-TTY mascot emitted animation controls: %q", stderr.String())
+	}
+}
+
+func TestCollectInteractiveRejectsNonTTYWithoutTouchingStdout(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run(
+		context.Background(),
+		[]string{"collect", "--interactive"},
+		&stdout,
+		&stderr,
+	)
+
+	if code != 2 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("interactive gating changed stdout: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--interactive requires an interactive stdin and stderr") {
+		t.Fatalf("missing TTY error: %q", stderr.String())
 	}
 }
 
