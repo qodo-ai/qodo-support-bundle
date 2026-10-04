@@ -20,7 +20,9 @@ release artifact, and install the stable `qodo-scout` command without sudo or
 administrator access. Merging the publication code does not publish live
 objects; stable endpoints return 404 until the manual dev and approved
 production workflows run. See [the installer contract and commands](docs/installers.md)
-and [the publication runbook](docs/publication.md).
+and [the publication runbook](docs/publication.md). Maintainers preparing a
+pilot must complete the
+[public distribution readiness checklist](docs/public-readiness.md).
 
 The installer runs only a local `version` smoke check. It never starts
 collection. The customer starts the guided flow explicitly:
@@ -28,6 +30,11 @@ collection. The customer starts the guided flow explicitly:
 ```bash
 qodo-scout collect --interactive
 ```
+
+Security boundaries and platform assurance are documented in the
+[security model](docs/security-model.md). See [CONTRIBUTING.md](CONTRIBUTING.md)
+to propose a change and [SECURITY.md](SECURITY.md) to report a vulnerability
+privately.
 
 ## Prerequisites and scope
 

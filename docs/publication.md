@@ -118,6 +118,9 @@ fixed version. The monotonic pointer contract intentionally rejects moving
 Merging code does not publish anything. The following remain explicit operator
 actions:
 
+- complete and approve the
+  [public distribution readiness checklist](public-readiness.md) before a
+  customer pilot;
 - dispatch dev publication from `main`;
 - review dev canary evidence;
 - approve the protected production environment;
