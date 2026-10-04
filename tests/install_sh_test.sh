@@ -404,6 +404,31 @@ fi
   fail "lock timeout removed a lock owned by another installer"
 pass "profile lock timeouts preserve the active owner's lock"
 
+INTERRUPT_HOME="$TEST_ROOT/interrupt-home"
+INTERRUPT_TOOLS="$TEST_ROOT/interrupt-tools"
+cp -R "$TOOLS" "$INTERRUPT_TOOLS"
+REAL_MKDIR=$(command -v mkdir)
+cat >"$INTERRUPT_TOOLS/mkdir" <<EOF
+#!/bin/sh
+case "\${1-}" in
+  *.qodo-scout.lock)
+    "$REAL_MKDIR" "\$@" || exit \$?
+    kill -TERM "\$PPID"
+    exit 0
+    ;;
+esac
+exec "$REAL_MKDIR" "\$@"
+EOF
+chmod 0755 "$INTERRUPT_TOOLS/mkdir"
+if SHELL=/bin/zsh run_installer "$INTERRUPT_HOME" "$INTERRUPT_TOOLS" \
+  --version 1.2.3 --source-dir "$PROFILE_SOURCE" --add-to-path \
+  >"$TEST_ROOT/lock-interrupt.out" 2>&1; then
+  fail "installer ignored a signal during profile lock acquisition"
+fi
+[ ! -d "$INTERRUPT_HOME/.zprofile.qodo-scout.lock" ] ||
+  fail "signal during profile lock acquisition stranded the lock"
+pass "profile lock acquisition cleans up after signals"
+
 SPECIAL_INSTALL="$TEST_ROOT/\$(touch should-not-run)'quoted"
 run_installer "$LATEST_HOME" "$TOOLS" \
   --version 1.2.3 \

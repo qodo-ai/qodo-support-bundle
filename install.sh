@@ -14,6 +14,8 @@ INSTALLED=0
 BACKUP_PRESERVED=0
 PROFILE_STAGED=
 PROFILE_LOCK=
+SIGNALS_DEFERRED=0
+PENDING_SIGNAL=
 
 usage() {
   cat <<'EOF'
@@ -67,9 +69,22 @@ on_exit() {
 
 on_signal() {
   status=$1
+  if [ "$SIGNALS_DEFERRED" -eq 1 ]; then
+    PENDING_SIGNAL=$status
+    return
+  fi
   trap - EXIT HUP INT TERM
   cleanup_files "$status"
   exit "$status"
+}
+
+finish_deferred_signals() {
+  SIGNALS_DEFERRED=0
+  if [ -n "$PENDING_SIGNAL" ]; then
+    status=$PENDING_SIGNAL
+    PENDING_SIGNAL=
+    on_signal "$status"
+  fi
 }
 
 trap on_exit EXIT
@@ -238,10 +253,13 @@ add_user_path() {
   profile_lock_path=$profile.qodo-scout.lock
   lock_attempt=0
   while :; do
+    SIGNALS_DEFERRED=1
     if mkdir "$profile_lock_path" 2>/dev/null; then
       PROFILE_LOCK=$profile_lock_path
+      finish_deferred_signals
       break
     fi
+    finish_deferred_signals
     lock_attempt=$((lock_attempt + 1))
     [ "$lock_attempt" -lt 5 ] ||
       die "profile update is locked; retry after removing stale lock $profile_lock_path"
