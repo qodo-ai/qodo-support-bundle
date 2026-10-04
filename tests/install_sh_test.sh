@@ -226,6 +226,13 @@ if run_installer "$LATEST_HOME" "$TOOLS" --install-dir "$TEST_ROOT/version" \
 fi
 pass "unsafe version strings are rejected"
 
+printf '{ "version": "1.2. 3" }\n' >"$TEST_ROOT/server/version.json"
+if run_installer "$LATEST_HOME" "$TOOLS" --install-dir "$TEST_ROOT/version-whitespace" \
+  >"$TEST_ROOT/version-whitespace.out" 2>&1; then
+  fail "whitespace inside a version string was normalized"
+fi
+pass "version metadata preserves and rejects value whitespace"
+
 printf '{ "version": "1.2.3" }\n' >"$TEST_ROOT/server/version.json"
 if FAKE_CURL_FAIL=1 run_installer "$LATEST_HOME" "$TOOLS" --install-dir "$TEST_ROOT/download" \
   >"$TEST_ROOT/download.out" 2>&1; then
@@ -284,5 +291,14 @@ SHELL=/bin/zsh run_installer "$PROFILE_HOME" "$TOOLS" \
 [ "$(grep -c '^# qodo-scout installer$' "$PROFILE_HOME/.zprofile")" -eq 1 ] ||
   fail "PATH profile update was not idempotent"
 pass "opt-in PATH update is user-local and idempotent"
+
+SESSION_HOME="$TEST_ROOT/session-only-path"
+SESSION_INSTALL="$SESSION_HOME/.local/bin"
+PATH="$SESSION_INSTALL:$PATH" SHELL=/bin/zsh \
+  run_installer "$SESSION_HOME" "$TOOLS" \
+    --version 1.2.3 --source-dir "$PROFILE_SOURCE" --add-to-path >/dev/null
+[ "$(grep -c '^# qodo-scout installer$' "$SESSION_HOME/.zprofile")" -eq 1 ] ||
+  fail "a session-only PATH entry prevented persistent opt-in"
+pass "opt-in PATH persists entries present only in the current session"
 
 printf '1..%d\n' "$passed"

@@ -71,6 +71,11 @@ Describe 'Qodo Scout Windows installer contracts' {
             Should -Be 'C:\Existing;C:\Qodo Bin'
     }
 
+    It 'escapes apostrophes in printed PowerShell path literals' {
+        ConvertTo-QodoScoutPowerShellLiteral -Value "C:\Users\O'Brien\bin" |
+            Should -Be "'C:\Users\O''Brien\bin'"
+    }
+
     It 'fails clearly when curl.exe is unavailable in network mode' {
         Mock Get-Command { $null }
         {
@@ -137,6 +142,29 @@ Describe 'Qodo Scout local source installation' -Skip:(-not $IsWindows) {
                 -RequestedSourceDirectory $script:SourceDirectory
         } | Should -Throw '*checksum*'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($installed)) |
+            Should -Be 'CQk='
+    }
+
+    It 'retains the previous executable when rollback itself fails' {
+        New-Item -ItemType Directory -Path $script:InstallDirectory -Force | Out-Null
+        $installed = Join-Path $script:InstallDirectory 'qodo-scout.exe'
+        [IO.File]::WriteAllBytes($installed, [byte[]](9, 9))
+        Mock Invoke-QodoScoutSmokeCheck { throw 'smoke failed' }
+        Mock Restore-QodoScoutInstallation { throw 'target is locked' }
+
+        {
+            Install-QodoScout `
+                -RequestedVersion '1.2.3' `
+                -RequestedInstallDirectory $script:InstallDirectory `
+                -RequestedSourceDirectory $script:SourceDirectory
+        } | Should -Throw '*previous executable is preserved at*'
+        $rollback = @(
+            Get-ChildItem `
+                -LiteralPath $script:InstallDirectory `
+                -Filter '.qodo-scout.rollback.*'
+        )
+        $rollback.Count | Should -Be 1
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($rollback[0].FullName)) |
             Should -Be 'CQk='
     }
 }

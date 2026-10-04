@@ -79,7 +79,34 @@ validate_version() {
 
 parse_version_json() {
   file=$1
-  compact=$(tr -d '[:space:]' <"$file")
+  compact=$(awk '
+    BEGIN {
+      in_string = 0
+      escaped = 0
+    }
+    {
+      for (i = 1; i <= length($0); i++) {
+        character = substr($0, i, 1)
+        if (character == "\"" && !escaped) {
+          in_string = !in_string
+        }
+        if (in_string || character !~ /[[:space:]]/) {
+          printf "%s", character
+        }
+        if (character == "\\" && !escaped) {
+          escaped = 1
+        } else {
+          escaped = 0
+        }
+      }
+      if (in_string) {
+        printf "\n"
+      }
+    }
+    END {
+      print ""
+    }
+  ' "$file")
   parsed=$(printf '%s\n' "$compact" |
     sed -n 's/^{"version":"\([^"]*\)"}$/\1/p')
   [ -n "$parsed" ] || die "version.json must contain only a string version property"
@@ -153,11 +180,6 @@ path_contains() {
 
 add_user_path() {
   directory=$1
-  if path_contains "$directory"; then
-    printf 'Install directory is already on PATH.\n'
-    return
-  fi
-
   case "${SHELL-}" in
     */zsh) profile=$HOME/.zprofile ;;
     *) profile=$HOME/.profile ;;

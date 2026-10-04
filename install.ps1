@@ -134,6 +134,12 @@ function Join-QodoScoutUserPath {
     return (@($entries) + $InstallDirectory) -join ';'
 }
 
+function ConvertTo-QodoScoutPowerShellLiteral {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
 function Add-QodoScoutToUserPath {
     param([Parameter(Mandatory)][string]$InstallDirectory)
 
@@ -145,8 +151,18 @@ function Add-QodoScoutToUserPath {
         [Environment]::SetEnvironmentVariable('Path', $updated, 'User')
         Write-Output "Added $InstallDirectory to the current user's PATH."
     }
+    $directoryLiteral = ConvertTo-QodoScoutPowerShellLiteral -Value $InstallDirectory
     Write-Output 'Open a new terminal for the persisted PATH update to take effect.'
-    Write-Output "For this PowerShell session, run: `$env:Path = '$InstallDirectory;' + `$env:Path"
+    Write-Output "For this PowerShell session, run: `$env:Path = $directoryLiteral + ';' + `$env:Path"
+}
+
+function Restore-QodoScoutInstallation {
+    param(
+        [Parameter(Mandatory)][string]$RollbackFile,
+        [Parameter(Mandatory)][string]$Target
+    )
+
+    [IO.File]::Replace($RollbackFile, $Target, $null)
 }
 
 function Install-QodoScout {
@@ -262,14 +278,26 @@ function Install-QodoScout {
             Invoke-QodoScoutSmokeCheck -Executable $target
         }
         catch {
+            $smokeFailure = $_
             if ($hadExisting -and [IO.File]::Exists($rollbackFile)) {
-                [IO.File]::Replace($rollbackFile, $target, $null)
-                $rollbackFile = $null
+                try {
+                    Restore-QodoScoutInstallation `
+                        -RollbackFile $rollbackFile `
+                        -Target $target
+                    $rollbackFile = $null
+                }
+                catch {
+                    throw (
+                        'installed qodo-scout failed its version check and rollback failed; ' +
+                        "the previous executable is preserved at $rollbackFile. " +
+                        "Rollback error: $($_.Exception.Message)"
+                    )
+                }
             }
             elseif ([IO.File]::Exists($target)) {
                 [IO.File]::Delete($target)
             }
-            throw
+            throw $smokeFailure
         }
         if ($rollbackFile -and [IO.File]::Exists($rollbackFile)) {
             [IO.File]::Delete($rollbackFile)
@@ -284,15 +312,13 @@ function Install-QodoScout {
             Write-Output "$RequestedInstallDirectory is not on PATH."
             Write-Output 'Re-run with -AddToPath, or add it to your user PATH.'
         }
-        Write-Output "Run now with: & '$target' collect --interactive"
+        $targetLiteral = ConvertTo-QodoScoutPowerShellLiteral -Value $target
+        Write-Output "Run now with: & $targetLiteral collect --interactive"
         Write-Output 'After PATH is active: qodo-scout collect --interactive'
     }
     finally {
         if ($stagedInstall -and [IO.File]::Exists($stagedInstall)) {
             [IO.File]::Delete($stagedInstall)
-        }
-        if ($rollbackFile -and [IO.File]::Exists($rollbackFile)) {
-            [IO.File]::Delete($rollbackFile)
         }
         if ([IO.Directory]::Exists($temporaryDirectory)) {
             [IO.Directory]::Delete($temporaryDirectory, $true)
