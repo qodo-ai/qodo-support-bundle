@@ -713,13 +713,14 @@ provides the stable `qodo-scout` command.
 
 For an environment that cannot reach Qodo or GitHub, Support prepares the
 documented air-gapped handoff on an approved connected workstation: the
-platform installer, matching native binary, `checksums.sha256`, exact release
-version, and source release record. Deliver it through the channel already
-approved for the customer, such as a private support-case attachment or
-authenticated, time-limited download. The customer verifies it again and uses
-the installer's `--source-dir` or `-SourceDir` mode, which performs no network
-requests. No cluster image, Helm upgrade, sidecar, or administrator installation
-is required.
+platform installer, matching native binary, `checksums.sha256`,
+`installer-checksums.sha256`, exact release version, and source release record.
+Deliver it through the channel already approved for the customer, such as a
+private support-case attachment or authenticated, time-limited download. The
+customer verifies the installer first, then uses its `--source-dir` or
+`-SourceDir` mode to verify and install the binary without network requests.
+No cluster image, Helm upgrade, sidecar, or administrator installation is
+required.
 
 ## Build, test, and release
 

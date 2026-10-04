@@ -147,7 +147,35 @@ manifest:
 ```text
 install.sh or install.ps1
 checksums.sha256
+installer-checksums.sha256
 qodo-support-bundle-<os>-<arch>[.exe]
+```
+
+Before running the Unix installer, require exactly one valid manifest row and
+verify it:
+
+```sh
+pattern='^[[:xdigit:]]{64}  install\.sh$'
+[ "$(grep -Ec "$pattern" installer-checksums.sha256)" -eq 1 ]
+if command -v sha256sum >/dev/null 2>&1; then
+  grep -E "$pattern" installer-checksums.sha256 | sha256sum --strict --check -
+else
+  grep -E "$pattern" installer-checksums.sha256 | shasum -a 256 -c -
+fi
+```
+
+On Windows PowerShell:
+
+```powershell
+$rows = @(Get-Content .\installer-checksums.sha256 | Where-Object {
+  $_ -match '^([0-9a-fA-F]{64})  install\.ps1$'
+})
+if ($rows.Count -ne 1) { throw 'Expected one install.ps1 checksum row' }
+$expected = ($rows[0] -split '\s+')[0]
+$actual = (Get-FileHash .\install.ps1 -Algorithm SHA256).Hash
+if (-not $actual.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
+  throw 'Installer checksum mismatch'
+}
 ```
 
 Also retain the release version and source release URL in the approved handoff
