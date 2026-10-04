@@ -192,6 +192,7 @@ func TestPublishUsesExactObjectRequestsWithoutListing(t *testing.T) {
 	runDistributionScript(t, filepath.Join(root, "scripts/publish-gcs.sh"), bin, []string{
 		"FAKE_GCS_ROOT=" + fakeGCS,
 		"FAKE_REQUESTS=" + requests,
+		"FAKE_LOCK_VERIFY_FAILURE=1",
 		"QODO_SUPPORT_BUNDLE_DIST=" + dist,
 		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
 	})
@@ -986,8 +987,18 @@ case "$method" in
       printf 'content_type=%s\n' "$content_type"
       printf 'cache_control=%s\n' "$cache_control"
     } > "$metadata"
+    case "$path" in
+      */control/publication-lock.json) : > "$FAKE_GCS_ROOT/.lock-written" ;;
+    esac
     ;;
   GET)
+    if [ -n "${FAKE_LOCK_VERIFY_FAILURE:-}" ] &&
+      [ "${url%/control/publication-lock.json}" != "$url" ] &&
+      [ -f "$FAKE_GCS_ROOT/.lock-written" ] &&
+      [ ! -f "$FAKE_GCS_ROOT/.lock-read-failed" ]; then
+      : > "$FAKE_GCS_ROOT/.lock-read-failed"
+      exit 22
+    fi
     if [ ! -f "$path" ]; then
       [ -z "$dump_headers" ] || : > "$dump_headers"
       printf 404

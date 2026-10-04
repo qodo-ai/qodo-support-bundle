@@ -116,6 +116,40 @@ verify_release_identity() {
   done
 }
 
+confirm_publication_lock() {
+  desired=$1
+  bucket=$2
+  lock_object=$3
+  access_token=$4
+  current=$5
+  headers=$6
+  command_name=$7
+
+  for attempt in 1 2 3; do
+    if gcs_read_exact \
+      "$bucket" "$lock_object" "$access_token" \
+      "$current" "$headers" "$command_name"; then
+      if gcs_object_matches \
+        "$desired" "$current" "$headers" application/json no-store; then
+        PUBLICATION_LOCK_GENERATION="$(
+          gcs_header_value x-goog-generation "$headers"
+        )"
+        [ -n "$PUBLICATION_LOCK_GENERATION" ] || {
+          echo "${command_name}: acquired publication lock has no generation" >&2
+          return 1
+        }
+        PUBLICATION_LOCK_HELD=1
+        return 0
+      fi
+      echo "${command_name}: publication lock is not owned by this publisher" >&2
+      return 1
+    fi
+    [ "$attempt" -eq 3 ] || sleep 1
+  done
+  echo "${command_name}: publication lock verification failed after retries" >&2
+  return 1
+}
+
 acquire_publication_lock() {
   owner=$1
   bucket=$2
@@ -146,9 +180,10 @@ acquire_publication_lock() {
       return 1
     }
     if cmp -s "$desired" "$current"; then
-      PUBLICATION_LOCK_GENERATION=$current_generation
-      PUBLICATION_LOCK_HELD=1
-      return 0
+      confirm_publication_lock \
+        "$desired" "$bucket" "$lock_object" "$access_token" \
+        "$current" "$headers" "$command_name"
+      return
     fi
     unlocked="${work}/publication-lock-unlocked.json"
     printf '%s\n' '{"owner":""}' >"$unlocked"
@@ -168,23 +203,9 @@ acquire_publication_lock() {
     echo "${command_name}: could not acquire publication lock" >&2
     return 1
   }
-  if ! gcs_read_exact \
-    "$bucket" "$lock_object" "$access_token" \
-    "$current" "$headers" "$command_name"; then
-    echo "${command_name}: publication lock verification failed" >&2
-    return 1
-  fi
-  if ! gcs_object_matches \
-    "$desired" "$current" "$headers" application/json "$lock_cache"; then
-    echo "${command_name}: publication lock verification failed" >&2
-    return 1
-  fi
-  PUBLICATION_LOCK_GENERATION="$(gcs_header_value x-goog-generation "$headers")"
-  [ -n "$PUBLICATION_LOCK_GENERATION" ] || {
-    echo "${command_name}: acquired publication lock has no generation" >&2
-    return 1
-  }
-  PUBLICATION_LOCK_HELD=1
+  confirm_publication_lock \
+    "$desired" "$bucket" "$lock_object" "$access_token" \
+    "$current" "$headers" "$command_name"
 }
 
 release_publication_lock() {
