@@ -14,10 +14,12 @@ Do not open a public GitHub issue or discussion containing:
 - customer names, infrastructure details, logs, or support archives; or
 - unredacted output produced by Qodo Scout.
 
-The security team will acknowledge the report and coordinate validation,
-remediation, disclosure, and release timing through a private channel. Do not
-attempt testing against systems or data that you do not own or have explicit
-authorization to assess.
+Before a public pilot, maintainers must verify that this address is monitored
+and assign vulnerability-triage ownership as required by the
+[readiness checklist](docs/public-readiness.md). Until that operational gate is
+complete, this policy makes no response-time commitment. Do not attempt testing
+against systems or data that you do not own or have explicit authorization to
+assess.
 
 ## Supported versions
 

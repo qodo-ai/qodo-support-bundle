@@ -20,7 +20,7 @@ See [the publication contract and runbook](publication.md).
 After publication, macOS and Linux customers can inspect and run:
 
 ```sh
-curl -fL --proto '=https' --tlsv1.2 \
+curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 \
   -o install.sh \
   https://get.qodo.ai/support-bundle/install.sh
 less install.sh
@@ -31,6 +31,7 @@ Windows customers can inspect and run from PowerShell:
 
 ```powershell
 curl.exe --fail --location --proto '=https' --tlsv1.2 `
+  --proto-redir '=https' `
   --output install.ps1 `
   https://get.qodo.ai/support-bundle/install.ps1
 Get-Content .\install.ps1
@@ -40,18 +41,33 @@ Get-Content .\install.ps1
 For convenience, the same endpoints can be executed without saving a copy:
 
 ```sh
-curl -fL --proto '=https' --tlsv1.2 \
+curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 \
   https://get.qodo.ai/support-bundle/install.sh |
   sh -s -- --add-to-path
 ```
 
 ```powershell
-irm https://get.qodo.ai/support-bundle/install.ps1 | iex
+& {
+  $installer = Join-Path ([IO.Path]::GetTempPath()) (
+    'qodo-scout-install-{0}.ps1' -f [guid]::NewGuid()
+  )
+  try {
+    curl.exe --fail --location --proto '=https' --proto-redir '=https' `
+      --tlsv1.2 --output $installer `
+      https://get.qodo.ai/support-bundle/install.ps1
+    if ($LASTEXITCODE -ne 0) { throw 'Installer download failed' }
+    & $installer -AddToPath
+    if (-not $?) { throw 'Installer execution failed' }
+  } finally {
+    Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+  }
+}
 ```
 
-The convenience form is less inspectable: it executes the response immediately
-and leaves no script to review first. Prefer the download-inspect-run form for
-production and regulated workstations.
+The convenience form is less inspectable: it executes without a review step.
+The Windows form still invokes a temporary script file so normal PowerShell
+execution policy applies, then removes that file. Prefer the
+download-inspect-run form for production and regulated workstations.
 
 If the installer adds a previously absent directory to the user PATH, open a
 new terminal before using the short command. The installer also prints a
@@ -183,8 +199,16 @@ For independent provenance verification, download the versioned release assets
 from the matching GitHub release and verify their attestations:
 
 ```sh
+release_tag=v0.2.0
+release_sha="$(
+  gh api "repos/qodo-ai/qodo-support-bundle/commits/$release_tag" --jq .sha
+)"
 gh attestation verify ./qodo-support-bundle-linux-amd64 \
-  --repo qodo-ai/qodo-support-bundle
+  --repo qodo-ai/qodo-support-bundle \
+  --signer-workflow \
+    qodo-ai/qodo-support-bundle/.github/workflows/release-support-bundle.yaml \
+  --source-digest "$release_sha" \
+  --source-ref "refs/tags/$release_tag"
 ```
 
 The GitHub release also carries `installer-checksums.sha256` for `install.sh`
