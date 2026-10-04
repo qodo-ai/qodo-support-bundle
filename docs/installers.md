@@ -41,9 +41,16 @@ Get-Content .\install.ps1
 For convenience, the same endpoints can be executed without saving a copy:
 
 ```sh
-curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  https://get.qodo.ai/support-bundle/install.sh |
-  sh -s -- --add-to-path
+(
+  set -eu
+  installer="$(mktemp "${TMPDIR:-/tmp}/qodo-scout-install.XXXXXX")"
+  trap 'rm -f "$installer"' EXIT
+  trap 'exit 1' HUP INT TERM
+  curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    -o "$installer" \
+    https://get.qodo.ai/support-bundle/install.sh
+  sh "$installer" --add-to-path
+)
 ```
 
 ```powershell
