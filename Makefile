@@ -6,19 +6,25 @@ override QODO_SUPPORT_BUNDLE_VERSION := $(value VERSION)
 export QODO_SUPPORT_BUNDLE_VERSION
 LDFLAGS := -s -w -X $(MODULE)/internal/app.Version=$$QODO_SUPPORT_BUNDLE_VERSION
 
-.PHONY: build test test-python-deps format-check release clean
+.PHONY: build test test-installers test-python-deps format-check release clean
 
 build:
 	mkdir -p dist
 	go build -trimpath -ldflags="$(LDFLAGS)" -o dist/qodo-support-bundle ./cmd/qodo-support-bundle
 
-test: format-check
+test: format-check test-installers
 	@test -x "$(TEST_VENV)/bin/python3" || { \
 		echo "Missing Python test environment. Run 'make test-python-deps' first." >&2; \
 		exit 1; \
 	}
 	PATH="$(CURDIR)/$(TEST_VENV)/bin:$$PATH" go test -race ./...
 	go vet ./...
+
+test-installers:
+	shellcheck install.sh tests/install_sh_test.sh
+	sh -n install.sh
+	sh -n tests/install_sh_test.sh
+	sh tests/install_sh_test.sh
 
 test-python-deps:
 	@test -x "$(TEST_VENV)/bin/python3" || "$(PYTHON)" -m venv "$(TEST_VENV)"

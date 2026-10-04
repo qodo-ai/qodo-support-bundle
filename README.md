@@ -13,6 +13,22 @@ report.
 Read-only diagnostics: no cluster changes, no Kubernetes Secret objects, and
 sensitive text is redacted.
 
+## Install
+
+Cross-platform installers are included for review but are not published by this
+change. After the follow-up publication work is deployed, they will resolve
+`version.json`, select and verify the matching release artifact, and install the
+stable `qodo-scout` command without sudo or administrator access. See
+[the installer contract and commands](docs/installers.md) for connected,
+pinned, PATH, proxy, and air-gapped usage.
+
+The installer runs only a local `version` smoke check. It never starts
+collection. The customer starts the guided flow explicitly:
+
+```bash
+qodo-scout collect --interactive
+```
+
 ## Prerequisites and scope
 
 - A release binary for the operator's platform.
