@@ -3,32 +3,32 @@ package app
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/term"
 )
 
 const (
 	progressHeartbeatInterval = 250 * time.Millisecond
 	progressClearLine         = "\r                              \r"
-)
-
-var (
-	spinnerFrames = []string{"|", "/", "-", `\`}
-	mascotFrames  = []string{`~(____:>`, `-(____:>`}
+	scannerFrameCount         = 8
+	scannerTrackWidth         = 10
 )
 
 type progressRendererOptions struct {
 	Writer      io.Writer
 	Enabled     bool
 	Interactive bool
-	Mascot      bool
 	Unicode     bool
+	Hyperlink   bool
 	Width       int
 	Now         func() time.Time
 	BubbleTea   bool
@@ -55,13 +55,14 @@ type progressUpdate struct {
 }
 
 type progressSummary struct {
-	ArchivePath    string
-	ArchiveSize    int64
-	Namespaces     int
-	Pods           int
-	LogStreams     int
-	WarningCount   int
-	SourceOutcomes []progressSummaryOutcome
+	ArchivePath     string
+	ArchiveLinkPath string
+	ArchiveSize     int64
+	Namespaces      int
+	Pods            int
+	LogStreams      int
+	WarningCount    int
+	SourceOutcomes  []progressSummaryOutcome
 }
 
 type progressStageState struct {
@@ -76,12 +77,13 @@ type progressRenderer struct {
 	writer      io.Writer
 	enabled     bool
 	interactive bool
-	mascot      bool
 	unicode     bool
+	hyperlink   bool
 	width       int
 	now         func() time.Time
 	startedAt   time.Time
 	stages      map[string]progressStageState
+	pending     map[string]progressUpdate
 	stageOrder  []string
 	frame       int
 	animated    bool
@@ -103,28 +105,95 @@ func newProgressRenderer(options progressRendererOptions) *progressRenderer {
 		writer:      options.Writer,
 		enabled:     options.Enabled && options.Writer != nil,
 		interactive: options.Enabled && options.Interactive && options.Writer != nil,
-		mascot:      options.Enabled && options.Interactive && options.Mascot,
 		unicode:     options.Enabled && options.Interactive && options.Unicode,
+		hyperlink:   options.Enabled && options.Interactive && options.Hyperlink,
 		width:       max(options.Width, 0),
 		now:         now,
 		startedAt:   now(),
 		stages:      make(map[string]progressStageState),
+		pending:     make(map[string]progressUpdate),
 		bubbleTea:   options.BubbleTea,
 	}
+}
+
+// Pending holds an ambiguous terminal update until its final outcome is known.
+func (renderer *progressRenderer) Pending(update progressUpdate) {
+	if renderer == nil || !renderer.enabled {
+		return
+	}
+	update = sanitizeProgressUpdate(update)
+	if update.ID == "" || update.Label == "" {
+		return
+	}
+	renderer.mu.Lock()
+	defer renderer.mu.Unlock()
+	renderer.pending[update.ID] = update
+}
+
+func (renderer *progressRenderer) ResolvePending(id string) {
+	if renderer == nil || !renderer.enabled {
+		return
+	}
+	renderer.mu.Lock()
+	update, exists := renderer.pending[id]
+	delete(renderer.pending, id)
+	renderer.mu.Unlock()
+	if exists {
+		renderer.Update(update)
+	}
+}
+
+// Cancel replaces an ambiguous log outcome with an explicit no-bundle result.
+func (renderer *progressRenderer) Cancel() {
+	if renderer == nil || renderer.writer == nil {
+		return
+	}
+	if renderer.bubbleTea && renderer.program != nil {
+		renderer.program.Send(progressCanceledMsg{})
+		return
+	}
+	renderer.mu.Lock()
+	defer renderer.mu.Unlock()
+	renderer.clearLocked()
+	update, exists := renderer.pending["kubernetes.logs"]
+	logCancellation := exists
+	if !exists {
+		if state, ok := renderer.stages["kubernetes.logs"]; ok {
+			update = state.update
+			exists = true
+			logCancellation = update.Status == progressActive
+		}
+	}
+	delete(renderer.pending, "kubernetes.logs")
+	marker, separator := "[!]", " | "
+	if renderer.interactive && renderer.unicode {
+		marker, separator = "!", " · "
+	}
+	line := marker + " Canceled"
+	if logCancellation && exists && update.Total > 0 {
+		line = fmt.Sprintf(
+			"%s Canceled while collecting logs%s%d/%d complete",
+			marker,
+			separator,
+			update.Current,
+			update.Total,
+		)
+	}
+	renderer.writeLineLocked(line)
+	renderer.writeLineLocked("No bundle created.")
 }
 
 func newCLIProgressRenderer(
 	writer io.Writer,
 	enabled bool,
-	mascot bool,
 ) *progressRenderer {
 	interactive := terminalWriter(writer)
 	renderer := newProgressRenderer(progressRendererOptions{
 		Writer:      writer,
 		Enabled:     enabled,
 		Interactive: interactive,
-		Mascot:      mascot,
 		Unicode:     interactive && terminalUnicode(),
+		Hyperlink:   terminalHyperlinksEnabled(interactive),
 		Width:       terminalWidth(writer),
 		BubbleTea:   interactive,
 	})
@@ -143,10 +212,10 @@ func (renderer *progressRenderer) Start() {
 	if renderer.bubbleTea {
 		renderer.program = tea.NewProgram(
 			newProgressModel(progressModelOptions{
-				Mascot:  renderer.mascot,
-				Unicode: renderer.unicode,
-				Width:   renderer.width,
-				Started: renderer.startedAt,
+				Unicode:   renderer.unicode,
+				Hyperlink: renderer.hyperlink,
+				Width:     renderer.width,
+				Started:   renderer.startedAt,
 			}),
 			tea.WithInput(nil),
 			tea.WithOutput(renderer.writer),
@@ -233,6 +302,13 @@ func (renderer *progressRenderer) Summary(summary progressSummary) {
 		max(renderer.now().Sub(renderer.startedAt), 0),
 		renderer.unicode,
 	) {
+		if renderer.hyperlink && isProgressArchivePathLine(line) {
+			line = archivePathLine(
+				summary.ArchivePath,
+				summary.ArchiveLinkPath,
+				true,
+			)
+		}
 		renderer.writeLineLocked(line)
 	}
 }
@@ -263,13 +339,20 @@ func (renderer *progressRenderer) Step() {
 	}
 	renderer.mu.Lock()
 	defer renderer.mu.Unlock()
-	frames := spinnerFrames
-	if renderer.mascot {
-		frames = mascotFrames
-	}
-	frame := frames[renderer.frame%len(frames)]
+	frame := scannerFrame(renderer.frame, renderer.unicode)
 	renderer.frame++
 	line := frame + " Qodo Scout is working"
+	for index := len(renderer.stageOrder) - 1; index >= 0; index-- {
+		id := renderer.stageOrder[index]
+		if id == "collection" {
+			continue
+		}
+		state := renderer.stages[id]
+		if state.update.Status == progressActive {
+			line = progressActivityLine(frame, state.update, renderer.unicode)
+			break
+		}
+	}
 	if renderer.width > 0 {
 		if renderer.width <= 1 {
 			return
@@ -278,6 +361,38 @@ func (renderer *progressRenderer) Step() {
 	}
 	_, _ = fmt.Fprintf(renderer.writer, "\r%s", line)
 	renderer.animated = true
+}
+
+func scannerFrame(index int, unicode bool) string {
+	positions := [...]int{0, 2, 4, 6, 8, 6, 4, 2}
+	point := positions[index%scannerFrameCount]
+	if !unicode {
+		cells := make([]byte, scannerTrackWidth)
+		for cell := range cells {
+			cells[cell] = ' '
+		}
+		for cell := 0; cell < point; cell++ {
+			cells[cell] = '-'
+		}
+		cells[point] = '>'
+		return "[" + string(cells) + "]"
+	}
+	cells := make([]string, scannerTrackWidth)
+	for cell := range cells {
+		cells[cell] = " "
+	}
+	for offset := -1; offset <= 1; offset++ {
+		cell := point + offset
+		if cell < 0 || cell >= len(cells) {
+			continue
+		}
+		if offset == 0 {
+			cells[cell] = "●"
+		} else {
+			cells[cell] = "━"
+		}
+	}
+	return "[" + strings.Join(cells, "") + "]"
 }
 
 // Close synchronously stops and clears the heartbeat. It is safe to call repeatedly.
@@ -329,10 +444,74 @@ func (renderer *progressRenderer) clearLocked() {
 }
 
 func (renderer *progressRenderer) writeLineLocked(line string) {
-	if renderer.interactive && renderer.width > 0 {
+	if renderer.interactive &&
+		renderer.width > 0 &&
+		!isProgressArchivePathLine(line) {
 		line = fitTerminalLine(line, renderer.width, renderer.unicode)
 	}
 	_, _ = fmt.Fprintln(renderer.writer, line)
+}
+
+func isProgressArchivePathLine(line string) bool {
+	return strings.HasPrefix(line, "Bundle saved: ")
+}
+
+func archivePathLine(displayPath string, linkPath string, hyperlink bool) string {
+	visible := terminalLine(displayPath)
+	if !hyperlink || visible == "" {
+		return "Bundle saved: " + visible
+	}
+	if linkPath == "" {
+		linkPath = displayPath
+	}
+	target := archiveFileURL(linkPath)
+	return "Bundle saved: \x1b]8;;" + target + "\x1b\\" +
+		visible + "\x1b]8;;\x1b\\"
+}
+
+func archiveFileURL(path string) string {
+	path = terminalLine(path)
+	if len(path) >= 3 &&
+		((path[0] >= 'a' && path[0] <= 'z') ||
+			(path[0] >= 'A' && path[0] <= 'Z')) &&
+		path[1] == ':' &&
+		(path[2] == '\\' || path[2] == '/') {
+		return (&url.URL{
+			Scheme: "file",
+			Path:   "/" + strings.ReplaceAll(path, `\`, "/"),
+		}).String()
+	}
+	if strings.HasPrefix(path, `\\`) {
+		normalized := strings.TrimPrefix(strings.ReplaceAll(path, `\`, "/"), "//")
+		host, remainder, found := strings.Cut(normalized, "/")
+		if found && host != "" {
+			return (&url.URL{
+				Scheme: "file",
+				Host:   host,
+				Path:   "/" + remainder,
+			}).String()
+		}
+	}
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		absolutePath = path
+	}
+	return (&url.URL{Scheme: "file", Path: absolutePath}).String()
+}
+
+func terminalHyperlinksEnabled(interactive bool) bool {
+	if !interactive ||
+		os.Getenv("ACCESSIBLE") != "" ||
+		os.Getenv("NO_COLOR") != "" ||
+		strings.EqualFold(os.Getenv("TERM"), "dumb") {
+		return false
+	}
+	switch strings.ToLower(os.Getenv("TERM_PROGRAM")) {
+	case "vscode", "iterm.app", "wezterm", "ghostty":
+		return true
+	}
+	return strings.HasPrefix(strings.ToLower(os.Getenv("TERM")), "xterm-kitty") ||
+		os.Getenv("WT_SESSION") != ""
 }
 
 func (renderer *progressRenderer) formatUpdate(
@@ -352,11 +531,15 @@ func (renderer *progressRenderer) formatUpdate(
 	if update.Detail != "" {
 		details = append(details, update.Detail)
 	}
+	separator := " | "
+	if renderer.interactive && renderer.unicode {
+		separator = " · "
+	}
 	if len(details) > 0 {
-		line += " - " + strings.Join(details, ", ")
+		line += separator + strings.Join(details, separator)
 	}
 	if update.Status != progressActive && elapsed >= 100*time.Millisecond {
-		line += " (" + formatProgressDuration(elapsed) + ")"
+		line += separator + formatProgressDuration(elapsed)
 	}
 	return line
 }
@@ -419,6 +602,9 @@ func terminalWidth(writer io.Writer) int {
 }
 
 func terminalUnicode() bool {
+	if os.Getenv("ACCESSIBLE") != "" {
+		return false
+	}
 	if strings.EqualFold(os.Getenv("TERM"), "dumb") {
 		return false
 	}
@@ -446,47 +632,11 @@ func fitTerminalLine(value string, width int, unicode bool) string {
 		return strings.Repeat(".", width)
 	}
 	target := width - suffixWidth
-	var fitted strings.Builder
-	used := 0
-	for _, character := range value {
-		characterWidth := terminalRuneWidth(character)
-		if used+characterWidth > target {
-			break
-		}
-		fitted.WriteRune(character)
-		used += characterWidth
-	}
-	return fitted.String() + suffix
+	return ansi.Truncate(value, target, "") + suffix
 }
 
 func terminalDisplayWidth(value string) int {
-	width := 0
-	for _, character := range value {
-		width += terminalRuneWidth(character)
-	}
-	return width
-}
-
-func terminalRuneWidth(character rune) int {
-	if unicode.Is(unicode.Mn, character) || unicode.Is(unicode.Me, character) {
-		return 0
-	}
-	if character >= 0x1100 &&
-		(character <= 0x115f ||
-			character == 0x2329 ||
-			character == 0x232a ||
-			(character >= 0x2e80 && character <= 0xa4cf) ||
-			(character >= 0xac00 && character <= 0xd7a3) ||
-			(character >= 0xf900 && character <= 0xfaff) ||
-			(character >= 0xfe10 && character <= 0xfe19) ||
-			(character >= 0xfe30 && character <= 0xfe6f) ||
-			(character >= 0xff00 && character <= 0xff60) ||
-			(character >= 0xffe0 && character <= 0xffe6) ||
-			(character >= 0x1f300 && character <= 0x1faff) ||
-			(character >= 0x20000 && character <= 0x3fffd)) {
-		return 2
-	}
-	return 1
+	return ansi.StringWidth(value)
 }
 
 func formatProgressDuration(duration time.Duration) string {

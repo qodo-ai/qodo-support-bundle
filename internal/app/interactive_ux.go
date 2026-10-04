@@ -3,23 +3,270 @@ package app
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 )
 
 const (
-	wizardPurpose             = "Qodo Scout · Secure diagnostics for Qodo on-prem environments"
-	wizardNavigationHelp      = "Use arrows to navigate · / to filter · Enter to select or continue · Ctrl+C to cancel"
-	wizardMultiSelectHelp     = "Use arrows to move · Space or x to toggle multiple · Enter to continue · Ctrl+C to cancel"
 	chooseAnotherContextValue = "\x00choose-another-context"
 )
+
+func wizardTitle(unicode bool) string {
+	if unicode {
+		return "Qodo Scout · Read-only on-prem diagnostics"
+	}
+	return "Qodo Scout - Read-only on-prem diagnostics"
+}
+
+func wizardSetupTitle(unicode bool) string {
+	if unicode {
+		return "Qodo Scout · Setup"
+	}
+	return "Qodo Scout - Setup"
+}
+
+func securityStatement(_ bool) string {
+	return "Read-only diagnostics: no cluster changes, no Kubernetes Secret objects, and sensitive text is redacted."
+}
+
+func wizardProgressHeader(step int, unicode bool) string {
+	names := []string{"Cluster", "Scope", "Logs", "Sources", "Confirm"}
+	parts := make([]string, 0, len(names))
+	for index, name := range names {
+		position := index + 1
+		marker := "[ ]"
+		switch {
+		case position < step:
+			marker = "[ok]"
+		case position == step:
+			marker = "[>]"
+		}
+		if unicode {
+			switch {
+			case position < step:
+				marker = "✓"
+			case position == step:
+				marker = "●"
+			default:
+				marker = "○"
+			}
+		}
+		parts = append(parts, marker+" "+name)
+	}
+	return strings.Join(parts, "  ")
+}
+
+func styledWizardProgressHeader(
+	step int,
+	unicode bool,
+	enabled bool,
+) string {
+	if !enabled {
+		return wizardProgressHeader(step, unicode)
+	}
+	names := []string{"Cluster", "Scope", "Logs", "Sources", "Confirm"}
+	parts := make([]string, 0, len(names))
+	for index, name := range names {
+		position := index + 1
+		marker, semantic := "○", wizardSecondary
+		if !unicode {
+			marker = "[ ]"
+		}
+		switch {
+		case position < step:
+			marker, semantic = "✓", wizardSafe
+			if !unicode {
+				marker = "[ok]"
+			}
+		case position == step:
+			marker, semantic = "●", wizardActive
+			if !unicode {
+				marker = "[>]"
+			}
+		}
+		parts = append(parts, semanticWizardText(
+			semantic,
+			marker+" "+name,
+			true,
+		))
+	}
+	return strings.Join(parts, "  ")
+}
+
+func accessibleWizardTitle(step int, title string) string {
+	return wizardFieldTitle(step, title, false, false, 0)
+}
+
+func wizardFieldTitle(
+	step int,
+	title string,
+	unicode bool,
+	color bool,
+	width int,
+) string {
+	header := styledWizardProgressHeader(step, unicode, color)
+	if width > 0 && terminalDisplayWidth(wizardProgressHeader(step, unicode)) > width {
+		header = wrapWizardProgressHeader(step, unicode, width)
+	}
+	return header + "\n\n" + title
+}
+
+func wrapWizardProgressHeader(step int, unicode bool, width int) string {
+	parts := strings.Split(wizardProgressHeader(step, unicode), "  ")
+	lines := make([]string, 0, len(parts))
+	line := ""
+	for _, part := range parts {
+		candidate := part
+		if line != "" {
+			candidate = line + "  " + part
+		}
+		if line != "" && terminalDisplayWidth(candidate) > width {
+			lines = append(lines, line)
+			line = part
+			continue
+		}
+		line = candidate
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func optionalCollectorDescription(_ bool) string {
+	return "Kubernetes data is already included."
+}
+
+func optionalCollectorOptions() []huh.Option[string] {
+	return []huh.Option[string]{
+		huh.NewOption("Prometheus", "prometheus"),
+		huh.NewOption("Phoenix", "phoenix"),
+		huh.NewOption("Zitadel check", "zitadel"),
+	}
+}
+
+func namespaceScopeOptions(excludeSystemNamespaces bool) []huh.Option[string] {
+	return namespaceScopeOptionsForMode(excludeSystemNamespaces, true)
+}
+
+func namespaceScopeOptionsForMode(
+	excludeSystemNamespaces bool,
+	unicode bool,
+) []huh.Option[string] {
+	selected := "Choose namespaces..."
+	if unicode {
+		selected = "Choose namespaces…"
+	}
+	return []huh.Option[string]{
+		huh.NewOption(allNamespaceScopeLabel(excludeSystemNamespaces), "all"),
+		huh.NewOption(selected, "selected"),
+	}
+}
+
+func extraSourcesTitle(unicode bool) string {
+	if unicode {
+		return "Extra sources · optional"
+	}
+	return "Extra sources - optional"
+}
+
+func logWindowOptions() []huh.Option[string] {
+	return []huh.Option[string]{
+		huh.NewOption("30 minutes", "30m"),
+		huh.NewOption("1 hour", "1h"),
+		huh.NewOption("6 hours", "6h"),
+		huh.NewOption("Custom", "custom"),
+	}
+}
+
+func outputModeOptions(unicode bool) []huh.Option[string] {
+	custom := "Custom path..."
+	if unicode {
+		custom = "Custom path…"
+	}
+	return []huh.Option[string]{
+		huh.NewOption("Automatic (~/.qodo-support-bundles)", "automatic"),
+		huh.NewOption(custom, "custom"),
+	}
+}
+
+func collectorSettingsVisible(collectors []string, collector string) bool {
+	return slices.Contains(collectors, collector)
+}
 
 type gkeContextName struct {
 	Project  string
 	Location string
 	Cluster  string
+}
+
+type wizardSemantic int
+
+const (
+	wizardTitleAccent wizardSemantic = iota
+	wizardActive
+	wizardSafe
+	wizardWarning
+	wizardFailure
+	wizardSecondary
+)
+
+type wizardPalette struct {
+	Purple  lipgloss.AdaptiveColor
+	Cyan    lipgloss.AdaptiveColor
+	Green   lipgloss.AdaptiveColor
+	Amber   lipgloss.AdaptiveColor
+	Red     lipgloss.AdaptiveColor
+	Neutral lipgloss.AdaptiveColor
+}
+
+func qodoScoutColors() wizardPalette {
+	return wizardPalette{
+		Purple:  lipgloss.AdaptiveColor{Light: "#6D28D9", Dark: "#A78BFA"},
+		Cyan:    lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#67E8F9"},
+		Green:   lipgloss.AdaptiveColor{Light: "#15803D", Dark: "#86EFAC"},
+		Amber:   lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#FCD34D"},
+		Red:     lipgloss.AdaptiveColor{Light: "#B91C1C", Dark: "#FCA5A5"},
+		Neutral: lipgloss.AdaptiveColor{Light: "#6B7280", Dark: "#94A3B8"},
+	}
+}
+
+func semanticWizardText(kind wizardSemantic, text string, enabled bool) string {
+	if !enabled {
+		return text
+	}
+	palette := qodoScoutColors()
+	style := lipgloss.NewStyle()
+	switch kind {
+	case wizardTitleAccent:
+		style = style.Foreground(palette.Purple).Bold(true)
+	case wizardActive:
+		style = style.Foreground(palette.Cyan).Bold(true)
+	case wizardSafe:
+		style = style.Foreground(palette.Green)
+	case wizardWarning:
+		style = style.Foreground(palette.Amber)
+	case wizardFailure:
+		style = style.Foreground(palette.Red)
+	case wizardSecondary:
+		style = style.Foreground(palette.Neutral).Faint(true)
+	}
+	return style.Render(text)
+}
+
+func wizardColorEnabled(accessible bool, writer io.Writer) bool {
+	termName := os.Getenv("TERM")
+	return !accessible &&
+		os.Getenv("NO_COLOR") == "" &&
+		termName != "" &&
+		!strings.EqualFold(termName, "dumb") &&
+		terminalWriter(writer)
 }
 
 func parseGKEContextName(value string) (gkeContextName, bool) {
@@ -44,7 +291,7 @@ func contextDisplayLabel(contextName string, currentContext string) string {
 		label = fmt.Sprintf("%s (%s)", parsed.Cluster, parsed.Project)
 	}
 	if contextName == currentContext {
-		label = "CURRENT · " + label
+		label += "  CURRENT"
 	}
 	return label
 }
@@ -93,6 +340,14 @@ func primaryContextOptions(
 	primaryContext string,
 	currentContext string,
 ) []huh.Option[string] {
+	return primaryContextOptionsForMode(primaryContext, currentContext, true)
+}
+
+func primaryContextOptionsForMode(
+	primaryContext string,
+	currentContext string,
+	unicode bool,
+) []huh.Option[string] {
 	options := make([]huh.Option[string], 0, 2)
 	if primaryContext != "" {
 		options = append(
@@ -105,8 +360,61 @@ func primaryContextOptions(
 	}
 	return append(
 		options,
-		huh.NewOption("Choose another cluster", chooseAnotherContextValue),
+		huh.NewOption(chooseAnotherLabel(unicode), chooseAnotherContextValue),
 	)
+}
+
+func chooseAnotherLabel(unicode bool) string {
+	if unicode {
+		return "Choose another…"
+	}
+	return "Choose another..."
+}
+
+func styleCurrentContext(
+	options []huh.Option[string],
+	currentContext string,
+	enabled bool,
+) []huh.Option[string] {
+	if !enabled {
+		return options
+	}
+	for index := range options {
+		if options[index].Value == currentContext {
+			options[index].Key = semanticWizardText(
+				wizardActive,
+				options[index].Key,
+				true,
+			)
+		}
+	}
+	return options
+}
+
+func styleWizardSummary(summary string, enabled bool) string {
+	if !enabled {
+		return summary
+	}
+	lines := strings.Split(summary, "\n")
+	if len(lines) > 0 {
+		lines[0] = semanticWizardText(wizardTitleAccent, lines[0], true)
+	}
+	if len(lines) > 1 {
+		last := len(lines) - 1
+		lines[last] = semanticWizardText(wizardWarning, lines[last], true)
+	}
+	for index, line := range lines {
+		rawStart := strings.Index(line, "(context: ")
+		if rawStart < 0 || !strings.HasSuffix(line, ")") {
+			continue
+		}
+		lines[index] = line[:rawStart] + semanticWizardText(
+			wizardSecondary,
+			line[rawStart:],
+			true,
+		)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func newContextSelect(
@@ -157,66 +465,115 @@ func productionContextWarning(contextName string) string {
 	)
 }
 
-func wizardStepTitle(step int, title string) string {
-	return fmt.Sprintf("Step %d of 5 · %s", step, title)
+func wizardStepTitle(_ int, title string) string {
+	return title
 }
 
-func wizardDescription(content string, multiSelect bool) string {
-	help := wizardNavigationHelp
-	if multiSelect {
-		help = wizardMultiSelectHelp
-	}
-	if content == "" {
-		return help
-	}
-	return content + "\n" + help
+func wizardDescription(content string, _ bool) string {
+	return content
+}
+
+func wizardGroupDescription(_ bool, _ bool) string {
+	return ""
 }
 
 func wizardGroup(
 	step int,
 	title string,
 	multiSelect bool,
+	accessible bool,
 	fields ...huh.Field,
 ) *huh.Group {
-	help := wizardNavigationHelp
-	if multiSelect {
-		help = wizardMultiSelectHelp
-	}
 	return huh.NewGroup(fields...).
-		Title(wizardStepTitle(step, title)).
-		Description(wizardPurpose + "\n" + help)
+		Title("").
+		Description(wizardGroupDescription(accessible, multiSelect))
 }
 
 func discoveryStatusLine(contextName string, accessible bool) string {
 	message := fmt.Sprintf(
-		"Checking cluster access and discovering namespaces for %s…",
-		terminalLine(contextName),
+		"Checking read-only Kubernetes access and finding namespaces in %s…",
+		selectedContextLabel(contextName),
 	)
 	if accessible {
 		return message
 	}
 	return lipgloss.NewStyle().
-		Foreground(lipgloss.AdaptiveColor{Light: "#005A8D", Dark: "#7DD3FC"}).
+		Foreground(qodoScoutColors().Cyan).
 		Bold(true).
 		Render(message)
 }
 
-func qodoScoutTheme() *huh.Theme {
-	theme := huh.ThemeBase()
-	accent := lipgloss.AdaptiveColor{Light: "#005A8D", Dark: "#7DD3FC"}
-	emphasis := lipgloss.AdaptiveColor{Light: "#17324D", Dark: "#E5F4FF"}
-	muted := lipgloss.AdaptiveColor{Light: "#4B5563", Dark: "#A7B4C2"}
+func selectedContextLabel(contextName string) string {
+	parsed, ok := parseGKEContextName(contextName)
+	if !ok {
+		return terminalLine(contextName)
+	}
+	words := strings.Fields(strings.NewReplacer("-", " ", "_", " ").Replace(parsed.Cluster))
+	if len(words) == 0 {
+		return terminalLine(contextName)
+	}
+	first, size := utf8.DecodeRuneInString(words[0])
+	words[0] = strings.ToUpper(string(first)) + words[0][size:]
+	if words[len(words)-1] != "cluster" {
+		words = append(words, "cluster")
+	}
+	return terminalLine(strings.Join(words, " "))
+}
 
-	theme.Group.Title = theme.Group.Title.Foreground(accent).Bold(true)
-	theme.Group.Description = theme.Group.Description.Foreground(muted)
-	theme.Focused.Title = theme.Focused.Title.Foreground(emphasis).Bold(true)
-	theme.Focused.Description = theme.Focused.Description.Foreground(muted)
-	theme.Focused.SelectSelector = theme.Focused.SelectSelector.Foreground(accent)
-	theme.Focused.MultiSelectSelector = theme.Focused.MultiSelectSelector.Foreground(accent)
-	theme.Focused.SelectedPrefix = theme.Focused.SelectedPrefix.Foreground(accent)
+func confirmationContextLabel(contextName string, contexts []string) string {
+	raw := terminalLine(contextName)
+	label := confirmationContextBaseLabel(raw)
+	collisions := 0
+	for _, candidate := range contexts {
+		if confirmationContextBaseLabel(terminalLine(candidate)) == label {
+			collisions++
+		}
+	}
+	if collisions > 1 {
+		return fmt.Sprintf("%s (context: %s)", label, raw)
+	}
+	return label
+}
+
+func confirmationContextBaseLabel(contextName string) string {
+	parsed, ok := parseGKEContextName(contextName)
+	if !ok {
+		return contextName
+	}
+	return compactClusterLabel(parsed.Cluster)
+}
+
+func compactClusterLabel(cluster string) string {
+	label := selectedContextLabel("gke_project_location_" + cluster)
+	label = strings.TrimSuffix(label, " cluster")
+	return label
+}
+
+func qodoScoutTheme() *huh.Theme {
+	return qodoScoutThemeFor(true)
+}
+
+func qodoScoutThemeFor(enabled bool) *huh.Theme {
+	theme := huh.ThemeBase()
+	if !enabled {
+		return theme
+	}
+	palette := qodoScoutColors()
+	theme.Group.Title = theme.Group.Title.Foreground(palette.Purple).Bold(true)
+	theme.Group.Description = theme.Group.Description.Foreground(palette.Neutral)
+	theme.Focused.Title = theme.Focused.Title.Foreground(palette.Purple).Bold(true)
+	theme.Focused.Description = theme.Focused.Description.Foreground(palette.Neutral)
+	theme.Focused.SelectSelector = theme.Focused.SelectSelector.Foreground(palette.Cyan).Bold(true)
+	theme.Focused.MultiSelectSelector = theme.Focused.MultiSelectSelector.Foreground(palette.Cyan).Bold(true)
+	theme.Focused.SelectedOption = theme.Focused.SelectedOption.Foreground(palette.Purple).Bold(true)
+	theme.Focused.SelectedPrefix = theme.Focused.SelectedPrefix.Foreground(palette.Green).Bold(true)
+	theme.Focused.ErrorIndicator = theme.Focused.ErrorIndicator.Foreground(palette.Red)
+	theme.Focused.ErrorMessage = theme.Focused.ErrorMessage.Foreground(palette.Red)
+	theme.Help.ShortKey = theme.Help.ShortKey.Foreground(palette.Neutral)
+	theme.Help.ShortDesc = theme.Help.ShortDesc.Foreground(palette.Neutral)
 	theme.Focused.FocusedButton = theme.Focused.FocusedButton.
-		Background(accent).
-		Foreground(lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#07131D"}).
+		Background(palette.Purple).
+		Foreground(lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#111827"}).
 		Bold(true)
 	return theme
 }

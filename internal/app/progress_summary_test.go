@@ -44,18 +44,45 @@ func TestBuildProgressSummaryUsesCompactTopLevelOutcomes(t *testing.T) {
 	got := strings.Join(progressSummaryLines(summary, 38*time.Second+700*time.Millisecond, true), "\n")
 	want := "" +
 		"Qodo Scout\n" +
-		"Bundle created with 1 warning\n" +
-		"1 namespace · 18 pods · 37 log streams · 38.7s\n\n" +
-		"✓ Kubernetes diagnostics\n" +
-		"✓ Workload context\n" +
+		"Bundle created · 1 warning\n" +
+		"1 namespace · 18 pods · 37 log sources · 38.7s\n\n" +
+		"✓ Read-only Kubernetes data\n" +
+		"✓ Workload and service context\n" +
 		"! Prometheus not collected\n" +
 		"  No Prometheus service found in bundle-alon-google.\n" +
-		"✓ Archive ready · 79.4 KiB\n\n" +
-		"Saved locally:\n" +
-		"/tmp/bundle.tar.gz\n" +
-		"Review collection-issues.jsonl before sharing."
+		"✓ Archive prepared with redaction · 79.4 KiB\n\n" +
+		"Bundle saved: /tmp/bundle.tar.gz\n" +
+		"! Review before sharing"
 	if got != want {
 		t.Fatalf("summary:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestProgressSummaryUsesApprovedHumanCopy(t *testing.T) {
+	t.Parallel()
+	summary := progressSummary{
+		ArchivePath: "/Users/alice/qodo-support-bundles/bundle.tar.gz",
+		ArchiveSize: 77210,
+		Namespaces:  1,
+		Pods:        17,
+		LogStreams:  35,
+		SourceOutcomes: []progressSummaryOutcome{
+			{Label: "Read-only Kubernetes data", Status: progressCompleted},
+			{Label: "Workload and service context", Status: progressCompleted},
+		},
+	}
+	const want = "" +
+		"Qodo Scout\n" +
+		"Bundle created\n" +
+		"1 namespace · 17 pods · 35 log sources · 36.7s\n\n" +
+		"✓ Read-only Kubernetes data\n" +
+		"✓ Workload and service context\n" +
+		"✓ Archive prepared with redaction · 75.4 KiB\n\n" +
+		"Bundle saved: /Users/alice/qodo-support-bundles/bundle.tar.gz\n" +
+		"! Review before sharing"
+	got := strings.Join(progressSummaryLines(summary, 36*time.Second+700*time.Millisecond, true), "\n")
+	if got != want {
+		t.Fatalf("summary:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 }
 
@@ -147,7 +174,7 @@ func TestProgressSummaryPlainModeUsesASCII(t *testing.T) {
 		LogStreams:   4,
 		WarningCount: 1,
 		SourceOutcomes: []progressSummaryOutcome{
-			{Label: "Kubernetes diagnostics", Status: progressCompleted},
+			{Label: "Read-only Kubernetes data", Status: progressCompleted},
 			{Label: "Prometheus not collected", Status: progressWarning},
 		},
 	}
@@ -158,8 +185,17 @@ func TestProgressSummaryPlainModeUsesASCII(t *testing.T) {
 			t.Fatalf("plain summary contains %q:\n%s", unicode, got)
 		}
 	}
-	if !strings.Contains(got, "2 namespaces | 3 pods | 4 log streams | 1s") {
+	if !strings.Contains(got, "2 namespaces | 3 pods | 4 log sources | 1s") {
 		t.Fatalf("plain summary omitted compact counts:\n%s", got)
+	}
+	for _, expected := range []string{
+		"[ok] Read-only Kubernetes data",
+		"[ok] Archive prepared with redaction",
+		"[!] Review before sharing",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("plain summary missing %q:\n%s", expected, got)
+		}
 	}
 }
 
@@ -184,9 +220,16 @@ func TestProgressSummaryFitsTerminalWidth(t *testing.T) {
 		Summary: summary,
 		At:      time.Unix(1, 0),
 	})
-	for _, line := range strings.Split(model.View(), "\n") {
+	view := model.View()
+	for _, line := range strings.Split(view, "\n") {
+		if strings.HasPrefix(line, "Bundle saved: ") {
+			continue
+		}
 		if len([]rune(line)) > 28 {
 			t.Fatalf("line width %d exceeds 28: %q", len([]rune(line)), line)
 		}
+	}
+	if !strings.Contains(view, "Bundle saved: "+summary.ArchivePath) {
+		t.Fatalf("narrow summary clipped archive path:\n%s", view)
 	}
 }

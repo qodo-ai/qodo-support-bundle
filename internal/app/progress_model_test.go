@@ -41,23 +41,121 @@ func TestProgressModelUpdateBuildsDeterministicHierarchy(t *testing.T) {
 	const want = "" +
 		"Qodo Scout interactive display\n" +
 		"● Qodo Scout collection\n" +
-		"  ✓ Kubernetes diagnostics - 2/2 namespaces (1.5s)\n" +
-		"| Qodo Scout is working"
+		"  ✓ Kubernetes diagnostics · 2/2 namespaces · 1.5s\n" +
+		"[●━        ] Qodo Scout is working"
 	if got := model.View(); got != want {
 		t.Fatalf("view mismatch:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 }
 
-func TestProgressModelTickAndMascotAreExplicit(t *testing.T) {
+func TestProgressModelTickCyclesScannerFramesByDefault(t *testing.T) {
 	t.Parallel()
-	model := newProgressModel(progressModelOptions{Mascot: true, Width: 80})
-
-	if got := model.View(); !strings.HasSuffix(got, "~(____:> Qodo Scout is working") {
-		t.Fatalf("first mascot frame missing: %q", got)
+	model := newProgressModel(progressModelOptions{Width: 80})
+	for index, frame := range []string{
+		"[>         ]",
+		"[-->       ]",
+		"[---->     ]",
+		"[------>   ]",
+		"[--------> ]",
+		"[------>   ]",
+		"[---->     ]",
+		"[-->       ]",
+	} {
+		if got := model.View(); !strings.HasSuffix(got, frame+" Qodo Scout is working") {
+			t.Fatalf("frame %d missing: %q", index, got)
+		}
+		model = updateProgressModel(t, model, progressTickMsg{})
 	}
-	model = updateProgressModel(t, model, progressTickMsg{})
-	if got := model.View(); !strings.HasSuffix(got, "-(____:> Qodo Scout is working") {
-		t.Fatalf("second mascot frame missing: %q", got)
+}
+
+func TestProgressModelCaptionTracksActiveStageAndCount(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	model := newProgressModel(progressModelOptions{Unicode: true, Width: 80})
+	model = updateProgressModel(t, model, progressUpdateMsg{
+		Update: progressUpdate{
+			ID:      "kubernetes.logs",
+			Label:   "Container logs",
+			Status:  progressActive,
+			Current: 18,
+			Total:   35,
+			Unit:    "sources",
+		},
+		At: now,
+	})
+
+	const want = "[●━        ]  Scout is collecting container logs · 18/35"
+	if got := model.activityLine(); got != want {
+		t.Fatalf("scanner activity=%q want=%q", got, want)
+	}
+}
+
+func TestProgressModelCancellationReplacesActiveLogsWithClearOutcome(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	model := newProgressModel(progressModelOptions{Unicode: true, Width: 80})
+	model = updateProgressModel(t, model, progressUpdateMsg{
+		Update: progressUpdate{
+			ID: "kubernetes.logs", Label: "Container logs", Level: 2,
+			Status: progressActive, Current: 17, Total: 35, Unit: "sources",
+		},
+		At: now,
+	})
+	model = updateProgressModel(t, model, progressCanceledMsg{})
+
+	const want = "" +
+		"! Canceled while collecting logs · 17/35 complete\n" +
+		"No bundle created."
+	if got := model.View(); got != want {
+		t.Fatalf("cancellation view:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+	if strings.Contains(model.View(), "partial") {
+		t.Fatalf("cancellation mislabeled partial: %q", model.View())
+	}
+}
+
+func TestProgressModelCancellationAfterLogsUsesGenericOutcome(t *testing.T) {
+	t.Parallel()
+	model := newProgressModel(progressModelOptions{
+		Unicode: true,
+		Started: time.Unix(10, 0),
+	})
+	model = updateProgressModel(t, model, progressUpdateMsg{
+		Update: progressUpdate{
+			ID: "kubernetes.logs", Label: "Container logs",
+			Status: progressCompleted, Current: 35, Total: 35, Unit: "sources",
+		},
+		At: time.Unix(11, 0),
+	})
+	model = updateProgressModel(t, model, progressUpdateMsg{
+		Update: progressUpdate{ID: "workload", Label: "Workload and service context", Status: progressActive},
+		At:     time.Unix(12, 0),
+	})
+	model = updateProgressModel(t, model, progressCanceledMsg{})
+
+	const want = "! Canceled\nNo bundle created."
+	if got := model.View(); got != want {
+		t.Fatalf("late cancellation:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestProgressModelCaptionFollowsLatestActiveStage(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	model := newProgressModel(progressModelOptions{Width: 80})
+	for _, update := range []progressUpdate{
+		{ID: "preflight", Label: "Read-only cluster access", Status: progressActive},
+		{ID: "kubernetes.discovery", Label: "Finding namespaces", Status: progressActive},
+		{
+			ID: "kubernetes.discovery", Label: "Finding namespaces",
+			Status: progressCompleted, Current: 2, Total: 2,
+		},
+		{ID: "archive", Label: "Redaction and archive", Status: progressActive},
+	} {
+		model = updateProgressModel(t, model, progressUpdateMsg{Update: update, At: now})
+	}
+	if got := model.activityLine(); got != "[>         ]  Scout is preparing redacted archive" {
+		t.Fatalf("latest-stage activity=%q", got)
 	}
 }
 
@@ -112,15 +210,14 @@ func TestProgressModelSummaryCompactsSuccessfulNestedStages(t *testing.T) {
 
 	const want = "" +
 		"Qodo Scout\n" +
-		"Bundle created with 1 warning\n" +
-		"1 namespace · 18 pods · 37 log streams · 2.3s\n\n" +
+		"Bundle created · 1 warning\n" +
+		"1 namespace · 18 pods · 37 log sources · 2.3s\n\n" +
 		"✓ Kubernetes diagnostics\n" +
 		"! Workload context incomplete\n" +
 		"  Review collection-issues.jsonl for details.\n" +
-		"✓ Archive ready · 2.0 KiB\n\n" +
-		"Saved locally:\n" +
-		"/tmp/bundle.tar.gz\n" +
-		"Review collection-issues.jsonl before sharing."
+		"✓ Archive prepared with redaction · 2.0 KiB\n\n" +
+		"Bundle saved: /tmp/bundle.tar.gz\n" +
+		"! Review before sharing"
 	if got := model.View(); got != want {
 		t.Fatalf("summary mismatch:\ngot:\n%s\nwant:\n%s", got, want)
 	}
