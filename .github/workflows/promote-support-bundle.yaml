@@ -30,6 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
+    outputs:
+      version: ${{ steps.release.outputs.version }}
     steps:
       - name: Checkout promotion logic
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -87,6 +89,7 @@ jobs:
               --source-ref "refs/tags/$RELEASE_TAG"
           done
           (cd release && sha256sum --strict --check checksums.sha256)
+          (cd release && sha256sum --strict --check installer-checksums.sha256)
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
@@ -102,3 +105,64 @@ jobs:
           QODO_SUPPORT_BUNDLE_RELEASE_DIR: ${{ github.workspace }}/release
           QODO_SUPPORT_BUNDLE_VERSION: ${{ steps.release.outputs.version }}
         run: ./scripts/promote-gcs.sh
+
+      - name: Verify public CDN bytes and headers
+        env:
+          QODO_SUPPORT_BUNDLE_RELEASE_DIR: ${{ github.workspace }}/release
+          QODO_SUPPORT_BUNDLE_VERSION: ${{ steps.release.outputs.version }}
+        run: sh scripts/verify-production-cdn.sh
+
+  production-unix-canary:
+    needs: promote
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout canary logic
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Exercise pinned and metadata-selected production installers
+        env:
+          QODO_SUPPORT_BUNDLE_VERSION: ${{ needs.promote.outputs.version }}
+        run: sh scripts/canary-production-installers.sh
+
+  production-windows-arm64-canary:
+    needs: promote
+    runs-on: windows-11-arm
+    timeout-minutes: 10
+    steps:
+      - name: Exercise pinned and metadata-selected production installer
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ needs.promote.outputs.version }}
+        run: |
+          $base = 'https://get.qodo.ai/support-bundle'
+          $work = Join-Path $env:RUNNER_TEMP 'qodo-scout-production-arm64'
+          New-Item -ItemType Directory -Path $work -Force | Out-Null
+          curl.exe --fail --location --silent --show-error --output "$work/install.ps1" "$base/install.ps1"
+          curl.exe --fail --location --silent --show-error --output "$work/version.json" "$base/version.json"
+          $metadata = Get-Content "$work/version.json" -Raw | ConvertFrom-Json
+          if (
+              @($metadata.PSObject.Properties).Count -ne 1 -or
+              $metadata.version -ne $env:EXPECTED_VERSION
+          ) {
+              throw 'production version.json does not match the promoted version'
+          }
+          curl.exe --fail --location --silent --show-error --output "$work/versioned-install.ps1" "$base/releases/$env:EXPECTED_VERSION/install.ps1"
+          if ((Get-FileHash "$work/install.ps1").Hash -ne (Get-FileHash "$work/versioned-install.ps1").Hash) {
+              throw 'stable and versioned Windows installers differ'
+          }
+          & "$work/install.ps1" -InstallDir "$work/metadata"
+          & "$work/metadata/qodo-scout.exe" version
+          if ($LASTEXITCODE -ne 0) { throw 'metadata-selected Windows ARM64 canary failed' }
+          & "$work/install.ps1" -Version $env:EXPECTED_VERSION -InstallDir "$work/pinned"
+          & "$work/pinned/qodo-scout.exe" version
+          if ($LASTEXITCODE -ne 0) { throw 'pinned Windows ARM64 canary failed' }

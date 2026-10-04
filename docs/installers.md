@@ -12,9 +12,10 @@ qodo-scout collect --interactive
 
 ## Publication status
 
-This repository change does not publish either installer or `version.json`.
-The URLs below are the intended contract for the follow-up publication PR and
-are not expected to work until that PR is deployed.
+Publication is implemented as manually dispatched dev and approved production
+workflows. Merging the implementation does not run either workflow. The URLs
+below return 404 until an operator publishes and promotes the first release.
+See [the publication contract and runbook](publication.md).
 
 After publication, macOS and Linux customers can inspect and run:
 
@@ -102,12 +103,12 @@ versions outside the release version grammar. A resolved release uses:
 https://get.qodo.ai/support-bundle/releases/<version>/
 ```
 
-The publication workflow in the follow-up PR must update `version.json`
-atomically only after every production artifact and `checksums.sha256` has been
-published and verified. The metadata should use a short or no-cache policy,
-such as `Cache-Control: no-cache, max-age=0, must-revalidate`; immutable release
-objects retain long-lived immutable caching. This PR intentionally does not
-commit a live-current metadata file that could drift from production.
+The publication workflow updates `version.json` atomically only after every
+production artifact, manifest, and stable installer has been published and
+verified. Metadata uses
+`Cache-Control: no-cache, max-age=0, must-revalidate`; immutable release
+objects retain one-year immutable caching. No live-current metadata file is
+committed to the repository because it could drift from production.
 
 ## Security and proxy behavior
 

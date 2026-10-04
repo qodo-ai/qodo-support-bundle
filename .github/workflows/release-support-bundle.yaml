@@ -160,12 +160,16 @@ jobs:
           make release VERSION=0.0.0-ci
           cd dist
           sha256sum --check checksums.sha256
+          sha256sum --check installer-checksums.sha256
           test -f qodo-support-bundle-linux-amd64
           test -f qodo-support-bundle-linux-arm64
           test -f qodo-support-bundle-darwin-amd64
           test -f qodo-support-bundle-darwin-arm64
           test -f qodo-support-bundle-windows-amd64.exe
           test -f qodo-support-bundle-windows-arm64.exe
+          test -f install.sh
+          test -f install.ps1
+          test -f installer-checksums.sha256
 
   release:
     if: ${{ github.event_name != 'pull_request' }}
@@ -244,7 +248,10 @@ jobs:
           path: dist/
 
       - name: Verify release asset checksums
-        run: cd dist && sha256sum --check checksums.sha256
+        run: |
+          cd dist
+          sha256sum --check checksums.sha256
+          sha256sum --check installer-checksums.sha256
 
       - name: Attest release assets
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
@@ -261,4 +268,4 @@ jobs:
       - name: Upload GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$RELEASE_TAG" dist/* --clobber
+        run: sh scripts/upload-github-release.sh "$RELEASE_TAG" dist

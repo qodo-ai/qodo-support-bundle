@@ -86,6 +86,7 @@ jobs:
               --source-ref "refs/tags/$RELEASE_TAG"
           done
           (cd dist && sha256sum --strict --check checksums.sha256)
+          (cd dist && sha256sum --strict --check installer-checksums.sha256)
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
@@ -100,3 +101,61 @@ jobs:
         env:
           QODO_SUPPORT_BUNDLE_VERSION: ${{ steps.release.outputs.version }}
         run: ./scripts/publish-gcs.sh
+
+      - name: Exercise pinned and metadata-selected dev installers
+        env:
+          QODO_SUPPORT_BUNDLE_VERSION: ${{ steps.release.outputs.version }}
+        run: sh scripts/canary-dev-installers.sh
+
+  windows-arm64-canary:
+    needs: publish
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    environment: development
+    steps:
+      - name: Checkout canary logic
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: projects/${{ env.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Exercise native Windows ARM64 dev installer
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP 'qodo-scout-dev-arm64'
+          $release = Join-Path $work 'release'
+          New-Item -ItemType Directory -Path $release -Force | Out-Null
+          gcloud storage cp "gs://$env:QODO_SUPPORT_BUNDLE_BUCKET/$env:QODO_SUPPORT_BUNDLE_PREFIX/version.json" "$work/version.json"
+          $env:QODO_SCOUT_INSTALLER_TESTING = '1'
+          . ./install.ps1
+          $resolved = ConvertFrom-QodoScoutVersionJson (Get-Content "$work/version.json" -Raw)
+          if ($resolved -ne $env:EXPECTED_VERSION.TrimStart('v')) {
+              throw "dev metadata selected $resolved, expected $env:EXPECTED_VERSION"
+          }
+          foreach ($name in @(
+              'install.ps1',
+              'checksums.sha256',
+              'qodo-support-bundle-windows-arm64.exe'
+          )) {
+              gcloud storage cp "gs://$env:QODO_SUPPORT_BUNDLE_BUCKET/$env:QODO_SUPPORT_BUNDLE_PREFIX/releases/$resolved/$name" "$release/$name"
+          }
+          gcloud storage cp "gs://$env:QODO_SUPPORT_BUNDLE_BUCKET/$env:QODO_SUPPORT_BUNDLE_PREFIX/install.ps1" "$work/install.ps1"
+          if ((Get-FileHash "$work/install.ps1").Hash -ne (Get-FileHash "$release/install.ps1").Hash) {
+              throw 'stable and versioned Windows installers differ'
+          }
+          Remove-Item Env:QODO_SCOUT_INSTALLER_TESTING
+          & "$work/install.ps1" -Version $resolved -SourceDir $release -InstallDir "$work/install"
+          & "$work/install/qodo-scout.exe" version
+          if ($LASTEXITCODE -ne 0) { throw 'native Windows ARM64 canary failed' }
