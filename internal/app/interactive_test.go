@@ -134,7 +134,7 @@ func TestCollectInteractiveUsesFlagDefaultsAndCancelCreatesNoArchive(t *testing.
 	}
 }
 
-func TestCollectInteractiveAnswersUseExistingCollectionPathAndStdout(t *testing.T) {
+func TestCollectInteractiveShowsSingleFinalArchiveResult(t *testing.T) {
 	root := t.TempDir()
 	kubectl := fakeKubectl(t, root, "")
 	output := root + "/bundle.tar.gz"
@@ -186,13 +186,19 @@ func TestCollectInteractiveAnswersUseExistingCollectionPathAndStdout(t *testing.
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
-	want := fmt.Sprintf(
-		"Support bundle created: %s\n"+
-			"Kubernetes scope: 1/1 namespaces, 1 pods, 1 containers (0 init, 0 ephemeral)\n",
-		output,
-	)
-	if stdout.String() != want {
-		t.Fatalf("stdout changed:\ngot  %q\nwant %q", stdout.String(), want)
+	wantStdout := "Kubernetes scope: 1/1 namespaces, 1 pods, 1 containers (0 init, 0 ephemeral)\n"
+	if stdout.String() != wantStdout {
+		t.Fatalf("stdout changed:\ngot  %q\nwant %q", stdout.String(), wantStdout)
+	}
+	transcript := stdout.String() + stderr.String()
+	if strings.Count(transcript, "Bundle saved: "+output) != 1 {
+		t.Fatalf("interactive final archive result count changed:\n%s", transcript)
+	}
+	if strings.Contains(transcript, fmt.Sprintf("Support bundle created: %s", output)) {
+		t.Fatalf("interactive output retained legacy archive result:\n%s", transcript)
+	}
+	if _, err := os.Stat(output); err != nil {
+		t.Fatalf("interactive collection did not create archive: %v", err)
 	}
 }
 
