@@ -128,11 +128,13 @@ Describe 'Qodo Scout local source installation' -Skip:(-not $IsWindows) {
         Install-QodoScout `
             -RequestedVersion '1.2.3' `
             -RequestedInstallDirectory $script:InstallDirectory `
-            -RequestedSourceDirectory $script:SourceDirectory
+            -RequestedSourceDirectory $script:SourceDirectory `
+            -RuntimeArchitecture 'X64'
         Install-QodoScout `
             -RequestedVersion '1.2.3' `
             -RequestedInstallDirectory $script:InstallDirectory `
-            -RequestedSourceDirectory $script:SourceDirectory
+            -RequestedSourceDirectory $script:SourceDirectory `
+            -RuntimeArchitecture 'X64'
 
         $installed = Join-Path $script:InstallDirectory 'qodo-scout.exe'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($installed)) |
@@ -177,7 +179,8 @@ Describe 'Qodo Scout local source installation' -Skip:(-not $IsWindows) {
             Install-QodoScout `
                 -RequestedVersion '1.2.3' `
                 -RequestedInstallDirectory $script:InstallDirectory `
-                -RequestedSourceDirectory $script:SourceDirectory
+                -RequestedSourceDirectory $script:SourceDirectory `
+                -RuntimeArchitecture 'X64'
         } | Should -Throw '*checksum*'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($installed)) |
             Should -Be 'CQk='
@@ -194,7 +197,8 @@ Describe 'Qodo Scout local source installation' -Skip:(-not $IsWindows) {
             Install-QodoScout `
                 -RequestedVersion '1.2.3' `
                 -RequestedInstallDirectory $script:InstallDirectory `
-                -RequestedSourceDirectory $script:SourceDirectory
+                -RequestedSourceDirectory $script:SourceDirectory `
+                -RuntimeArchitecture 'X64'
         } | Should -Throw '*previous executable is preserved at*'
         $rollback = @(
             Get-ChildItem `
@@ -240,7 +244,9 @@ Describe 'Qodo Scout metadata installation' -Skip:(-not $IsWindows) {
     }
 
     It 'resolves metadata and downloads from one immutable release directory' {
-        Install-QodoScout -RequestedInstallDirectory $script:LatestInstallDirectory
+        Install-QodoScout `
+            -RequestedInstallDirectory $script:LatestInstallDirectory `
+            -RuntimeArchitecture 'X64'
 
         $expectedUris = @(
             'https://get.qodo.ai/support-bundle/version.json',
@@ -299,7 +305,9 @@ Describe 'Qodo Scout metadata installation' -Skip:(-not $IsWindows) {
         Mock Invoke-QodoScoutDownload { throw 'download failed: fixture' }
 
         {
-            Install-QodoScout -RequestedInstallDirectory $script:LatestInstallDirectory
+            Install-QodoScout `
+                -RequestedInstallDirectory $script:LatestInstallDirectory `
+                -RuntimeArchitecture 'X64'
         } | Should -Throw '*download failed*'
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($installed)) |
             Should -Be 'CQk='
