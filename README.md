@@ -641,7 +641,13 @@ https://get.qodo.ai/support-bundle/releases/<version>/
 ```
 
 The Qodo CLI continues to own the bucket root. Support Bundle workflows read
-and write only the `support-bundle/` prefix.
+and create only objects under the `support-bundle/` prefix. Uploads use
+exact-object Cloud Storage API requests with a zero-generation precondition;
+an existing object is accepted only after an exact-object download matches its
+expected SHA-256. The five binaries are created before `checksums.sha256`, which
+acts as the release completion marker. The publisher does not need
+`storage.objects.list`, overwrite, or delete permission, so it cannot enumerate
+names elsewhere in the shared bucket.
 
 ## Customer delivery
 
