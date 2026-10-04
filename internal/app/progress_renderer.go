@@ -464,16 +464,39 @@ func archivePathLine(displayPath string, linkPath string, hyperlink bool) string
 	if linkPath == "" {
 		linkPath = displayPath
 	}
-	absolutePath, err := filepath.Abs(linkPath)
-	if err != nil {
-		absolutePath = linkPath
-	}
-	target := (&url.URL{
-		Scheme: "file",
-		Path:   terminalLine(absolutePath),
-	}).String()
+	target := archiveFileURL(linkPath)
 	return "Bundle saved: \x1b]8;;" + target + "\x1b\\" +
 		visible + "\x1b]8;;\x1b\\"
+}
+
+func archiveFileURL(path string) string {
+	path = terminalLine(path)
+	if len(path) >= 3 &&
+		((path[0] >= 'a' && path[0] <= 'z') ||
+			(path[0] >= 'A' && path[0] <= 'Z')) &&
+		path[1] == ':' &&
+		(path[2] == '\\' || path[2] == '/') {
+		return (&url.URL{
+			Scheme: "file",
+			Path:   "/" + strings.ReplaceAll(path, `\`, "/"),
+		}).String()
+	}
+	if strings.HasPrefix(path, `\\`) {
+		normalized := strings.TrimPrefix(strings.ReplaceAll(path, `\`, "/"), "//")
+		host, remainder, found := strings.Cut(normalized, "/")
+		if found && host != "" {
+			return (&url.URL{
+				Scheme: "file",
+				Host:   host,
+				Path:   "/" + remainder,
+			}).String()
+		}
+	}
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		absolutePath = path
+	}
+	return (&url.URL{Scheme: "file", Path: absolutePath}).String()
 }
 
 func terminalHyperlinksEnabled(interactive bool) bool {

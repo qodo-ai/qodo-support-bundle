@@ -468,6 +468,28 @@ func TestArchivePathLineLinksActualHomePathWithoutExposingIt(t *testing.T) {
 	}
 }
 
+func TestArchiveFileURLNormalizesWindowsPaths(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		path string
+		want string
+	}{
+		{
+			`C:\Users\customer\Qodo cases\bundle #1.tar.gz`,
+			"file:///C:/Users/customer/Qodo%20cases/bundle%20%231.tar.gz",
+		},
+		{
+			`\\fileserver\support\bundle #1.tar.gz`,
+			"file://fileserver/support/bundle%20%231.tar.gz",
+		},
+	}
+	for _, test := range tests {
+		if got := archiveFileURL(test.path); got != test.want {
+			t.Errorf("archiveFileURL(%q)=%q want=%q", test.path, got, test.want)
+		}
+	}
+}
+
 func TestProgressRendererInteractiveSummaryUsesClickableVisiblePath(t *testing.T) {
 	t.Parallel()
 	const archivePath = "/tmp/Qodo cases/bundle #1.tar.gz"
