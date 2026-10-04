@@ -158,26 +158,27 @@ gcs_upload_mutable() {
 
   if gcs_read_exact \
     "$bucket" "$object" "$access_token" "$existing" "$headers" "$command_name"; then
-    if gcs_object_matches \
-      "$source_path" "$existing" "$headers" "$content_type" "$cache_control"; then
-      echo "${command_name}: mutable object already matches: gs://${bucket}/${object}" >&2
-      return
-    fi
     observed_generation="$(gcs_header_value x-goog-generation "$headers")"
     [ -n "$observed_generation" ] || {
       echo "${command_name}: existing object has no generation: gs://${bucket}/${object}" >&2
       return 1
     }
+    if [ -n "$expected_generation" ] &&
+      [ "$observed_generation" != "$expected_generation" ]; then
+      echo "${command_name}: generation changed for gs://${bucket}/${object}" >&2
+      return 1
+    fi
+    if gcs_object_matches \
+      "$source_path" "$existing" "$headers" "$content_type" "$cache_control"; then
+      echo "${command_name}: mutable object already matches: gs://${bucket}/${object}" >&2
+      return
+    fi
   else
     read_status=$?
     [ "$read_status" -eq 1 ] || return 1
     observed_generation=0
   fi
 
-  if [ -n "$expected_generation" ] && [ "$observed_generation" != "$expected_generation" ]; then
-    echo "${command_name}: generation changed for gs://${bucket}/${object}" >&2
-    return 1
-  fi
   generation=${expected_generation:-$observed_generation}
   if ! gcs_conditional_put \
     "$source_path" "$bucket" "$object" "$content_type" "$cache_control" \

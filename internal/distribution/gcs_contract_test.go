@@ -98,6 +98,30 @@ func TestVersionContractRendersStrictMetadataAndOrdersSemantically(t *testing.T)
 		!strings.Contains(string(output), "refusing version downgrade") {
 		t.Fatalf("downgrade result = %v\n%s", err, output)
 	}
+
+	duplicate := filepath.Join(t.TempDir(), "duplicate-version.json")
+	if err := os.WriteFile(
+		duplicate,
+		[]byte(`{"version":"1.2.3","version":"1.2.4"}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{
+		{"read", duplicate},
+		{"allow-update", duplicate, "1.2.5"},
+	} {
+		command := exec.Command("python3", append([]string{script}, arguments...)...)
+		if output, err := command.CombinedOutput(); err == nil ||
+			!strings.Contains(string(output), "duplicate JSON property") {
+			t.Fatalf("duplicate metadata result = %v\n%s", err, output)
+		}
+	}
+	invalid := exec.Command("python3", script, "render", "1.2.3--")
+	if output, err := invalid.CombinedOutput(); err == nil ||
+		!strings.Contains(string(output), "invalid version") {
+		t.Fatalf("punctuation-leading suffix result = %v\n%s", err, output)
+	}
 }
 
 func TestGCSScriptsUseVersionedImmutableSupportBundlePrefix(t *testing.T) {
@@ -400,6 +424,43 @@ func TestPublishRejectsConcurrentVersionCASConflict(t *testing.T) {
 	}
 }
 
+func TestPublishRejectsIdenticalVersionRewrite(t *testing.T) {
+	t.Parallel()
+	root := repositoryRoot(t)
+	dist := t.TempDir()
+	fakeGCS := t.TempDir()
+	requests := filepath.Join(t.TempDir(), "requests.log")
+	bin := installFakeGCSCommands(t)
+	writeReleaseFixture(t, dist, "candidate")
+	environment := []string{
+		"FAKE_GCS_ROOT=" + fakeGCS,
+		"FAKE_REQUESTS=" + requests,
+		"QODO_SUPPORT_BUNDLE_DIST=" + dist,
+		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
+	}
+	runDistributionScript(
+		t,
+		filepath.Join(root, "scripts/publish-gcs.sh"),
+		bin,
+		environment,
+	)
+
+	command := exec.Command(filepath.Join(root, "scripts/publish-gcs.sh"))
+	command.Env = append(
+		append(
+			os.Environ(),
+			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=rewrite-test",
+			"FAKE_IDENTICAL_REWRITE_OBJECT=/support-bundle/version.json",
+		),
+		environment...,
+	)
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "generation changed") {
+		t.Fatalf("identical rewrite result = %v\n%s", err, output)
+	}
+}
+
 func TestPublishRefusesAnotherPublicationOwner(t *testing.T) {
 	t.Parallel()
 	root := repositoryRoot(t)
@@ -590,6 +651,11 @@ func TestGCSWorkflowsUseOIDCAndSeparateDevFromProduction(t *testing.T) {
 		root,
 		".github/workflows/promote-support-bundle.yaml",
 	))
+	versionPattern := `^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$`
+	if !strings.Contains(publication, versionPattern) ||
+		!strings.Contains(promotion, versionPattern) {
+		t.Fatal("publication workflows do not use the installer version grammar")
+	}
 
 	for _, required := range []string{
 		"id-token: write",
@@ -660,6 +726,10 @@ func TestReleaseWorkflowUploadsAssetsWithoutClobber(t *testing.T) {
 		root,
 		".github/workflows/release-support-bundle.yaml",
 	))
+	versionPattern := `^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$`
+	if strings.Count(workflow, versionPattern) != 2 {
+		t.Fatal("release workflow does not consistently use the installer version grammar")
+	}
 	for _, required := range []string{
 		"installer-checksums.sha256",
 		"scripts/upload-github-release.sh",
@@ -992,6 +1062,21 @@ case "$method" in
     esac
     ;;
   GET)
+    if [ -n "${FAKE_IDENTICAL_REWRITE_OBJECT:-}" ] &&
+      [ "${url%$FAKE_IDENTICAL_REWRITE_OBJECT}" != "$url" ]; then
+      rewrite_count_file="$FAKE_GCS_ROOT/.identical-rewrite-count"
+      rewrite_count=0
+      [ ! -f "$rewrite_count_file" ] || rewrite_count=$(cat "$rewrite_count_file")
+      rewrite_count=$((rewrite_count + 1))
+      printf '%s\n' "$rewrite_count" > "$rewrite_count_file"
+      if [ "$rewrite_count" -eq 4 ]; then
+        {
+          printf 'generation=999\n'
+          printf 'content_type=application/json\n'
+          printf 'cache_control=no-cache, max-age=0, must-revalidate\n'
+        } > "$metadata"
+      fi
+    fi
     if [ -n "${FAKE_LOCK_VERIFY_FAILURE:-}" ] &&
       [ "${url%/control/publication-lock.json}" != "$url" ] &&
       [ -f "$FAKE_GCS_ROOT/.lock-written" ] &&

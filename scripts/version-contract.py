@@ -34,8 +34,20 @@ def parse_version(value: str) -> tuple[int, int, int, tuple[tuple[int, object], 
     )
 
 
+def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON property: {key}")
+        value[key] = item
+    return value
+
+
 def read_metadata(path: str) -> str:
-    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    value = json.loads(
+        Path(path).read_text(encoding="utf-8"),
+        object_pairs_hook=unique_object,
+    )
     if (
         not isinstance(value, dict)
         or list(value.keys()) != ["version"]
