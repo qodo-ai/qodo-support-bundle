@@ -20,12 +20,14 @@ type progressSummaryOptions struct {
 	PrometheusNamespace string
 	PhoenixNamespace    string
 	ArchivePath         string
+	ArchiveLinkPath     string
 	ArchiveSize         int64
 	CleanupIncomplete   bool
 }
 
 func sanitizeProgressSummary(summary progressSummary) progressSummary {
 	summary.ArchivePath = terminalLine(summary.ArchivePath)
+	summary.ArchiveLinkPath = terminalLine(summary.ArchiveLinkPath)
 	summary.Namespaces = max(summary.Namespaces, 0)
 	summary.Pods = max(summary.Pods, 0)
 	summary.LogStreams = max(summary.LogStreams, 0)
@@ -42,11 +44,12 @@ func buildProgressSummary(
 	options progressSummaryOptions,
 ) progressSummary {
 	summary := progressSummary{
-		ArchivePath: options.ArchivePath,
-		ArchiveSize: options.ArchiveSize,
-		Namespaces:  len(result.KubernetesReport.Namespaces),
-		Pods:        result.KubernetesReport.Pods,
-		LogStreams:  result.KubernetesReport.LogStreamsCollected,
+		ArchivePath:     options.ArchivePath,
+		ArchiveLinkPath: options.ArchiveLinkPath,
+		ArchiveSize:     options.ArchiveSize,
+		Namespaces:      len(result.KubernetesReport.Namespaces),
+		Pods:            result.KubernetesReport.Pods,
+		LogStreams:      result.KubernetesReport.LogStreamsCollected,
 	}
 	for _, source := range []collection.Source{
 		collection.SourceKubernetes,
@@ -292,7 +295,11 @@ func progressSummaryLines(
 	}
 	lines = append(lines, archive)
 	if summary.ArchivePath != "" {
-		lines = append(lines, "", archivePathLine(summary.ArchivePath, false))
+		lines = append(
+			lines,
+			"",
+			archivePathLine(summary.ArchivePath, summary.ArchiveLinkPath, false),
+		)
 	}
 	lines = append(lines, progressSummaryMarker(progressWarning, unicode)+" Review before sharing")
 	return lines

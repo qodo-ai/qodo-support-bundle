@@ -55,13 +55,14 @@ type progressUpdate struct {
 }
 
 type progressSummary struct {
-	ArchivePath    string
-	ArchiveSize    int64
-	Namespaces     int
-	Pods           int
-	LogStreams     int
-	WarningCount   int
-	SourceOutcomes []progressSummaryOutcome
+	ArchivePath     string
+	ArchiveLinkPath string
+	ArchiveSize     int64
+	Namespaces      int
+	Pods            int
+	LogStreams      int
+	WarningCount    int
+	SourceOutcomes  []progressSummaryOutcome
 }
 
 type progressStageState struct {
@@ -302,7 +303,11 @@ func (renderer *progressRenderer) Summary(summary progressSummary) {
 		renderer.unicode,
 	) {
 		if renderer.hyperlink && isProgressArchivePathLine(line) {
-			line = archivePathLine(summary.ArchivePath, true)
+			line = archivePathLine(
+				summary.ArchivePath,
+				summary.ArchiveLinkPath,
+				true,
+			)
 		}
 		renderer.writeLineLocked(line)
 	}
@@ -451,16 +456,22 @@ func isProgressArchivePathLine(line string) bool {
 	return strings.HasPrefix(line, "Bundle saved: ")
 }
 
-func archivePathLine(path string, hyperlink bool) string {
-	absolutePath, err := filepath.Abs(path)
-	if err != nil {
-		absolutePath = path
-	}
-	visible := terminalLine(absolutePath)
+func archivePathLine(displayPath string, linkPath string, hyperlink bool) string {
+	visible := terminalLine(displayPath)
 	if !hyperlink || visible == "" {
 		return "Bundle saved: " + visible
 	}
-	target := (&url.URL{Scheme: "file", Path: visible}).String()
+	if linkPath == "" {
+		linkPath = displayPath
+	}
+	absolutePath, err := filepath.Abs(linkPath)
+	if err != nil {
+		absolutePath = linkPath
+	}
+	target := (&url.URL{
+		Scheme: "file",
+		Path:   terminalLine(absolutePath),
+	}).String()
 	return "Bundle saved: \x1b]8;;" + target + "\x1b\\" +
 		visible + "\x1b]8;;\x1b\\"
 }

@@ -440,7 +440,7 @@ func TestProgressRendererNonTTYFinalSummaryKeepsPlainAbsolutePath(t *testing.T) 
 func TestArchivePathLineUsesEscapedOSC8TargetAndVisiblePath(t *testing.T) {
 	t.Parallel()
 	const archivePath = "/tmp/Qodo cases/bundle #1 [ready].tar.gz"
-	got := archivePathLine(archivePath, true)
+	got := archivePathLine(archivePath, archivePath, true)
 	if !strings.Contains(got, archivePath) {
 		t.Fatalf("hyperlink hid visible archive path: %q", got)
 	}
@@ -448,6 +448,23 @@ func TestArchivePathLineUsesEscapedOSC8TargetAndVisiblePath(t *testing.T) {
 	if !strings.Contains(got, "\x1b]8;;"+target+"\x1b\\") ||
 		!strings.HasSuffix(got, "\x1b]8;;\x1b\\") {
 		t.Fatalf("OSC 8 target was not safely escaped: %q", got)
+	}
+}
+
+func TestArchivePathLineLinksActualHomePathWithoutExposingIt(t *testing.T) {
+	t.Parallel()
+	const (
+		displayPath = "~/qodo-support-bundles/bundle #1.tar.gz"
+		actualPath  = "/Users/private-account/qodo-support-bundles/bundle #1.tar.gz"
+	)
+	got := archivePathLine(displayPath, actualPath, true)
+	if !strings.Contains(got, displayPath) ||
+		strings.Contains(got, "Bundle saved: "+actualPath) {
+		t.Fatalf("home path display changed: %q", got)
+	}
+	const target = "file:///Users/private-account/qodo-support-bundles/bundle%20%231.tar.gz"
+	if !strings.Contains(got, "\x1b]8;;"+target+"\x1b\\") {
+		t.Fatalf("home archive link did not use actual path: %q", got)
 	}
 }
 

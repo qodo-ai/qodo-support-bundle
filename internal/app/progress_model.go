@@ -140,7 +140,11 @@ func (model progressModel) View() string {
 		if model.hyperlink && model.summary.ArchivePath != "" {
 			for index, line := range lines {
 				if isProgressArchivePathLine(line) {
-					lines[index] = archivePathLine(model.summary.ArchivePath, true)
+					lines[index] = archivePathLine(
+						model.summary.ArchivePath,
+						model.summary.ArchiveLinkPath,
+						true,
+					)
 				}
 			}
 		}

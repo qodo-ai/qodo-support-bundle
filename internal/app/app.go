@@ -690,6 +690,7 @@ func writeProgressSummary(
 	}
 	options := progressSummaryOptions{
 		ArchivePath:       progressArchivePath(redactor, result.ArchivePath),
+		ArchiveLinkPath:   result.ArchivePath,
 		ArchiveSize:       archiveSize,
 		CleanupIncomplete: cleanupIncomplete,
 	}
