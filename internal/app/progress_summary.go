@@ -123,9 +123,9 @@ func progressSourceReason(
 func progressSourceLabel(source collection.Source) string {
 	switch source {
 	case collection.SourceKubernetes:
-		return "Kubernetes diagnostics"
+		return "Read-only Kubernetes data"
 	case collection.SourceWorkload:
-		return "Workload context"
+		return "Workload and service context"
 	case collection.SourcePrometheus:
 		return "Prometheus telemetry"
 	case collection.SourcePhoenix:
@@ -155,9 +155,9 @@ func progressIncompleteSourceLabel(
 	case collection.SourceZitadel:
 		return "Zitadel connectivity incomplete"
 	case collection.SourceWorkload:
-		return "Workload context incomplete"
+		return "Workload and service context incomplete"
 	case collection.SourceKubernetes:
-		return "Kubernetes diagnostics incomplete"
+		return "Read-only Kubernetes data incomplete"
 	default:
 		return "Diagnostics incomplete"
 	}
@@ -260,10 +260,11 @@ func progressSummaryLines(
 	case 0:
 		lines = append(lines, "Bundle created")
 	case 1:
-		lines = append(lines, "Bundle created with 1 warning")
+		lines = append(lines, "Bundle created"+separatorForUnicode(unicode)+"1 warning")
 	default:
 		lines = append(lines, fmt.Sprintf(
-			"Bundle created with %d warnings",
+			"Bundle created%s%d warnings",
+			separatorForUnicode(unicode),
 			summary.WarningCount,
 		))
 	}
@@ -274,7 +275,7 @@ func progressSummaryLines(
 	lines = append(lines, strings.Join([]string{
 		fmt.Sprintf("%d %s", summary.Namespaces, plural(summary.Namespaces, "namespace", "namespaces")),
 		fmt.Sprintf("%d %s", summary.Pods, plural(summary.Pods, "pod", "pods")),
-		fmt.Sprintf("%d %s", summary.LogStreams, plural(summary.LogStreams, "log stream", "log streams")),
+		fmt.Sprintf("%d %s", summary.LogStreams, plural(summary.LogStreams, "log source", "log sources")),
 		formatProgressDuration(max(duration, 0)),
 	}, separator))
 	lines = append(lines, "")
@@ -284,16 +285,24 @@ func progressSummaryLines(
 			lines = append(lines, "  "+outcome.Message)
 		}
 	}
-	archive := progressSummaryMarker(progressCompleted, unicode) + " Archive ready"
+	archive := progressSummaryMarker(progressCompleted, unicode) +
+		" Archive prepared with redaction"
 	if summary.ArchiveSize >= 0 {
 		archive += separator + formatProgressBytes(summary.ArchiveSize)
 	}
 	lines = append(lines, archive)
 	if summary.ArchivePath != "" {
-		lines = append(lines, "", "Saved locally:", summary.ArchivePath)
+		lines = append(lines, "", archivePathLine(summary.ArchivePath, false))
 	}
-	lines = append(lines, "Review collection-issues.jsonl before sharing.")
+	lines = append(lines, progressSummaryMarker(progressWarning, unicode)+" Review before sharing")
 	return lines
+}
+
+func separatorForUnicode(unicode bool) string {
+	if unicode {
+		return " · "
+	}
+	return " | "
 }
 
 func progressSummaryMarker(status progressStatus, unicode bool) string {

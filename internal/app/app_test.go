@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/qodo-ai/qodo-support-bundle/internal/bundle"
 	"github.com/qodo-ai/qodo-support-bundle/internal/collection"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 	"github.com/qodo-ai/qodo-support-bundle/internal/phoenix"
@@ -78,14 +79,60 @@ func TestHelpUsesQodoScoutBrandWithoutRenamingExecutable(t *testing.T) {
 	for _, expected := range []string{
 		"Qodo Scout",
 		"qodo-support-bundle collect",
+		"Read-only diagnostics: no cluster changes, no Kubernetes Secret objects, and sensitive text is redacted.",
+		"Review the archive before sharing",
 		"saved locally",
 		"does not upload",
 		"--no-progress",
-		"--mascot",
+		"--mascot (deprecated; no-op)",
 		"--interactive",
 	} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("help missing %q:\n%s", expected, stdout.String())
+		}
+	}
+	for _, legacy := range []string{
+		"Qodo Scout never modifies",
+		"Collected text is redacted before packaging",
+	} {
+		if strings.Contains(stdout.String(), legacy) {
+			t.Fatalf("help retained verbose security copy %q:\n%s", legacy, stdout.String())
+		}
+	}
+}
+
+func TestCollectionStagesUseApprovedReadOnlyCaptions(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	renderer := newProgressRenderer(progressRendererOptions{
+		Writer:  &output,
+		Enabled: true,
+	})
+	redactor := redact.New()
+
+	writeCollectionEvent(renderer, collection.Event{Kind: collection.EventKubernetesStarted})
+	writeCollectionProgress(renderer, redactor, kubernetes.Progress{Stage: "discover_namespaces"})
+	writeCollectionProgress(renderer, redactor, kubernetes.Progress{
+		Stage: "logs_progress", Current: 18, Total: 35,
+	})
+	writeCollectionEvent(renderer, collection.Event{Kind: collection.EventWorkloadStarted, Total: 1})
+	writeCollectionEvent(renderer, collection.Event{Kind: collection.EventPrometheusStarted})
+	writeCollectionEvent(renderer, collection.Event{Kind: collection.EventPhoenixStarted})
+	writeCollectionEvent(renderer, collection.Event{Kind: collection.EventZitadelStarted})
+	writeBundleProgress(renderer, bundle.Progress{Stage: bundle.ProgressPacking})
+
+	for _, expected := range []string{
+		"Read-only Kubernetes data",
+		"Namespaces",
+		"Container logs | 18/35 sources",
+		"Workload and service context",
+		"Prometheus metrics",
+		"Phoenix traces",
+		"Zitadel connectivity",
+		"Redaction and archive",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("progress missing %q:\n%s", expected, output.String())
 		}
 	}
 }
@@ -145,7 +192,7 @@ func TestCollectOmitsUsernameFromResolvedKubectlLog(t *testing.T) {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
 	logged := stderr.String()
-	if !strings.Contains(logged, "[done] Preflight checks") {
+	if !strings.Contains(logged, "[done] kubectl ready") {
 		t.Fatalf("missing redacted preflight status: %s", logged)
 	}
 	if strings.Contains(logged, username) || strings.Contains(logged, kubectl) {
@@ -184,26 +231,26 @@ func TestCollectKeepsStdoutStableAndReportsQodoScoutStages(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"[active] Qodo Scout collection",
-		"  [active] Preflight checks",
-		"  [done] Preflight checks",
-		"  [active] Kubernetes diagnostics",
-		"  [done] Kubernetes diagnostics - 1/1 namespace",
-		"  [active] Workload context - 0/1 namespace",
-		"  [done] Workload context - 1/1 namespace",
-		"  [active] Archive - preparing summary",
-		"  [active] Archive - creating manifest",
-		"  [active] Archive - writing checksums",
-		"  [active] Archive - packing",
-		"  [active] Archive - finalizing",
-		"  [done] Archive",
+		"  [active] kubectl ready",
+		"  [done] kubectl ready",
+		"  [active] Read-only Kubernetes data",
+		"  [done] Read-only Kubernetes data | 1/1 namespace",
+		"  [active] Workload and service context | 0/1 namespace",
+		"  [done] Workload and service context | 1/1 namespace",
+		"  [active] Redaction and archive | preparing summary",
+		"  [active] Redaction and archive | creating manifest",
+		"  [active] Redaction and archive | writing checksums",
+		"  [active] Redaction and archive | packing",
+		"  [active] Redaction and archive | finalizing",
+		"  [done] Redaction and archive",
 		"Qodo Scout\n",
 		"Bundle created",
-		"1 namespace | 1 pod | 1 log stream |",
-		"[ok] Kubernetes diagnostics",
-		"[ok] Workload context",
-		"[ok] Archive ready |",
-		"Saved locally:\n" + output,
-		"Review collection-issues.jsonl before sharing.",
+		"1 namespace | 1 pod | 1 log source |",
+		"[ok] Read-only Kubernetes data",
+		"[ok] Workload and service context",
+		"[ok] Archive prepared with redaction |",
+		"Bundle saved: " + output,
+		"[!] Review before sharing",
 	} {
 		if !strings.Contains(stderr.String(), expected) {
 			t.Fatalf("stderr missing %q:\n%s", expected, stderr.String())
@@ -258,10 +305,11 @@ func TestCollectNoProgressPreservesWarningsAndStdout(t *testing.T) {
 	}
 }
 
-func TestCollectMascotIsQuietWhenStderrIsNotTTY(t *testing.T) {
+func TestCollectDeprecatedMascotFlagIsNoOpForNonTTYOutput(t *testing.T) {
 	root := t.TempDir()
 	kubectl := fakeKubectl(t, root, "")
 	output := filepath.Join(root, "bundle.tar.gz")
+	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
 	code := Run(
@@ -273,15 +321,22 @@ func TestCollectMascotIsQuietWhenStderrIsNotTTY(t *testing.T) {
 			"--kubectl", kubectl,
 			"--output", output,
 		},
-		&bytes.Buffer{},
+		&stdout,
 		&stderr,
 	)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
-	if strings.ContainsAny(stderr.String(), "\r\x1b") ||
-		strings.Contains(stderr.String(), "~(____:>") {
-		t.Fatalf("non-TTY mascot emitted animation controls: %q", stderr.String())
+	wantStdout := fmt.Sprintf(
+		"Support bundle created: %s\n"+
+			"Kubernetes scope: 1/1 namespaces, 1 pods, 1 containers (0 init, 0 ephemeral)\n",
+		output,
+	)
+	if stdout.String() != wantStdout {
+		t.Fatalf("deprecated --mascot changed stdout:\ngot  %q\nwant %q", stdout.String(), wantStdout)
+	}
+	if strings.ContainsAny(stderr.String(), "\r\x1b") {
+		t.Fatalf("deprecated --mascot changed non-TTY output: %q", stderr.String())
 	}
 }
 
@@ -1021,8 +1076,8 @@ func TestCollectPrometheusUsesSingleCapturedTimeAndRequestedScope(t *testing.T) 
 			t.Fatalf("manifest missing %q: %s", expected, manifest)
 		}
 	}
-	if !strings.Contains(stderr.String(), "[active] Prometheus telemetry") ||
-		!strings.Contains(stderr.String(), "[failed] Prometheus telemetry - unavailable") {
+	if !strings.Contains(stderr.String(), "[active] Prometheus metrics") ||
+		!strings.Contains(stderr.String(), "[failed] Prometheus metrics | unavailable") {
 		t.Fatalf("missing Prometheus progress: %s", stderr.String())
 	}
 }
@@ -1065,33 +1120,33 @@ func TestTelemetryProgressDoesNotRenderEventReason(t *testing.T) {
 		kind collection.EventKind
 		want string
 	}{
-		{collection.EventPrometheusStarted, "  [active] Prometheus telemetry\n"},
-		{collection.EventPrometheusComplete, "  [done] Prometheus telemetry\n"},
+		{collection.EventPrometheusStarted, "  [active] Prometheus metrics\n"},
+		{collection.EventPrometheusComplete, "  [done] Prometheus metrics\n"},
 		{
 			collection.EventPrometheusPartial,
-			"  [warning] Prometheus telemetry - partial\n",
+			"  [warning] Prometheus metrics | partial\n",
 		},
 		{
 			collection.EventPrometheusUnavailable,
-			"  [failed] Prometheus telemetry - unavailable\n",
+			"  [failed] Prometheus metrics | unavailable\n",
 		},
-		{collection.EventPhoenixStarted, "  [active] Phoenix telemetry\n"},
-		{collection.EventPhoenixComplete, "  [done] Phoenix telemetry\n"},
+		{collection.EventPhoenixStarted, "  [active] Phoenix traces\n"},
+		{collection.EventPhoenixComplete, "  [done] Phoenix traces\n"},
 		{
 			collection.EventPhoenixPartial,
-			"  [warning] Phoenix telemetry - partial\n",
+			"  [warning] Phoenix traces | partial\n",
 		},
 		{
 			collection.EventPhoenixUnavailable,
-			"  [failed] Phoenix telemetry - unavailable\n",
+			"  [failed] Phoenix traces | unavailable\n",
 		},
 		{
 			collection.EventZitadelUnavailable,
-			"  [failed] Zitadel connectivity - unavailable\n",
+			"  [failed] Zitadel connectivity | unavailable\n",
 		},
 		{
 			collection.EventWorkloadUnavailable,
-			"  [failed] Workload context - unavailable\n",
+			"  [failed] Workload and service context | unavailable\n",
 		},
 	}
 	for _, test := range tests {
@@ -1129,11 +1184,12 @@ func TestKubernetesChildStagesFinishWithObservedOutcomes(t *testing.T) {
 	writeCollectionProgress(renderer, sanitizer, kubernetes.Progress{
 		Stage: "logs_complete", Current: 1, Total: 2,
 	})
+	renderer.ResolvePending("kubernetes.logs")
 
 	const want = "" +
-		"    [warning] Namespace scan - 1/2 namespaces, partial\n" +
-		"    [done] Container logs - no streams\n" +
-		"    [warning] Container logs - 1/2 streams, partial\n"
+		"    [warning] Namespace scan | 1/2 namespaces | partial\n" +
+		"    [done] Container logs | no sources\n" +
+		"    [warning] Container logs | 1/2 sources | partial\n"
 	if output.String() != want {
 		t.Fatalf("child outcome transcript mismatch:\ngot:\n%s\nwant:\n%s", output.String(), want)
 	}

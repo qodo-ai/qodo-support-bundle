@@ -1,4 +1,4 @@
-# Qodo Scout
+# Qodo Scout · Read-only on-prem diagnostics
 
 Qodo Scout is a portable, read-only CLI for collecting bounded and redacted
 Kubernetes diagnostics. The executable, release assets, and archive filenames
@@ -7,6 +7,11 @@ events, current and previous container logs, normalized namespace-scoped
 workload context, optional namespace-scoped Prometheus telemetry, optional
 bounded Arize Phoenix traces, and an optional Platform-to-Zitadel connectivity
 report.
+
+**Collection safeguards**
+
+Read-only diagnostics: no cluster changes, no Kubernetes Secret objects, and
+sensitive text is redacted.
 
 ## Prerequisites and scope
 
@@ -103,8 +108,10 @@ qodo-support-bundle collect \
 Routine progress is written to stderr so stdout remains stable for scripts. In
 an interactive terminal, Qodo Scout uses an inline Bubble Tea display that
 keeps the current hierarchy visible without entering the alternate screen, so
-terminal history remains available. Redirected stderr and CI output contain
-only stable lines, without animation or terminal control sequences.
+terminal history remains available. A single-line scanner is shown beside the
+active stage caption during real processing, including stage counters when
+known. Redirected stderr and CI output contain only stable lines, without
+animation or terminal control sequences.
 
 Progress is grouped into high-level stages with nested discovery, scanning,
 logs, workload, optional telemetry, and archive work. Interactive terminals use
@@ -119,23 +126,26 @@ such as:
 
 ```text
 [active] Qodo Scout collection
-  [active] Kubernetes diagnostics
-    [done] Namespace discovery - 2/2 namespaces
-  [done] Kubernetes diagnostics - 2/2 namespaces
+  [active] Read-only Kubernetes data
+    [done] Namespaces | 2/2 namespaces
+  [done] Read-only Kubernetes data | 2/2 namespaces
 Qodo Scout
-Bundle created with 1 warning
-2 namespaces | 18 pods | 37 log streams | 38.7s
+Bundle created | 1 warning
+2 namespaces | 18 pods | 37 log sources | 38.7s
 
-[done] Kubernetes diagnostics
-[done] Workload context
+[done] Read-only Kubernetes data
+[done] Workload and service context
 [warning] Prometheus not collected
   No Prometheus service found in monitoring.
-[done] Archive ready | 2.4 MiB
+[done] Archive prepared with redaction | 2.4 MiB
 
-Saved locally:
-/secure/cases/case-123.tar.gz
-Review collection-issues.jsonl before sharing.
+Bundle saved: /secure/cases/case-123.tar.gz
+[!] Review before sharing
 ```
+
+Supported interactive terminals render the full `Bundle saved` path as a
+clickable local-file link. Redirected and unsupported terminals always show the
+same absolute path as plain text.
 
 ```bash
 # Launch the optional setup wizard. Bare `collect` never prompts.
@@ -144,12 +154,12 @@ qodo-support-bundle collect --interactive
 # Suppress routine progress; warnings, errors, and stdout results remain.
 qodo-support-bundle collect --no-progress
 
-# Replace the interactive spinner with a small ASCII anteater.
+# Deprecated compatibility no-op.
 qodo-support-bundle collect --mascot
 ```
 
-`--mascot` automatically falls back to stable stage lines when stderr is not a
-TTY and is disabled by `--no-progress`.
+`--mascot` is deprecated and has no effect, but remains accepted so existing
+scripts do not fail. `--no-progress` disables routine progress and animation.
 
 The setup wizard requires both stdin and stderr to be interactive terminals.
 In CI or with redirected stderr it exits with usage code `2` instead of
@@ -158,54 +168,105 @@ collection, so no archive is created. Existing flags remain the automation
 interface; when combined with `--interactive`, supported flags become initial
 answers that can be reviewed and edited.
 
+Interactive setup begins with a sub-second Harmonica scanner entrance while
+real kubeconfig preflight runs concurrently. A bounded scan beam crosses the
+track and settles beneath the title before setup. The compact single-line
+scanner remains the active processing indicator. Setup
+resolves kubectl before reporting it ready, lists kubeconfig contexts,
+identifies the current context when available, and checks read-only API access
+only after a cluster is selected. Any key skips the remaining decorative
+entrance while validation continues; Ctrl+C cancels setup. `NO_COLOR`,
+`ACCESSIBLE`, `--no-progress`, and non-interactive output skip the entrance.
+
 The wizard first offers the effective Kubernetes context: the explicit
 `--context` value when supplied, otherwise the kubeconfig's current context.
-Choose `Choose another cluster` to open the complete context list; press `/` in
+Choose `Choose another…` to open the complete context list; press `/` in
 that list to filter it. Namespace discovery and cluster authentication happen
 only after a context is selected. The wizard then asks for namespace scope, log
-lookback, optional Prometheus, Phoenix, or Zitadel diagnostics and their
+lookback, optional Prometheus, Phoenix, or Zitadel data sources and their
 dependent settings, the output path, and final confirmation. It never requests
 credentials or lists Kubernetes Secrets.
 
 Recognized GKE contexts use compact `<cluster> (<project>)` labels. The exact
-kubeconfig context remains the internal value and appears in final
-confirmation; duplicate friendly labels include enough exact context detail to
-remain unambiguous. Unknown context formats are displayed unchanged. Only the
+kubeconfig context remains the internal value; confirmation includes it when
+friendly labels would otherwise be ambiguous. Unknown context formats are
+displayed unchanged. Only the
 kubeconfig's actual current context is marked `CURRENT`, so an explicit
 `--context` default that differs from it is not mislabeled. Recognized
 production GKE cluster names receive a factual read-only/sensitive-diagnostics
 confirmation. A typical flow is:
 
 ```text
-Step 1 of 5 · Choose a Kubernetes cluster
-Qodo Scout · Secure diagnostics for Qodo on-prem environments
-CURRENT · development-cluster (codium-development)
-Choose another cluster
-Use arrows to navigate · / to filter · Enter to select or continue
+QODO SCOUT
+Read-only on-prem diagnostics
 
-# Only after choosing "Choose another cluster":
+[    ━●━       ]  Checking environment…
+
+✓ kubectl ready
+● finding kubeconfig contexts
+[   ━●━    ]  Scout is checking setup
+✓ 2 kubeconfig contexts found
+✓ current context identified
+
+● Cluster  ○ Scope  ○ Logs  ○ Sources  ○ Confirm
+
+Qodo Scout · Setup
+Read-only diagnostics: no cluster changes, no Kubernetes Secret objects, and sensitive text is redacted.
+
+Cluster
+> development-cluster (codium-development)  CURRENT
+  Choose another…
+
+# Only after choosing "Choose another…":
 Available clusters
-CURRENT · development-cluster (codium-development)
+development-cluster (codium-development)  CURRENT
 customer-cluster (customer-project)
-Press / and type to filter the available clusters.
 
-Checking cluster access and discovering namespaces…
+Checking read-only access…
 
-Step 2 of 5 · Choose namespace scope
-Selected namespaces: bundle-alon-google, monitoring
-Use arrows to move · Space or x to toggle multiple · Enter to continue
+✓ Cluster  ● Scope  ○ Logs  ○ Sources  ○ Confirm
 
-Step 3 of 5 · Choose optional diagnostics
-Prometheus telemetry
-Step 4 of 5 · Choose output path
-automatic default
-Step 5 of 5 · Review and confirm
-Collect context gke_codium-development_us-central1_development-cluster; …
+Scope
+> All application namespaces
+  Choose namespaces…
+
+✓ Cluster  ✓ Scope  ● Logs  ○ Sources  ○ Confirm
+
+Log window
+> 30 minutes
+  1 hour
+  6 hours
+  Custom
+
+✓ Cluster  ✓ Scope  ✓ Logs  ● Sources  ○ Confirm
+
+Extra sources · optional
+Kubernetes data is already included.
+[ ] Prometheus
+[ ] Phoenix
+[ ] Zitadel check
+
+✓ Cluster  ✓ Scope  ✓ Logs  ✓ Sources  ● Confirm
+
+Output
+> Automatic (~/.qodo-support-bundles)
+  Custom path…
+
+Ready to collect
+Cluster   Development
+Scope     All application namespaces
+Logs      30 minutes
+Extras    None
+Output    Automatic
+
+! Review before sharing
+[ Collect ] [ Cancel ]
 ```
 
-Set `ACCESSIBLE=1` to use Huh's plain accessible form mode. `--mascot` and
-`--no-progress` affect collection progress after setup; they do not disable the
-wizard.
+Set `ACCESSIBLE=1` to use Huh's plain accessible form mode. `--no-progress`
+affects collection progress after setup; it does not disable the wizard.
+`--mascot` is a deprecated no-op. `NO_COLOR` disables ANSI styling; redirected
+and non-TTY output is plain.
 
 Use `--namespaces qodo-onprem,rabbitmq-system` for several explicit namespaces,
 or `--all-namespaces` for literal cluster-wide collection. The latter can
@@ -230,7 +291,7 @@ normalized resource kind to 4 MiB, all normalized workload artifacts to
 16 MiB, namespace scope to 100 namespaces, and total workload collection time
 to 5 minutes.
 
-Once the total log budget is exhausted, remaining streams are skipped and
+Once the total log budget is exhausted, remaining log sources are skipped and
 recorded as collection issues. The metadata budget is shared across every
 selected namespace. Records are truncated only at complete JSONL line
 boundaries; once exhausted, remaining metadata namespaces are not queried.

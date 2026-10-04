@@ -436,8 +436,41 @@ func TestRunInteractiveWizardDoesNotHideNamespaceDiscoveryFailures(t *testing.T)
 			Forms:     &wizardFormsStub{},
 		},
 	)
-	if !errors.Is(err, context.DeadlineExceeded) {
+	if err == nil ||
+		err.Error() != "namespace discovery timed out; check cluster connectivity" {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestConciseNamespaceDiscoveryErrorPreservesSafeCause(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{
+			fmt.Errorf("%w: private detail", errNamespaceDiscoveryForbidden),
+			"read-only access check failed; verify the selected context and permissions",
+		},
+		{
+			errDiscoveryErrorOutputTruncated,
+			"namespace discovery failed; kubectl output exceeded the safe limit",
+		},
+		{
+			errDiscoveryRunnerUnavailable,
+			"namespace discovery failed; kubectl is unavailable",
+		},
+		{
+			errors.New("credential=/private/path"),
+			"namespace discovery failed; check kubectl and the selected context",
+		},
+	}
+	for _, test := range tests {
+		got := conciseNamespaceDiscoveryError(test.err)
+		if got.Error() != test.want ||
+			strings.Contains(got.Error(), "private") {
+			t.Errorf("error=%q want=%q", got, test.want)
+		}
 	}
 }
 
@@ -507,6 +540,16 @@ func TestValidateInteractiveDurationAcceptsSafeCustomValues(t *testing.T) {
 	}
 }
 
+func TestValidateCustomOutputPathRejectsBlankSelection(t *testing.T) {
+	t.Parallel()
+	if err := validateCustomOutputPath(" \t "); err == nil {
+		t.Fatal("blank custom output path accepted")
+	}
+	if err := validateCustomOutputPath("/tmp/bundle.tar.gz"); err != nil {
+		t.Fatalf("valid custom output path rejected: %v", err)
+	}
+}
+
 func TestOrderedCollectorNamespacesPrioritizesSelectedScope(t *testing.T) {
 	t.Parallel()
 	got := orderedCollectorNamespaces(
@@ -524,6 +567,7 @@ func TestInteractiveSummarySanitizesOutputPath(t *testing.T) {
 	t.Parallel()
 	got := interactiveSummary(
 		"customer",
+		"Customer",
 		"selected",
 		false,
 		[]string{"qodo"},
@@ -531,8 +575,11 @@ func TestInteractiveSummarySanitizesOutputPath(t *testing.T) {
 		"",
 		nil,
 		"/tmp/bundle\x1b[31m.tar.gz\nspoof",
+		80,
+		true,
 	)
-	if strings.ContainsAny(got, "\x1b\n\r") {
+	if strings.ContainsAny(got, "\x1b\r") ||
+		!strings.Contains(got, "Output    /tmp/bundle [31m.tar.gz spoof") {
 		t.Fatalf("summary retained terminal controls: %q", got)
 	}
 }
@@ -551,6 +598,7 @@ func TestInteractiveSummaryShowsSystemInclusiveScope(t *testing.T) {
 	t.Parallel()
 	got := interactiveSummary(
 		"customer",
+		"Customer",
 		"all",
 		false,
 		nil,
@@ -558,8 +606,10 @@ func TestInteractiveSummaryShowsSystemInclusiveScope(t *testing.T) {
 		"",
 		nil,
 		"",
+		80,
+		true,
 	)
-	if !strings.Contains(got, "scope all namespaces (including system namespaces)") {
+	if !strings.Contains(got, "Scope     All namespaces (including system namespaces)") {
 		t.Fatalf("summary understated namespace scope: %q", got)
 	}
 }

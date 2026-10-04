@@ -137,7 +137,7 @@ func runCollect(
 	logWorkers := flags.Int("log-workers", defaultLogWorkers, "Concurrent log readers")
 	interactive := flags.Bool("interactive", false, "Launch the interactive collection setup wizard")
 	noProgress := flags.Bool("no-progress", false, "Suppress routine progress output")
-	mascot := flags.Bool("mascot", false, "Use the Qodo Scout anteater animation in interactive terminals")
+	_ = flags.Bool("mascot", false, "Deprecated no-op; interactive progress uses the scanner animation")
 	activity := flags.String("activity", "", "Customer description of current activity")
 	problem := flags.String("problem", "", "Customer description of the failure")
 	checkZitadel := flags.Bool(
@@ -245,10 +245,7 @@ func runCollect(
 		}
 		discovery, discoveryErr := interactiveRuntime.NewDiscovery(*kubectl, *kubeconfig)
 		if discoveryErr != nil {
-			_, _ = fmt.Fprintln(
-				stderr,
-				terminalText(redact.New(), discoveryErr.Error()),
-			)
+			_, _ = fmt.Fprintln(stderr, "kubectl is unavailable; verify --kubectl and kubeconfig settings")
 			return 1
 		}
 		settings, wizardErr := runInteractiveWizard(
@@ -278,6 +275,55 @@ func runCollect(
 				OutputTTY: interactiveRuntime.OutputTTY,
 				Discovery: discovery,
 				Forms:     interactiveRuntime.Forms,
+				Preflight: func(
+					preflightCtx context.Context,
+					preflightDiscovery interactiveDiscovery,
+					preflightInput io.Reader,
+					preflightOutput io.Writer,
+				) (interactiveContextCatalog, error) {
+					accessible := os.Getenv("ACCESSIBLE") != ""
+					noColor := os.Getenv("NO_COLOR") != ""
+					visible := !*noProgress
+					decorated := wizardEntranceEnabled(
+						visible,
+						accessible,
+						noColor,
+						terminalReader(preflightInput),
+						terminalWriter(preflightOutput),
+						os.Getenv("TERM"),
+					)
+					return runWizardPreflight(
+						preflightCtx,
+						preflightDiscovery,
+						preflightInput,
+						preflightOutput,
+						wizardPreflightOptions{
+							Interactive: decorated,
+							Entrance:    decorated,
+							Visible:     visible,
+							Unicode:     terminalUnicode(),
+							Color: wizardColorEnabled(
+								accessible,
+								preflightOutput,
+							),
+							Width: terminalWidth(preflightOutput),
+						},
+					)
+				},
+				DiscoverNamespaces: func(
+					discoveryCtx context.Context,
+					discovery interactiveDiscovery,
+					selectedContext string,
+					discoveryOutput io.Writer,
+				) ([]string, error) {
+					return runWizardNamespaceDiscovery(
+						discoveryCtx,
+						discovery,
+						selectedContext,
+						discoveryOutput,
+						!*noProgress,
+					)
+				},
 			},
 		)
 		if wizardErr != nil {
@@ -435,7 +481,7 @@ func runCollect(
 		}
 		_, _ = fmt.Fprintln(stderr, message)
 	}
-	progress := newCLIProgressRenderer(stderr, !*noProgress, *mascot)
+	progress := newCLIProgressRenderer(stderr, !*noProgress)
 	defer closeProgress(progress, stderr)
 	progress.Update(progressUpdate{
 		ID: "collection", Label: "Qodo Scout collection", Status: progressActive,
@@ -464,13 +510,13 @@ func runCollect(
 	}()
 
 	progress.Update(progressUpdate{
-		ID: "preflight", Label: "Preflight checks", Level: 1,
+		ID: "preflight", Label: "kubectl ready", Level: 1,
 		Status: progressActive,
 	})
 	resolvedKubectl, err := resolveKubectl(*kubectl)
 	if err != nil {
 		progress.Update(progressUpdate{
-			ID: "preflight", Label: "Preflight checks", Level: 1,
+			ID: "preflight", Label: "kubectl ready", Level: 1,
 			Status: progressFailed,
 		})
 		closeProgress(progress, stderr)
@@ -478,7 +524,7 @@ func runCollect(
 		return 1
 	}
 	progress.Update(progressUpdate{
-		ID: "preflight", Label: "Preflight checks", Level: 1,
+		ID: "preflight", Label: "kubectl ready", Level: 1,
 		Status: progressCompleted,
 	})
 	runner := kubernetes.ExecRunner{Binary: resolvedKubectl}
@@ -555,14 +601,14 @@ func runCollect(
 		collectors,
 	)
 	if result.CanceledBeforeBundle {
+		progress.Cancel()
 		closeProgress(progress, stderr)
-		_, _ = fmt.Fprintln(stderr, "Collection canceled; no bundle was published.")
 		return 1
 	}
 	if err != nil {
 		if errors.Is(err, bundle.ErrCleanup) {
 			progress.Update(progressUpdate{
-				ID: "archive", Label: "Archive", Level: 1,
+				ID: "archive", Label: "Redaction and archive", Level: 1,
 				Status: progressWarning, Detail: "saved; cleanup incomplete",
 			})
 			writeProgressSummary(
@@ -855,18 +901,23 @@ func configureTelemetryForwarders(
 }
 
 func printUsage(writer io.Writer) {
-	_, _ = fmt.Fprintln(writer, `Qodo Scout
-
+	_, _ = fmt.Fprintln(writer, wizardTitle(false))
+	_, _ = fmt.Fprintln(writer, `
 Usage:
   qodo-support-bundle collect [options]
   qodo-support-bundle version
   qodo-support-bundle help
 
+Read-only diagnostics: no cluster changes, no Kubernetes Secret objects, and sensitive text is redacted.
+[!] Review the archive before sharing
+
 Collect bounded, redacted Kubernetes metadata, events, and container logs.
 The optional --check-zitadel probe runs inside one selected Platform container.
 Hierarchical progress and the final local-archive summary are written to stderr.
-Use --no-progress to suppress routine progress or --mascot for the interactive
-ASCII anteater animation. Use collect --interactive for the optional setup
-wizard when stdin and stderr are terminals. The resulting archive is saved locally.
+Interactive terminals use an inline scanner animation during real processing.
+Interactive setup starts a brief scanner entrance while kubeconfig checks run.
+Use --no-progress to suppress routine progress. --mascot (deprecated; no-op)
+remains accepted for compatibility. Use collect --interactive for the optional
+setup wizard when stdin and stderr are terminals. The resulting archive is saved locally.
 This CLI does not upload it. Share it separately through an approved support channel.`)
 }

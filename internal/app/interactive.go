@@ -27,10 +27,15 @@ var (
 	errDiscoveryErrorOutputTruncated = errors.New(
 		"kubectl discovery failed; error output exceeded the safe limit",
 	)
+	errDiscoveryOutputTruncated = errors.New(
+		"kubectl discovery output exceeded the safe limit",
+	)
+	errDiscoveryRunnerUnavailable = errors.New("kubectl runner is unavailable")
 )
 
 type interactiveSettings struct {
 	Context                 string
+	ContextSummary          string
 	AllNamespaces           bool
 	ExcludeSystemNamespaces bool
 	Namespaces              []string
@@ -82,6 +87,18 @@ type interactiveWizardDependencies struct {
 	OutputTTY func(io.Writer) bool
 	Discovery interactiveDiscovery
 	Forms     interactiveForms
+	Preflight func(
+		context.Context,
+		interactiveDiscovery,
+		io.Reader,
+		io.Writer,
+	) (interactiveContextCatalog, error)
+	DiscoverNamespaces func(
+		context.Context,
+		interactiveDiscovery,
+		string,
+		io.Writer,
+	) ([]string, error)
 }
 
 type interactiveRuntime struct {
@@ -136,18 +153,34 @@ func runInteractiveWizard(
 	if dependencies.Discovery == nil || dependencies.Forms == nil {
 		return settings, errors.New("interactive setup is unavailable")
 	}
-	contexts, err := dependencies.Discovery.Contexts(ctx)
-	if err != nil {
-		return settings, fmt.Errorf("discover Kubernetes contexts: %w", err)
+	catalog := interactiveContextCatalog{}
+	var err error
+	if dependencies.Preflight != nil {
+		catalog, err = dependencies.Preflight(
+			ctx,
+			dependencies.Discovery,
+			stdin,
+			stderr,
+		)
+		if err != nil {
+			return settings, interactiveFormError(err)
+		}
+	} else {
+		contexts, contextErr := dependencies.Discovery.Contexts(ctx)
+		if contextErr != nil {
+			return settings, fmt.Errorf("discover Kubernetes contexts: %w", contextErr)
+		}
+		if len(contexts) == 0 {
+			return settings, errors.New("discover Kubernetes contexts: no contexts found")
+		}
+		catalog.Names = contexts
+		discoveredCurrent, currentErr := dependencies.Discovery.CurrentContext(ctx)
+		if currentErr == nil && containsString(contexts, terminalLine(discoveredCurrent)) {
+			catalog.Current = terminalLine(discoveredCurrent)
+		}
 	}
-	if len(contexts) == 0 {
-		return settings, errors.New("discover Kubernetes contexts: no contexts found")
-	}
-	currentContext := ""
-	discoveredCurrent, currentErr := dependencies.Discovery.CurrentContext(ctx)
-	if currentErr == nil && containsString(contexts, terminalLine(discoveredCurrent)) {
-		currentContext = terminalLine(discoveredCurrent)
-	}
+	contexts := catalog.Names
+	currentContext := catalog.Current
 	explicitContext := settings.Context != ""
 	if settings.Context == "" {
 		settings.Context = currentContext
@@ -161,10 +194,7 @@ func runInteractiveWizard(
 	if err := dependencies.Forms.ChooseContext(
 		ctx,
 		&settings,
-		interactiveContextCatalog{
-			Names:   contexts,
-			Current: currentContext,
-		},
+		catalog,
 		stdin,
 		stderr,
 	); err != nil {
@@ -173,13 +203,26 @@ func runInteractiveWizard(
 	if !containsString(contexts, settings.Context) {
 		return settings, errors.New("select a Kubernetes context")
 	}
-	dependencies.Forms.DiscoveryStatus(settings.Context, stderr)
-	namespaces, err := dependencies.Discovery.Namespaces(ctx, settings.Context)
+	var namespaces []string
+	if dependencies.DiscoverNamespaces != nil {
+		namespaces, err = dependencies.DiscoverNamespaces(
+			ctx,
+			dependencies.Discovery,
+			settings.Context,
+			stderr,
+		)
+	} else {
+		dependencies.Forms.DiscoveryStatus(settings.Context, stderr)
+		namespaces, err = dependencies.Discovery.Namespaces(ctx, settings.Context)
+	}
 	if err != nil {
 		if !errors.Is(err, errNamespaceDiscoveryForbidden) ||
 			settings.AllNamespaces ||
 			len(settings.Namespaces) == 0 {
-			return settings, fmt.Errorf("discover Kubernetes namespaces: %w", err)
+			if errors.Is(err, context.Canceled) {
+				return settings, errInteractiveCanceled
+			}
+			return settings, conciseNamespaceDiscoveryError(err)
 		}
 		namespaces = append([]string(nil), settings.Namespaces...)
 	}
@@ -203,6 +246,32 @@ func interactiveFormError(err error) error {
 		return errInteractiveCanceled
 	}
 	return err
+}
+
+func conciseNamespaceDiscoveryError(err error) error {
+	switch {
+	case errors.Is(err, errNamespaceDiscoveryForbidden):
+		return errors.New(
+			"read-only access check failed; verify the selected context and permissions",
+		)
+	case errors.Is(err, context.DeadlineExceeded):
+		return errors.New(
+			"namespace discovery timed out; check cluster connectivity",
+		)
+	case errors.Is(err, errDiscoveryErrorOutputTruncated),
+		errors.Is(err, errDiscoveryOutputTruncated):
+		return errors.New(
+			"namespace discovery failed; kubectl output exceeded the safe limit",
+		)
+	case errors.Is(err, errDiscoveryRunnerUnavailable):
+		return errors.New(
+			"namespace discovery failed; kubectl is unavailable",
+		)
+	default:
+		return errors.New(
+			"namespace discovery failed; check kubectl and the selected context",
+		)
+	}
 }
 
 func validateInteractiveDuration(value string) error {
@@ -274,7 +343,7 @@ func (discovery kubernetesWizardDiscovery) run(
 	arguments []string,
 ) ([]string, error) {
 	if discovery.Runner == nil {
-		return nil, errors.New("kubectl runner is unavailable")
+		return nil, errDiscoveryRunnerUnavailable
 	}
 	result, err := discovery.Runner.Run(ctx, interactiveDiscoveryLimit, arguments...)
 	if err != nil {
@@ -289,7 +358,7 @@ func (discovery kubernetesWizardDiscovery) run(
 		return nil, err
 	}
 	if result.Truncated {
-		return nil, errors.New("kubectl discovery output exceeded the safe limit")
+		return nil, errDiscoveryOutputTruncated
 	}
 	values := make([]string, 0)
 	seen := make(map[string]struct{})

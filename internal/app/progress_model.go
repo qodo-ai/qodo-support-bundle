@@ -9,10 +9,10 @@ import (
 )
 
 type progressModelOptions struct {
-	Mascot  bool
-	Unicode bool
-	Width   int
-	Started time.Time
+	Unicode   bool
+	Hyperlink bool
+	Width     int
+	Started   time.Time
 }
 
 type progressUpdateMsg struct {
@@ -27,16 +27,18 @@ type progressSummaryMsg struct {
 
 type progressTickMsg struct{}
 type progressQuitMsg struct{}
+type progressCanceledMsg struct{}
 
 type progressModel struct {
-	mascot     bool
 	unicode    bool
+	hyperlink  bool
 	width      int
 	startedAt  time.Time
 	stages     map[string]progressStageState
 	stageOrder []string
 	frame      int
 	summary    *progressSummary
+	canceled   bool
 	finishedAt time.Time
 }
 
@@ -46,8 +48,8 @@ func newProgressModel(options progressModelOptions) progressModel {
 		started = time.Now()
 	}
 	return progressModel{
-		mascot:    options.Mascot,
 		unicode:   options.Unicode,
+		hyperlink: options.Hyperlink,
 		width:     max(options.Width, 0),
 		startedAt: started,
 		stages:    make(map[string]progressStageState),
@@ -90,6 +92,9 @@ func (model progressModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.finishedAt = time.Now()
 		}
 		return model, nil
+	case progressCanceledMsg:
+		model.canceled = true
+		return model, nil
 	case progressTickMsg:
 		model.frame++
 		return model, progressTick()
@@ -105,7 +110,25 @@ func (model progressModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 func (model progressModel) View() string {
 	lines := make([]string, 0, len(model.stageOrder)+2)
-	if model.summary != nil {
+	if model.canceled {
+		marker, separator := "[!]", " | "
+		if model.unicode {
+			marker, separator = "!", " · "
+		}
+		line := marker + " Canceled"
+		if state, ok := model.stages["kubernetes.logs"]; ok &&
+			state.update.Status == progressActive &&
+			state.update.Total > 0 {
+			line = fmt.Sprintf(
+				"%s Canceled while collecting logs%s%d/%d complete",
+				marker,
+				separator,
+				state.update.Current,
+				state.update.Total,
+			)
+		}
+		lines = append(lines, line, "No bundle created.")
+	} else if model.summary != nil {
 		lines = append(
 			lines,
 			progressSummaryLines(
@@ -114,6 +137,13 @@ func (model progressModel) View() string {
 				model.unicode,
 			)...,
 		)
+		if model.hyperlink && model.summary.ArchivePath != "" {
+			for index, line := range lines {
+				if isProgressArchivePathLine(line) {
+					lines[index] = archivePathLine(model.summary.ArchivePath, true)
+				}
+			}
+		}
 	} else {
 		lines = append(lines, "Qodo Scout interactive display")
 		for _, id := range model.stageOrder {
@@ -123,7 +153,7 @@ func (model progressModel) View() string {
 		lines = append(lines, model.activityLine())
 	}
 	for index, line := range lines {
-		if model.width > 0 {
+		if model.width > 0 && !isProgressArchivePathLine(line) {
 			lines[index] = fitTerminalLine(line, model.width, model.unicode)
 		}
 	}
@@ -147,21 +177,76 @@ func (model progressModel) formatUpdate(
 	if update.Detail != "" {
 		details = append(details, update.Detail)
 	}
+	separator := " | "
+	if model.unicode {
+		separator = " · "
+	}
 	if len(details) > 0 {
-		line += " - " + strings.Join(details, ", ")
+		line += separator + strings.Join(details, separator)
 	}
 	if update.Status != progressActive && elapsed >= 100*time.Millisecond {
-		line += " (" + formatProgressDuration(elapsed) + ")"
+		line += separator + formatProgressDuration(elapsed)
 	}
 	return line
 }
 
 func (model progressModel) activityLine() string {
-	frames := spinnerFrames
-	if model.mascot {
-		frames = mascotFrames
+	frame := scannerFrame(model.frame, model.unicode)
+	for index := len(model.stageOrder) - 1; index >= 0; index-- {
+		id := model.stageOrder[index]
+		if id == "collection" {
+			continue
+		}
+		state := model.stages[id]
+		if state.update.Status == progressActive {
+			return progressActivityLine(frame, state.update, model.unicode)
+		}
 	}
-	return frames[model.frame%len(frames)] + " Qodo Scout is working"
+	return frame + " Qodo Scout is working"
+}
+
+func progressActivityLine(frame string, update progressUpdate, unicode bool) string {
+	line := frame + "  Scout is " + progressActivityDescription(update)
+	if update.Total > 0 && update.Current >= 0 {
+		separator := " | "
+		if unicode {
+			separator = " · "
+		}
+		line += separator + fmt.Sprintf("%d/%d", update.Current, update.Total)
+	}
+	return line
+}
+
+func progressActivityDescription(update progressUpdate) string {
+	switch update.ID {
+	case "preflight":
+		return "checking read-only cluster access"
+	case "kubernetes":
+		return "collecting read-only Kubernetes data"
+	case "kubernetes.discovery":
+		return "finding namespaces"
+	case "kubernetes.scan":
+		return "reading namespace resources"
+	case "kubernetes.logs":
+		return "collecting container logs"
+	case "workload":
+		return "collecting workload and service context"
+	case "prometheus":
+		return "collecting Prometheus metrics"
+	case "phoenix":
+		return "collecting Phoenix traces"
+	case "zitadel":
+		return "checking Zitadel connectivity"
+	case "archive":
+		return "preparing redacted archive"
+	}
+	label := update.Label
+	if label == "" {
+		return "working"
+	}
+	characters := []rune(label)
+	characters[0] = []rune(strings.ToLower(string(characters[0])))[0]
+	return string(characters)
 }
 
 func progressTick() tea.Cmd {

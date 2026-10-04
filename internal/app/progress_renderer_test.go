@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestProgressRendererNonTTYUsesStableLinesOnly(t *testing.T) {
@@ -49,7 +51,6 @@ func TestProgressRendererDisabledSuppressesRoutineOutput(t *testing.T) {
 		Writer:      &output,
 		Enabled:     false,
 		Interactive: true,
-		Mascot:      true,
 	})
 
 	renderer.Stage("cluster_access", "Checking cluster access...")
@@ -61,7 +62,7 @@ func TestProgressRendererDisabledSuppressesRoutineOutput(t *testing.T) {
 	}
 }
 
-func TestProgressRendererInteractiveSpinnerIsDeterministicAndClears(t *testing.T) {
+func TestProgressRendererInteractiveDefaultsToScannerAndClears(t *testing.T) {
 	t.Parallel()
 	var output bytes.Buffer
 	renderer := newProgressRenderer(progressRendererOptions{
@@ -76,40 +77,75 @@ func TestProgressRendererInteractiveSpinnerIsDeterministicAndClears(t *testing.T
 	renderer.Close()
 
 	got := output.String()
-	if !strings.Contains(got, "\r| Qodo Scout is working") ||
-		!strings.Contains(got, "\r/ Qodo Scout is working") {
-		t.Fatalf("spinner frames missing: %q", got)
+	if !strings.Contains(got, "\r[>         ] Qodo Scout is working") ||
+		!strings.Contains(got, "\r[-->       ] Qodo Scout is working") {
+		t.Fatalf("default scanner frames missing: %q", got)
 	}
 	if !strings.HasSuffix(got, "\r                              \r") {
-		t.Fatalf("spinner was not cleared on close: %q", got)
+		t.Fatalf("scanner was not cleared on close: %q", got)
 	}
 }
 
-func TestProgressRendererMascotReplacesSpinnerWithASCII(t *testing.T) {
+func TestProgressRendererScannerUsesDeterministicASCIIFrames(t *testing.T) {
 	t.Parallel()
 	var output bytes.Buffer
 	renderer := newProgressRenderer(progressRendererOptions{
 		Writer:      &output,
 		Enabled:     true,
 		Interactive: true,
-		Mascot:      true,
 	})
 
 	renderer.Stage("cluster_access", "Checking cluster access...")
-	renderer.Step()
+	for range scannerFrameCount {
+		renderer.Step()
+	}
 	renderer.Close()
 
 	got := output.String()
-	if !strings.Contains(got, "\r~(____:> Qodo Scout is working") {
-		t.Fatalf("mascot frame missing: %q", got)
+	for _, frame := range []string{
+		"[>         ]",
+		"[-->       ]",
+		"[---->     ]",
+		"[------>   ]",
+		"[--------> ]",
+	} {
+		if !strings.Contains(got, "\r"+frame+" Qodo Scout is working") {
+			t.Fatalf("scanner frame %q missing from %q", frame, got)
+		}
 	}
 	for _, character := range got {
 		if character == '\r' || character == '\n' {
 			continue
 		}
 		if character < 0x20 || character > 0x7e {
-			t.Fatalf("mascot output contains non-ASCII character %q", character)
+			t.Fatalf("scanner output contains non-ASCII character %q", character)
 		}
+	}
+}
+
+func TestProgressRendererScannerUsesActiveStageCaption(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	renderer := newProgressRenderer(progressRendererOptions{
+		Writer:      &output,
+		Enabled:     true,
+		Interactive: true,
+		Unicode:     true,
+	})
+	renderer.Update(progressUpdate{
+		ID:      "kubernetes.logs",
+		Label:   "Container logs",
+		Status:  progressActive,
+		Current: 18,
+		Total:   35,
+	})
+	renderer.Step()
+
+	if !strings.Contains(
+		output.String(),
+		"\r[●━        ]  Scout is collecting container logs · 18/35",
+	) {
+		t.Fatalf("scanner did not follow active stage: %q", output.String())
 	}
 }
 
@@ -136,7 +172,7 @@ func TestProgressRendererStageClearsAnimationBeforeLine(t *testing.T) {
 	}
 }
 
-func TestProgressRendererCloseStopsStartedHeartbeatAndIsIdempotent(t *testing.T) {
+func TestProgressRendererCancellationCleanupStopsHeartbeatAndClearsAnimation(t *testing.T) {
 	t.Parallel()
 	var output bytes.Buffer
 	renderer := newProgressRenderer(progressRendererOptions{
@@ -153,6 +189,82 @@ func TestProgressRendererCloseStopsStartedHeartbeatAndIsIdempotent(t *testing.T)
 
 	if !strings.HasSuffix(output.String(), progressClearLine) {
 		t.Fatalf("started heartbeat was not cleared: %q", output.String())
+	}
+}
+
+func TestProgressRendererNonTTYCancellationIsNotPartial(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	renderer := newProgressRenderer(progressRendererOptions{
+		Writer:  &output,
+		Enabled: true,
+	})
+	renderer.Update(progressUpdate{
+		ID: "kubernetes.logs", Label: "Container logs", Level: 2,
+		Status: progressActive, Current: 17, Total: 35, Unit: "sources",
+	})
+	renderer.Pending(progressUpdate{
+		ID: "kubernetes.logs", Label: "Container logs", Level: 2,
+		Status: progressWarning, Current: 17, Total: 35, Unit: "sources",
+		Detail: "partial",
+	})
+	renderer.Cancel()
+
+	const want = "" +
+		"    [active] Container logs | 17/35 sources\n" +
+		"[!] Canceled while collecting logs | 17/35 complete\n" +
+		"No bundle created.\n"
+	if output.String() != want {
+		t.Fatalf("non-TTY cancellation:\ngot:\n%s\nwant:\n%s", output.String(), want)
+	}
+}
+
+func TestProgressRendererResolvesRealPartialLogCollection(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	renderer := newProgressRenderer(progressRendererOptions{
+		Writer:      &output,
+		Enabled:     true,
+		Interactive: true,
+		Unicode:     true,
+	})
+	renderer.Pending(progressUpdate{
+		ID: "kubernetes.logs", Label: "Container logs", Level: 2,
+		Status: progressWarning, Current: 17, Total: 35, Unit: "sources",
+		Detail: "partial",
+	})
+	renderer.ResolvePending("kubernetes.logs")
+
+	const want = "    ! Container logs · 17/35 sources · partial\n"
+	if output.String() != want {
+		t.Fatalf("real partial outcome=%q want=%q", output.String(), want)
+	}
+}
+
+func TestProgressRendererCancellationAfterCompletedLogsIsGeneric(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	renderer := newProgressRenderer(progressRendererOptions{
+		Writer:      &output,
+		Enabled:     true,
+		Interactive: true,
+		Unicode:     true,
+	})
+	renderer.Update(progressUpdate{
+		ID: "kubernetes.logs", Label: "Container logs", Level: 2,
+		Status: progressCompleted, Current: 35, Total: 35, Unit: "sources",
+	})
+	output.Reset()
+	renderer.Update(progressUpdate{
+		ID: "workload", Label: "Workload and service context", Level: 1,
+		Status: progressActive,
+	})
+	output.Reset()
+	renderer.Cancel()
+
+	const want = "! Canceled\nNo bundle created.\n"
+	if output.String() != want {
+		t.Fatalf("late cancellation=%q want=%q", output.String(), want)
 	}
 }
 
@@ -187,8 +299,9 @@ func TestProgressRendererBubbleTeaRunsInlineAndStopsSynchronously(t *testing.T) 
 
 	got := output.String()
 	if !strings.Contains(got, "Qodo Scout\r\nBundle created") ||
-		!strings.Contains(got, "✓ Archive ready · 2.0 KiB") ||
-		!strings.Contains(got, "Saved locally:\r\n/tmp/bundle.tar.gz") {
+		!strings.Contains(got, "✓ Archive prepared with redaction · 2.0 KiB") ||
+		!strings.Contains(got, "Bundle saved: /tmp/bundle.tar.gz") ||
+		!strings.Contains(got, "! Review before sharing") {
 		t.Fatalf("Bubble Tea final view missing: %q", got)
 	}
 	if !strings.Contains(got, "\x1b") {
@@ -254,19 +367,18 @@ func TestProgressRendererTTYHierarchyGoldenTranscript(t *testing.T) {
 	const want = "" +
 		"● Qodo Scout collection\n" +
 		"  ● Kubernetes diagnostics\n" +
-		"  ✓ Kubernetes diagnostics - 2/2 namespaces (1.5s)\n" +
+		"  ✓ Kubernetes diagnostics · 2/2 namespaces · 1.5s\n" +
 		"  ● Workload context\n" +
-		"  ! Workload context - partial (800ms)\n" +
+		"  ! Workload context · partial · 800ms\n" +
 		"Qodo Scout\n" +
-		"Bundle created with 1 warning\n" +
-		"2 namespaces · 18 pods · 37 log streams · 2.3s\n\n" +
+		"Bundle created · 1 warning\n" +
+		"2 namespaces · 18 pods · 37 log sources · 2.3s\n\n" +
 		"✓ Kubernetes diagnostics\n" +
 		"! Workload context incomplete\n" +
 		"  Review collection-issues.jsonl for details.\n" +
-		"✓ Archive ready · 2.0 KiB\n\n" +
-		"Saved locally:\n" +
-		"/tmp/bundle.tar.gz\n" +
-		"Review collection-issues.jsonl before sharing.\n"
+		"✓ Archive prepared with redaction · 2.0 KiB\n\n" +
+		"Bundle saved: /tmp/bundle.tar.gz\n" +
+		"! Review before sharing\n"
 	if output.String() != want {
 		t.Fatalf("TTY transcript mismatch:\ngot:\n%s\nwant:\n%s", output.String(), want)
 	}
@@ -297,13 +409,84 @@ func TestProgressRendererNonTTYUsesASCIIFallbackGoldenTranscript(t *testing.T) {
 
 	const want = "" +
 		"  [active] Kubernetes diagnostics\n" +
-		"  [done] Kubernetes diagnostics - 1/1 namespace (1s)\n" +
-		"  [failed] Phoenix telemetry - unavailable\n"
+		"  [done] Kubernetes diagnostics | 1/1 namespace | 1s\n" +
+		"  [failed] Phoenix telemetry | unavailable\n"
 	if output.String() != want {
 		t.Fatalf("non-TTY transcript mismatch:\ngot:\n%s\nwant:\n%s", output.String(), want)
 	}
 	if strings.ContainsAny(output.String(), "\r\x1b") {
 		t.Fatalf("non-TTY transcript contains controls: %q", output.String())
+	}
+}
+
+func TestProgressRendererNonTTYFinalSummaryKeepsPlainAbsolutePath(t *testing.T) {
+	t.Parallel()
+	const archivePath = "/tmp/Qodo cases/bundle #1.tar.gz"
+	var output bytes.Buffer
+	renderer := newProgressRenderer(progressRendererOptions{
+		Writer:  &output,
+		Enabled: true,
+	})
+	renderer.Summary(progressSummary{ArchivePath: archivePath})
+
+	if !strings.Contains(output.String(), "Bundle saved: "+archivePath+"\n") {
+		t.Fatalf("plain summary omitted visible archive path: %q", output.String())
+	}
+	if strings.Contains(output.String(), "\x1b]8;;") {
+		t.Fatalf("non-TTY summary emitted OSC 8: %q", output.String())
+	}
+}
+
+func TestArchivePathLineUsesEscapedOSC8TargetAndVisiblePath(t *testing.T) {
+	t.Parallel()
+	const archivePath = "/tmp/Qodo cases/bundle #1 [ready].tar.gz"
+	got := archivePathLine(archivePath, true)
+	if !strings.Contains(got, archivePath) {
+		t.Fatalf("hyperlink hid visible archive path: %q", got)
+	}
+	const target = "file:///tmp/Qodo%20cases/bundle%20%231%20%5Bready%5D.tar.gz"
+	if !strings.Contains(got, "\x1b]8;;"+target+"\x1b\\") ||
+		!strings.HasSuffix(got, "\x1b]8;;\x1b\\") {
+		t.Fatalf("OSC 8 target was not safely escaped: %q", got)
+	}
+}
+
+func TestProgressRendererInteractiveSummaryUsesClickableVisiblePath(t *testing.T) {
+	t.Parallel()
+	const archivePath = "/tmp/Qodo cases/bundle #1.tar.gz"
+	var output bytes.Buffer
+	renderer := newProgressRenderer(progressRendererOptions{
+		Writer:      &output,
+		Enabled:     true,
+		Interactive: true,
+		Hyperlink:   true,
+	})
+	renderer.Summary(progressSummary{ArchivePath: archivePath})
+
+	if !strings.Contains(output.String(), archivePath) ||
+		!strings.Contains(
+			output.String(),
+			"\x1b]8;;file:///tmp/Qodo%20cases/bundle%20%231.tar.gz\x1b\\",
+		) {
+		t.Fatalf("interactive summary did not render clickable visible path: %q", output.String())
+	}
+}
+
+func TestTerminalHyperlinksRequireKnownInteractiveSupport(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TERM_PROGRAM", "vscode")
+	t.Setenv("ACCESSIBLE", "")
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("WT_SESSION", "")
+	if !terminalHyperlinksEnabled(true) {
+		t.Fatal("supported interactive terminal did not enable hyperlinks")
+	}
+	if terminalHyperlinksEnabled(false) {
+		t.Fatal("non-TTY output enabled hyperlinks")
+	}
+	t.Setenv("ACCESSIBLE", "1")
+	if terminalHyperlinksEnabled(true) {
+		t.Fatal("accessible output enabled hyperlinks")
 	}
 }
 
@@ -314,8 +497,8 @@ func TestProgressRendererTTYFailureUsesCapabilitySafeMarker(t *testing.T) {
 		unicode bool
 		want    string
 	}{
-		{name: "unicode", unicode: true, want: "  ✗ Phoenix telemetry - unavailable\n"},
-		{name: "ASCII", unicode: false, want: "  [x] Phoenix telemetry - unavailable\n"},
+		{name: "unicode", unicode: true, want: "  ✗ Phoenix telemetry · unavailable\n"},
+		{name: "ASCII", unicode: false, want: "  [x] Phoenix telemetry | unavailable\n"},
 	}
 	for _, test := range tests {
 		test := test
@@ -360,9 +543,18 @@ func TestProgressRendererTTYLinesRespectTerminalWidth(t *testing.T) {
 	})
 
 	for _, line := range strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n") {
+		if strings.HasPrefix(line, "Bundle saved: ") {
+			continue
+		}
 		if utf8.RuneCountInString(line) > 36 {
 			t.Fatalf("line exceeds terminal width (%d): %q", utf8.RuneCountInString(line), line)
 		}
+	}
+	if !strings.Contains(
+		output.String(),
+		"Bundle saved: /a/very/long/customer/path/to/qodo-support-bundle.tar.gz",
+	) {
+		t.Fatalf("narrow terminal clipped archive path: %q", output.String())
 	}
 	if strings.Contains(output.String(), "…") {
 		t.Fatalf("ASCII fallback used Unicode ellipsis: %q", output.String())
@@ -377,13 +569,16 @@ func TestProgressRendererNarrowHeartbeatFitsOneTerminalRow(t *testing.T) {
 		Enabled:     true,
 		Interactive: true,
 		Unicode:     false,
-		Width:       10,
+		Width:       14,
 	})
 
 	renderer.Step()
 
 	frame := strings.TrimPrefix(output.String(), "\r")
-	if utf8.RuneCountInString(frame) > 9 {
+	if frame != "[>        ..." {
+		t.Fatalf("narrow heartbeat clipping=%q", frame)
+	}
+	if utf8.RuneCountInString(frame) > 13 {
 		t.Fatalf("heartbeat can wrap at terminal edge: %q", frame)
 	}
 }
@@ -393,6 +588,17 @@ func TestFitTerminalLineCountsWideCharactersByDisplayColumns(t *testing.T) {
 	got := fitTerminalLine("123456界界", 9, true)
 	if terminalDisplayWidth(got) > 9 {
 		t.Fatalf("wide line exceeds terminal width: %q (%d columns)", got, terminalDisplayWidth(got))
+	}
+}
+
+func TestFitTerminalLinePreservesANSISequences(t *testing.T) {
+	t.Parallel()
+	value := "\x1b[38;5;81mChecking read-only access\x1b[0m"
+	got := fitTerminalLine(value, 14, true)
+	if ansi.StringWidth(got) > 14 ||
+		!strings.HasSuffix(ansi.Strip(got), "…") ||
+		!strings.Contains(got, "\x1b[0m") {
+		t.Fatalf("ANSI-safe fitted line=%q width=%d", got, ansi.StringWidth(got))
 	}
 }
 
@@ -407,6 +613,7 @@ func TestTerminalLineRemovesUnicodeFormattingControls(t *testing.T) {
 }
 
 func TestTerminalUnicodeUsesEffectiveLocalePrecedence(t *testing.T) {
+	t.Setenv("ACCESSIBLE", "")
 	t.Setenv("TERM", "xterm-256color")
 	t.Setenv("LANG", "en_US.UTF-8")
 	t.Setenv("LC_CTYPE", "")
@@ -419,5 +626,10 @@ func TestTerminalUnicodeUsesEffectiveLocalePrecedence(t *testing.T) {
 	t.Setenv("LC_CTYPE", "C.UTF-8")
 	if !terminalUnicode() {
 		t.Fatal("UTF-8 LC_CTYPE was not detected")
+	}
+
+	t.Setenv("ACCESSIBLE", "1")
+	if terminalUnicode() {
+		t.Fatal("accessible mode did not select ASCII markers")
 	}
 }
