@@ -155,13 +155,24 @@ Before running the Unix installer, require exactly one valid manifest row and
 verify it:
 
 ```sh
-pattern='^[[:xdigit:]]{64}  install\.sh$'
-[ "$(grep -Ec "$pattern" installer-checksums.sha256)" -eq 1 ]
-if command -v sha256sum >/dev/null 2>&1; then
-  grep -E "$pattern" installer-checksums.sha256 | sha256sum --strict --check -
-else
-  grep -E "$pattern" installer-checksums.sha256 | shasum -a 256 -c -
-fi
+(
+  pattern='^[[:xdigit:]]{64}  install\.sh$'
+  count="$(grep -Ec "$pattern" installer-checksums.sha256)" || {
+    echo 'Cannot read a valid install.sh checksum row' >&2
+    exit 1
+  }
+  if [ "$count" -ne 1 ]; then
+    echo 'Expected exactly one install.sh checksum row' >&2
+    exit 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    grep -E "$pattern" installer-checksums.sha256 |
+      sha256sum --strict --check -
+  else
+    grep -E "$pattern" installer-checksums.sha256 |
+      shasum -a 256 -c -
+  fi
+)
 ```
 
 On Windows PowerShell:
