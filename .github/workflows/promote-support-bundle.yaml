@@ -21,6 +21,7 @@ env:
   QODO_SUPPORT_BUNDLE_SOURCE_BUCKET: qodo-cli-public-dev
   QODO_SUPPORT_BUNDLE_DESTINATION_BUCKET: qodo-cli-public
   QODO_SUPPORT_BUNDLE_PREFIX: support-bundle
+  QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER: github-${{ github.run_id }}-${{ github.run_attempt }}
   GCP_PROJECT_NUMBER: "67590289846"
   GCP_SERVICE_ACCOUNT: qodo-support-bundle-publisher@codium-production.iam.gserviceaccount.com
 

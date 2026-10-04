@@ -20,6 +20,7 @@ concurrency:
 env:
   QODO_SUPPORT_BUNDLE_BUCKET: qodo-cli-public-dev
   QODO_SUPPORT_BUNDLE_PREFIX: support-bundle
+  QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER: github-${{ github.run_id }}-${{ github.run_attempt }}
   GCP_PROJECT_NUMBER: "430654255805"
   GCP_SERVICE_ACCOUNT: qodo-support-bundle-publisher@codium-development.iam.gserviceaccount.com
 

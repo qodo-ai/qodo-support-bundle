@@ -116,6 +116,96 @@ verify_release_identity() {
   done
 }
 
+acquire_publication_lock() {
+  owner=$1
+  bucket=$2
+  prefix=$3
+  access_token=$4
+  work=$5
+  command_name=$6
+  lock_object="${prefix}/control/publication-lock.json"
+  lock_cache='no-store'
+  desired="${work}/publication-lock-owned.json"
+  current="${work}/publication-lock-current.json"
+  headers="${current}.headers"
+
+  case "$owner" in
+    ""|*[!A-Za-z0-9._-]*)
+      echo "${command_name}: unsafe publication owner '$owner'" >&2
+      return 1
+      ;;
+  esac
+  printf '{"owner":"%s"}\n' "$owner" >"$desired"
+
+  if gcs_read_exact \
+    "$bucket" "$lock_object" "$access_token" \
+    "$current" "$headers" "$command_name"; then
+    current_generation="$(gcs_header_value x-goog-generation "$headers")"
+    [ -n "$current_generation" ] || {
+      echo "${command_name}: publication lock has no generation" >&2
+      return 1
+    }
+    if cmp -s "$desired" "$current"; then
+      PUBLICATION_LOCK_GENERATION=$current_generation
+      PUBLICATION_LOCK_HELD=1
+      return 0
+    fi
+    unlocked="${work}/publication-lock-unlocked.json"
+    printf '%s\n' '{"owner":""}' >"$unlocked"
+    if ! cmp -s "$unlocked" "$current"; then
+      echo "${command_name}: publication lock is held by another publisher" >&2
+      return 1
+    fi
+  else
+    read_status=$?
+    [ "$read_status" -eq 1 ] || return 1
+    current_generation=0
+  fi
+
+  gcs_conditional_put \
+    "$desired" "$bucket" "$lock_object" application/json "$lock_cache" \
+    "$current_generation" "$access_token" "$command_name" || {
+    echo "${command_name}: could not acquire publication lock" >&2
+    return 1
+  }
+  if ! gcs_read_exact \
+    "$bucket" "$lock_object" "$access_token" \
+    "$current" "$headers" "$command_name"; then
+    echo "${command_name}: publication lock verification failed" >&2
+    return 1
+  fi
+  if ! gcs_object_matches \
+    "$desired" "$current" "$headers" application/json "$lock_cache"; then
+    echo "${command_name}: publication lock verification failed" >&2
+    return 1
+  fi
+  PUBLICATION_LOCK_GENERATION="$(gcs_header_value x-goog-generation "$headers")"
+  [ -n "$PUBLICATION_LOCK_GENERATION" ] || {
+    echo "${command_name}: acquired publication lock has no generation" >&2
+    return 1
+  }
+  PUBLICATION_LOCK_HELD=1
+}
+
+release_publication_lock() {
+  bucket=$1
+  prefix=$2
+  access_token=$3
+  work=$4
+  command_name=$5
+  [ "${PUBLICATION_LOCK_HELD:-0}" -eq 1 ] || return 0
+  unlocked="${work}/publication-lock-unlocked.json"
+  printf '%s\n' '{"owner":""}' >"$unlocked"
+  gcs_conditional_put \
+    "$unlocked" "$bucket" "${prefix}/control/publication-lock.json" \
+    application/json no-store "$PUBLICATION_LOCK_GENERATION" \
+    "$access_token" "$command_name" || {
+    echo "${command_name}: failed to release publication lock" >&2
+    return 1
+  }
+  PUBLICATION_LOCK_HELD=0
+}
+
 repair_stable_installers() {
   version_script=$1
   bucket=$2
@@ -127,49 +217,40 @@ repair_stable_installers() {
   mutable_cache='no-cache, max-age=0, must-revalidate'
   immutable_cache='public, max-age=31536000, immutable'
 
-  for attempt in 1 2 3; do
-    pointer="${work}/repair-version-${attempt}.json"
-    pointer_headers="${work}/repair-version-${attempt}.headers"
-    gcs_read_exact \
-      "$bucket" "${prefix}/version.json" "$access_token" \
-      "$pointer" "$pointer_headers" "$command_name"
-    pointer_generation="$(gcs_header_value x-goog-generation "$pointer_headers")"
-    active_version="$(python3 "$version_script" read "$pointer")"
+  pointer="${work}/repair-version.json"
+  pointer_headers="${work}/repair-version.headers"
+  if gcs_read_exact \
+    "$bucket" "${prefix}/version.json" "$access_token" \
+    "$pointer" "$pointer_headers" "$command_name"; then
+    :
+  else
+    read_status=$?
+    [ "$read_status" -eq 1 ] && return 0
+    return 1
+  fi
+  active_version="$(python3 "$version_script" read "$pointer")"
 
-    release_installers | while IFS= read -r filename; do
-      winner="${work}/repair-${attempt}-${filename}"
-      winner_headers="${winner}.headers"
-      gcs_read_exact \
-        "$bucket" "${prefix}/releases/${active_version}/${filename}" \
-        "$access_token" "$winner" "$winner_headers" "$command_name"
-      [ "$(gcs_header_value Content-Type "$winner_headers")" = \
-        'text/plain; charset=utf-8' ] &&
-        [ "$(gcs_header_value Cache-Control "$winner_headers")" = \
-          "$immutable_cache" ] || {
-        echo "${command_name}: active versioned installer has unexpected headers" >&2
-        return 1
-      }
-      gcs_upload_mutable \
-        "$winner" "$bucket" "${prefix}/${filename}" \
-        'text/plain; charset=utf-8' "$mutable_cache" \
-        "$access_token" "$existing" "$command_name"
-      gcs_verify_exact \
-        "$winner" "$bucket" "${prefix}/${filename}" \
-        'text/plain; charset=utf-8' "$mutable_cache" \
-        "$access_token" "$existing" "$command_name"
-    done
-
-    after="${work}/repair-after-${attempt}.json"
-    after_headers="${work}/repair-after-${attempt}.headers"
+  release_installers | while IFS= read -r filename; do
+    winner="${work}/repair-${filename}"
+    winner_headers="${winner}.headers"
     gcs_read_exact \
-      "$bucket" "${prefix}/version.json" "$access_token" \
-      "$after" "$after_headers" "$command_name"
-    after_generation="$(gcs_header_value x-goog-generation "$after_headers")"
-    if [ "$after_generation" = "$pointer_generation" ]; then
-      echo "${command_name}: restored stable installers for ${active_version}" >&2
-      return 0
-    fi
+      "$bucket" "${prefix}/releases/${active_version}/${filename}" \
+      "$access_token" "$winner" "$winner_headers" "$command_name"
+    [ "$(gcs_header_value Content-Type "$winner_headers")" = \
+      'text/plain; charset=utf-8' ] &&
+      [ "$(gcs_header_value Cache-Control "$winner_headers")" = \
+        "$immutable_cache" ] || {
+      echo "${command_name}: active versioned installer has unexpected headers" >&2
+      return 1
+    }
+    gcs_upload_mutable \
+      "$winner" "$bucket" "${prefix}/${filename}" \
+      'text/plain; charset=utf-8' "$mutable_cache" \
+      "$access_token" "$existing" "$command_name"
+    gcs_verify_exact \
+      "$winner" "$bucket" "${prefix}/${filename}" \
+      'text/plain; charset=utf-8' "$mutable_cache" \
+      "$access_token" "$existing" "$command_name"
   done
-  echo "${command_name}: version pointer kept changing during installer repair" >&2
-  return 1
+  echo "${command_name}: stable installers match active ${active_version}" >&2
 }

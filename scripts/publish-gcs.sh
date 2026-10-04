@@ -5,6 +5,7 @@ set -eu
 BUCKET="${QODO_SUPPORT_BUNDLE_BUCKET:-qodo-cli-public-dev}"
 PREFIX="${QODO_SUPPORT_BUNDLE_PREFIX:-support-bundle}"
 VERSION="${QODO_SUPPORT_BUNDLE_VERSION:?QODO_SUPPORT_BUNDLE_VERSION is required}"
+PUBLICATION_OWNER="${QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER:?QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER is required}"
 ROOT="$(unset CDPATH; cd "$(dirname "$0")/.." && pwd)"
 DIST="${QODO_SUPPORT_BUNDLE_DIST:-$ROOT/dist}"
 . "$ROOT/scripts/gcs-exact-object.sh"
@@ -22,7 +23,21 @@ validate_release_directory "$DIST" publish-gcs
 
 access_token="$(gcloud auth print-access-token)"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+PUBLICATION_LOCK_HELD=0
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$PUBLICATION_LOCK_HELD" -eq 1 ]; then
+    release_publication_lock \
+      "$BUCKET" "$PREFIX" "$access_token" "$work" publish-gcs || status=1
+  fi
+  rm -rf "$work"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 existing="${work}/existing"
 metadata="${work}/version.json"
 current_metadata="${work}/current-version.json"
@@ -56,6 +71,29 @@ release_files | while IFS= read -r filename; do
     "$access_token" "$existing" publish-gcs
 done
 
+acquire_publication_lock \
+  "$PUBLICATION_OWNER" "$BUCKET" "$PREFIX" "$access_token" "$work" publish-gcs
+repair_stable_installers \
+  "$ROOT/scripts/version-contract.py" "$BUCKET" "$PREFIX" "$access_token" \
+  "$work" "$existing" publish-gcs
+
+# Recheck the pointer under the publication lock before changing stable objects.
+metadata_generation=0
+if gcs_read_exact \
+  "$BUCKET" "${PREFIX}/version.json" "$access_token" \
+  "$current_metadata" "$current_headers" publish-gcs; then
+  python3 "$ROOT/scripts/version-contract.py" \
+    allow-update "$current_metadata" "$VERSION" >/dev/null
+  metadata_generation="$(gcs_header_value x-goog-generation "$current_headers")"
+  [ -n "$metadata_generation" ] || {
+    echo "publish-gcs: version.json has no generation" >&2
+    exit 1
+  }
+else
+  read_status=$?
+  [ "$read_status" -eq 1 ] || exit 1
+fi
+
 mutable_cache='no-cache, max-age=0, must-revalidate'
 release_installers | while IFS= read -r filename; do
   gcs_upload_mutable \
@@ -84,4 +122,6 @@ gcs_verify_exact \
   application/json "$mutable_cache" \
   "$access_token" "$existing" publish-gcs
 
+release_publication_lock \
+  "$BUCKET" "$PREFIX" "$access_token" "$work" publish-gcs
 echo "publish-gcs: published and activated ${VERSION} at gs://${BUCKET}/${PREFIX}/" >&2

@@ -165,6 +165,9 @@ func TestGCSScriptsUseVersionedImmutableSupportBundlePrefix(t *testing.T) {
 		"install.ps1",
 		"checksum manifest inventory does not match the six binaries",
 		"installer checksum inventory does not match both installers",
+		"acquire_publication_lock",
+		"release_publication_lock",
+		"control/publication-lock.json",
 	} {
 		if !strings.Contains(releaseContract, required) {
 			t.Fatalf("release contract does not contain %q", required)
@@ -266,6 +269,7 @@ func TestExactObjectPublishingRefusesDifferentExistingBytes(t *testing.T) {
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_GCS_ROOT="+fakeGCS,
 		"FAKE_REQUESTS="+requests,
+		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=different-bytes-test",
 		"QODO_SUPPORT_BUNDLE_DIST="+dist,
 		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
 	)
@@ -302,6 +306,7 @@ func TestPublishRejectsVersionDowngradeBeforeAnyWrite(t *testing.T) {
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_GCS_ROOT="+fakeGCS,
 		"FAKE_REQUESTS="+requests,
+		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=downgrade-test",
 		"QODO_SUPPORT_BUNDLE_DIST="+dist,
 		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
 	)
@@ -348,6 +353,7 @@ func TestPublishRejectsConcurrentVersionCASConflict(t *testing.T) {
 		"FAKE_REQUESTS="+requests,
 		"FAKE_CONFLICT_OBJECT=/support-bundle/version.json",
 		"FAKE_CONFLICT_VERSION=1.0.0",
+		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=conflict-test",
 		"QODO_SUPPORT_BUNDLE_DIST="+dist,
 		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
 	)
@@ -390,6 +396,54 @@ func TestPublishRejectsConcurrentVersionCASConflict(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "stable installers were reconciled") {
 		t.Fatalf("CAS failure did not report reconciliation:\n%s", output)
+	}
+}
+
+func TestPublishRefusesAnotherPublicationOwner(t *testing.T) {
+	t.Parallel()
+	root := repositoryRoot(t)
+	dist := t.TempDir()
+	fakeGCS := t.TempDir()
+	requests := filepath.Join(t.TempDir(), "requests.log")
+	bin := installFakeGCSCommands(t)
+	writeReleaseFixture(t, dist, "candidate")
+	lock := filepath.Join(
+		fakeGCS,
+		"qodo-cli-public-dev",
+		"support-bundle",
+		"control",
+		"publication-lock.json",
+	)
+	if err := os.MkdirAll(filepath.Dir(lock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lock, []byte("{\"owner\":\"other-run\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command(filepath.Join(root, "scripts/publish-gcs.sh"))
+	command.Env = append(
+		os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FAKE_GCS_ROOT="+fakeGCS,
+		"FAKE_REQUESTS="+requests,
+		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=this-run",
+		"QODO_SUPPORT_BUNDLE_DIST="+dist,
+		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
+	)
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "lock is held by another publisher") {
+		t.Fatalf("held publication lock result = %v\n%s", err, output)
+	}
+	for _, filename := range releaseInstallers {
+		if _, statErr := os.Stat(filepath.Join(
+			fakeGCS,
+			"qodo-cli-public-dev",
+			"support-bundle",
+			filename,
+		)); !os.IsNotExist(statErr) {
+			t.Fatalf("held lock allowed stable %s to be written", filename)
+		}
 	}
 }
 
@@ -454,6 +508,7 @@ func TestPublishRejectsIncompleteDuplicateAndUnexpectedChecksumEntries(t *testin
 			command := exec.Command(filepath.Join(root, "scripts/publish-gcs.sh"))
 			command.Env = append(
 				os.Environ(),
+				"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=manifest-test",
 				"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
 				"QODO_SUPPORT_BUNDLE_DIST="+dist,
 			)
@@ -506,6 +561,7 @@ esac
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_CANARY="+canary,
 		"FAKE_UPLOADS="+uploads,
+		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=identity-test",
 		"QODO_SUPPORT_BUNDLE_RELEASE_DIR="+release,
 		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
 	)
@@ -552,6 +608,8 @@ func TestGCSWorkflowsUseOIDCAndSeparateDevFromProduction(t *testing.T) {
 		"canary-dev-installers.sh",
 		"windows-11-arm",
 		"qodo-scout.exe\" version",
+		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER",
+		"group: support-bundle-dev-publication",
 	} {
 		if !strings.Contains(publication, required) {
 			t.Fatalf("publication workflow does not contain %q", required)
@@ -582,6 +640,8 @@ func TestGCSWorkflowsUseOIDCAndSeparateDevFromProduction(t *testing.T) {
 		"https://get.qodo.ai/support-bundle",
 		"windows-11-arm",
 		"qodo-scout.exe\" version",
+		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER",
+		"group: support-bundle-production-promotion",
 	} {
 		if !strings.Contains(promotion, required) {
 			t.Fatalf("promotion workflow does not contain %q", required)
@@ -990,6 +1050,7 @@ func runDistributionScript(t *testing.T, script, bin string, environment []strin
 		append(
 			os.Environ(),
 			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=test-publisher",
 		),
 		environment...,
 	)
@@ -1038,6 +1099,10 @@ func assertExactObjectRequests(t *testing.T, requests, bucket string) {
 			if fields[2] != expectedType {
 				t.Fatalf("immutable write has wrong content type: %q", line)
 			}
+		} else if relative == "control/publication-lock.json" {
+			if fields[2] != "application/json" || fields[3] != "no-store" {
+				t.Fatalf("publication lock has wrong response metadata: %q", line)
+			}
 		} else if fields[3] != "no-cache, max-age=0, must-revalidate" {
 			t.Fatalf("mutable write has wrong cache control: %q", line)
 		} else {
@@ -1062,6 +1127,37 @@ func assertExactObjectRequests(t *testing.T, requests, bucket string) {
 	if !okSH || !okPS1 || !okVersion ||
 		version < installSH || version < installPS1 {
 		t.Fatalf("version.json was not the final mutable write:\n%s", data)
+	}
+	lockWrites := 0
+	firstLock := -1
+	lastLock := -1
+	installSHLine := -1
+	installPS1Line := -1
+	versionLine := -1
+	for index, line := range lines {
+		if strings.HasPrefix(
+			line,
+			"PUT|"+base+"control/publication-lock.json|",
+		) {
+			lockWrites++
+			if firstLock == -1 {
+				firstLock = index
+			}
+			lastLock = index
+		}
+		if strings.HasPrefix(line, "PUT|"+base+"install.sh|") {
+			installSHLine = index
+		}
+		if strings.HasPrefix(line, "PUT|"+base+"install.ps1|") {
+			installPS1Line = index
+		}
+		if strings.HasPrefix(line, "PUT|"+base+"version.json|") {
+			versionLine = index
+		}
+	}
+	if lockWrites < 2 || firstLock >= installSHLine || firstLock >= installPS1Line ||
+		lastLock <= versionLine {
+		t.Fatalf("publication lock does not bracket mutable activation:\n%s", data)
 	}
 }
 

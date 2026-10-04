@@ -91,6 +91,23 @@ until the final conditional update. An older version is rejected, and a
 concurrent change causes the final CAS to fail rather than rolling the pointer
 back.
 
+Each workflow attempt also acquires
+`support-bundle/control/publication-lock.json` with a unique run owner before
+it repairs or changes stable installers and holds that lock through metadata
+activation. The lock is an exact object with generation CAS and `no-store`
+caching; it requires neither bucket listing nor deletion. A different owner
+cannot take over a held lock, so overlapping or stale publishers cannot undo a
+newer publisher's stable scripts. Successful and failed runs release the lock
+through the shell cleanup trap.
+
+The lock deliberately has no time-based lease: an interrupted process cannot
+resume writes after another publisher takes over. If a runner is terminated
+before cleanup, later publication stops safely. Recovery requires an operator
+to confirm that no publication process is active, reconcile both stable
+installers to the immutable release selected by `version.json`, and reset the
+lock with an exact generation-match write. That is a production change and
+retains the same manual approval boundary as promotion.
+
 Rollback never mutates an immutable release. If rollback is required, create
 and verify a new release containing the intended bytes, or promote a newer
 fixed version. The monotonic pointer contract intentionally rejects moving

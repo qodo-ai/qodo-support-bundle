@@ -6,6 +6,7 @@ SOURCE_BUCKET="${QODO_SUPPORT_BUNDLE_SOURCE_BUCKET:-qodo-cli-public-dev}"
 DESTINATION_BUCKET="${QODO_SUPPORT_BUNDLE_DESTINATION_BUCKET:-qodo-cli-public}"
 PREFIX="${QODO_SUPPORT_BUNDLE_PREFIX:-support-bundle}"
 VERSION="${QODO_SUPPORT_BUNDLE_VERSION:?QODO_SUPPORT_BUNDLE_VERSION is required}"
+PUBLICATION_OWNER="${QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER:?QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER is required}"
 RELEASE_DIR="${QODO_SUPPORT_BUNDLE_RELEASE_DIR:?QODO_SUPPORT_BUNDLE_RELEASE_DIR is required}"
 ROOT="$(unset CDPATH; cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/scripts/gcs-exact-object.sh"
@@ -21,7 +22,23 @@ esac
 
 work="$(mktemp -d)"
 existing="${work}/existing"
-trap 'rm -rf "$work"' EXIT
+access_token=
+PUBLICATION_LOCK_HELD=0
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$PUBLICATION_LOCK_HELD" -eq 1 ]; then
+    release_publication_lock \
+      "$DESTINATION_BUCKET" "$PREFIX" "$access_token" "$work" promote-gcs ||
+      status=1
+  fi
+  rm -rf "$work"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 release_files | while IFS= read -r filename; do
   gcloud storage cp \
@@ -99,6 +116,30 @@ release_files | while IFS= read -r filename; do
     "$access_token" "$existing" promote-gcs
 done
 
+acquire_publication_lock \
+  "$PUBLICATION_OWNER" "$DESTINATION_BUCKET" "$PREFIX" "$access_token" \
+  "$work" promote-gcs
+repair_stable_installers \
+  "$ROOT/scripts/version-contract.py" "$DESTINATION_BUCKET" "$PREFIX" \
+  "$access_token" "$work" "$existing" promote-gcs
+
+# Recheck the pointer under the publication lock before changing stable objects.
+metadata_generation=0
+if gcs_read_exact \
+  "$DESTINATION_BUCKET" "${PREFIX}/version.json" "$access_token" \
+  "$current_metadata" "$current_headers" promote-gcs; then
+  python3 "$ROOT/scripts/version-contract.py" \
+    allow-update "$current_metadata" "$VERSION" >/dev/null
+  metadata_generation="$(gcs_header_value x-goog-generation "$current_headers")"
+  [ -n "$metadata_generation" ] || {
+    echo "promote-gcs: production version.json has no generation" >&2
+    exit 1
+  }
+else
+  read_status=$?
+  [ "$read_status" -eq 1 ] || exit 1
+fi
+
 release_installers | while IFS= read -r filename; do
   gcs_upload_mutable \
     "${work}/${filename}" "$DESTINATION_BUCKET" "${PREFIX}/${filename}" \
@@ -125,4 +166,6 @@ gcs_verify_exact \
   "$metadata" "$DESTINATION_BUCKET" "${PREFIX}/version.json" \
   application/json "$mutable_cache" "$access_token" "$existing" promote-gcs
 
+release_publication_lock \
+  "$DESTINATION_BUCKET" "$PREFIX" "$access_token" "$work" promote-gcs
 echo "promote-gcs: promoted and activated ${VERSION} at gs://${DESTINATION_BUCKET}/${PREFIX}/" >&2
