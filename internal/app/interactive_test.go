@@ -14,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 )
 
 type wizardDiscoveryStub struct {
@@ -199,6 +200,29 @@ func TestCollectInteractiveShowsSingleFinalArchiveResult(t *testing.T) {
 	}
 	if _, err := os.Stat(output); err != nil {
 		t.Fatalf("interactive collection did not create archive: %v", err)
+	}
+}
+
+func TestInteractiveNoProgressUsesConciseArchiveResult(t *testing.T) {
+	t.Parallel()
+	const output = "/tmp/bundle.tar.gz"
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	writeFinalArchiveResult(
+		&stdout,
+		&stderr,
+		true,
+		false,
+		redact.New(),
+		output,
+	)
+
+	if stdout.Len() != 0 {
+		t.Fatalf("interactive fallback changed stdout: %q", stdout.String())
+	}
+	if stderr.String() != "Bundle saved: "+output+"\n" {
+		t.Fatalf("interactive fallback=%q", stderr.String())
 	}
 }
 
