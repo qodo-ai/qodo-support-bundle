@@ -14,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 )
 
 type wizardDiscoveryStub struct {
@@ -134,7 +135,7 @@ func TestCollectInteractiveUsesFlagDefaultsAndCancelCreatesNoArchive(t *testing.
 	}
 }
 
-func TestCollectInteractiveAnswersUseExistingCollectionPathAndStdout(t *testing.T) {
+func TestCollectInteractiveShowsSingleFinalArchiveResult(t *testing.T) {
 	root := t.TempDir()
 	kubectl := fakeKubectl(t, root, "")
 	output := root + "/bundle.tar.gz"
@@ -186,13 +187,42 @@ func TestCollectInteractiveAnswersUseExistingCollectionPathAndStdout(t *testing.
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
-	want := fmt.Sprintf(
-		"Support bundle created: %s\n"+
-			"Kubernetes scope: 1/1 namespaces, 1 pods, 1 containers (0 init, 0 ephemeral)\n",
+	wantStdout := "Kubernetes scope: 1/1 namespaces, 1 pods, 1 containers (0 init, 0 ephemeral)\n"
+	if stdout.String() != wantStdout {
+		t.Fatalf("stdout changed:\ngot  %q\nwant %q", stdout.String(), wantStdout)
+	}
+	transcript := stdout.String() + stderr.String()
+	if strings.Count(transcript, "Bundle saved: "+output) != 1 {
+		t.Fatalf("interactive final archive result count changed:\n%s", transcript)
+	}
+	if strings.Contains(transcript, fmt.Sprintf("Support bundle created: %s", output)) {
+		t.Fatalf("interactive output retained legacy archive result:\n%s", transcript)
+	}
+	if _, err := os.Stat(output); err != nil {
+		t.Fatalf("interactive collection did not create archive: %v", err)
+	}
+}
+
+func TestInteractiveNoProgressUsesConciseArchiveResult(t *testing.T) {
+	t.Parallel()
+	const output = "/tmp/bundle.tar.gz"
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	writeFinalArchiveResult(
+		&stdout,
+		&stderr,
+		true,
+		false,
+		redact.New(),
 		output,
 	)
-	if stdout.String() != want {
-		t.Fatalf("stdout changed:\ngot  %q\nwant %q", stdout.String(), want)
+
+	if stdout.Len() != 0 {
+		t.Fatalf("interactive fallback changed stdout: %q", stdout.String())
+	}
+	if stderr.String() != "Bundle saved: "+output+"\n" {
+		t.Fatalf("interactive fallback=%q", stderr.String())
 	}
 }
 
