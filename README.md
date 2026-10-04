@@ -690,8 +690,8 @@ Checksums detect corruption but do not authenticate provenance. Treat bundles
 as sensitive, review them before sharing, and use an approved authenticated
 channel.
 
-Official release binaries include five targets (Linux amd64/arm64, macOS
-amd64/arm64, and Windows amd64), distribution checksums, and GitHub build
+Official release binaries include six targets (Linux amd64/arm64, macOS
+amd64/arm64, and Windows amd64/arm64), distribution checksums, and GitHub build
 provenance. Verify a downloaded binary with:
 
 ```bash
@@ -721,7 +721,7 @@ The Qodo CLI continues to own the bucket root. Support Bundle workflows read
 and create only objects under the `support-bundle/` prefix. Uploads use
 exact-object Cloud Storage API requests with a zero-generation precondition;
 an existing object is accepted only after an exact-object download matches its
-expected SHA-256. The five binaries are created before `checksums.sha256`, which
+expected SHA-256. The six binaries are created before `checksums.sha256`, which
 acts as the release completion marker. The publisher does not need
 `storage.objects.list`, overwrite, or delete permission, so it cannot enumerate
 names elsewhere in the shared bucket.
@@ -770,7 +770,7 @@ Linux, macOS, and Windows runners. The test builds the native binary, executes
 it against a controlled fake `kubectl`, and validates the resulting archive,
 checksums, and redaction without using cluster credentials.
 
-The release workflow also tests the module, cross-compiles all five platforms,
+The release workflow also tests the module, cross-compiles all six platforms,
 generates `dist/checksums.sha256`, attests all assets, stores the workflow
 artifact, and uploads assets to an existing matching GitHub release. Release
 publishing waits for every native smoke job. Manual dispatch must run from the

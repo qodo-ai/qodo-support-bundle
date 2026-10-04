@@ -59,10 +59,11 @@ The published artifact names remain
 
 - macOS amd64 and arm64
 - Linux amd64 and arm64
-- Windows amd64
+- Windows amd64 and arm64
 
-Windows ARM64 is rejected. The amd64 binary is not selected silently because
-Prism compatibility is not yet part of the tested support contract.
+Windows ARM64 installs the native ARM64 binary rather than selecting the amd64
+artifact through emulation. CI exercises the release binary and local installer
+on the `windows-11-arm` GitHub-hosted runner.
 
 ## Air-gapped installation
 

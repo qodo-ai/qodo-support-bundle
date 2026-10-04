@@ -40,6 +40,15 @@ function Get-QodoScoutReleaseBaseUrl {
     return "$script:QodoScoutBaseUrl/releases/$Version"
 }
 
+function Get-QodoScoutAssetUrl {
+    param(
+        [Parameter(Mandatory)][string]$Version,
+        [Parameter(Mandatory)][string]$AssetName
+    )
+
+    return "$(Get-QodoScoutReleaseBaseUrl -Version $Version)/$AssetName"
+}
+
 function Resolve-QodoScoutAsset {
     param(
         [Parameter(Mandatory)][string]$OperatingSystem,
@@ -48,6 +57,9 @@ function Resolve-QodoScoutAsset {
 
     if ($OperatingSystem -eq 'windows' -and $Architecture -eq 'X64') {
         return 'qodo-support-bundle-windows-amd64.exe'
+    }
+    if ($OperatingSystem -eq 'windows' -and $Architecture -eq 'Arm64') {
+        return 'qodo-support-bundle-windows-arm64.exe'
     }
     throw "unsupported platform: $OperatingSystem $Architecture"
 }
@@ -179,6 +191,9 @@ function Install-QodoScout {
         [string]$RequestedVersion,
         [string]$RequestedInstallDirectory,
         [string]$RequestedSourceDirectory,
+        [string]$RuntimeArchitecture = (
+            [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+        ),
         [switch]$UpdateUserPath
     )
 
@@ -187,10 +202,9 @@ function Install-QodoScout {
         )) {
         throw 'unsupported platform: install.ps1 requires Windows'
     }
-    $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
     $asset = Resolve-QodoScoutAsset `
         -OperatingSystem 'windows' `
-        -Architecture $architecture
+        -Architecture $RuntimeArchitecture
 
     if ([string]::IsNullOrWhiteSpace($RequestedInstallDirectory)) {
         if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
@@ -234,6 +248,9 @@ function Install-QodoScout {
         }
 
         $releaseBaseUrl = Get-QodoScoutReleaseBaseUrl -Version $RequestedVersion
+        $assetUrl = Get-QodoScoutAssetUrl `
+            -Version $RequestedVersion `
+            -AssetName $asset
         $binaryPath = Join-Path $temporaryDirectory $asset
         $manifestPath = Join-Path $temporaryDirectory 'checksums.sha256'
         if (-not [string]::IsNullOrWhiteSpace($RequestedSourceDirectory)) {
@@ -246,7 +263,7 @@ function Install-QodoScout {
         }
         else {
             Invoke-QodoScoutDownload `
-                -Uri "$releaseBaseUrl/$asset" `
+                -Uri $assetUrl `
                 -Destination $binaryPath
             Invoke-QodoScoutDownload `
                 -Uri "$releaseBaseUrl/checksums.sha256" `

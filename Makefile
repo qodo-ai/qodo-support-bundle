@@ -49,6 +49,7 @@ release: clean
 	GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/qodo-support-bundle-darwin-amd64 ./cmd/qodo-support-bundle
 	GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/qodo-support-bundle-darwin-arm64 ./cmd/qodo-support-bundle
 	GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/qodo-support-bundle-windows-amd64.exe ./cmd/qodo-support-bundle
+	GOOS=windows GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/qodo-support-bundle-windows-arm64.exe ./cmd/qodo-support-bundle
 	cd dist && if command -v sha256sum >/dev/null 2>&1; then sha256sum qodo-support-bundle-* > checksums.sha256; else shasum -a 256 qodo-support-bundle-* > checksums.sha256; fi
 
 clean:

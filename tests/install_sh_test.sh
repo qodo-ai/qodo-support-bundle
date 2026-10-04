@@ -114,7 +114,7 @@ write_release "$TEST_ROOT/server/releases/1.2.3" qodo-support-bundle-darwin-arm6
 : >"$TEST_ROOT/curl.log"
 run_installer "$LATEST_HOME" "$TOOLS" --install-dir "$LATEST_INSTALL"
 [ -x "$LATEST_INSTALL/qodo-scout" ] || fail "latest install did not create executable"
-[ "$(stat -f '%Lp' "$LATEST_INSTALL/qodo-scout" 2>/dev/null || stat -c '%a' "$LATEST_INSTALL/qodo-scout")" = 755 ] ||
+[ "$(stat -c '%a' "$LATEST_INSTALL/qodo-scout" 2>/dev/null || stat -f '%Lp' "$LATEST_INSTALL/qodo-scout")" = 755 ] ||
   fail "installed mode is not 0755"
 [ "$(cat "$TEST_ROOT/exec.log")" = version ] || fail "smoke check ran a collecting command"
 grep -Fx 'https://get.qodo.ai/support-bundle/version.json' "$TEST_ROOT/curl.log" >/dev/null ||

@@ -11,14 +11,13 @@ AfterAll {
 }
 
 Describe 'Qodo Scout Windows installer contracts' {
-    It 'maps only native Windows amd64 to the published asset' {
+    It 'maps native Windows architectures to their published assets' {
         Resolve-QodoScoutAsset -OperatingSystem 'windows' -Architecture 'X64' |
             Should -Be 'qodo-support-bundle-windows-amd64.exe'
-    }
-
-    It 'rejects Windows ARM64 until emulation is an explicit tested contract' {
+        Resolve-QodoScoutAsset -OperatingSystem 'windows' -Architecture 'Arm64' |
+            Should -Be 'qodo-support-bundle-windows-arm64.exe'
         {
-            Resolve-QodoScoutAsset -OperatingSystem 'windows' -Architecture 'Arm64'
+            Resolve-QodoScoutAsset -OperatingSystem 'windows' -Architecture 'X86'
         } | Should -Throw '*unsupported platform*'
     }
 
@@ -36,13 +35,20 @@ Describe 'Qodo Scout Windows installer contracts' {
     It 'constructs the immutable release base URL from the selected version' {
         Get-QodoScoutReleaseBaseUrl -Version '1.2.3' |
             Should -Be 'https://get.qodo.ai/support-bundle/releases/1.2.3'
+        Get-QodoScoutAssetUrl `
+            -Version '1.2.3' `
+            -AssetName 'qodo-support-bundle-windows-arm64.exe' |
+            Should -Be (
+                'https://get.qodo.ai/support-bundle/releases/1.2.3/' +
+                'qodo-support-bundle-windows-arm64.exe'
+            )
     }
 
     It 'selects one exact well-formed checksum row' {
         $digest = 'a' * 64
         Get-QodoScoutManifestDigest `
-            -ManifestText "$digest  qodo-support-bundle-windows-amd64.exe`n" `
-            -AssetName 'qodo-support-bundle-windows-amd64.exe' |
+            -ManifestText "$digest  qodo-support-bundle-windows-arm64.exe`n" `
+            -AssetName 'qodo-support-bundle-windows-arm64.exe' |
             Should -Be $digest
     }
 
@@ -134,6 +140,30 @@ Describe 'Qodo Scout local source installation' -Skip:(-not $IsWindows) {
         Assert-MockCalled Invoke-QodoScoutSmokeCheck -Times 2 -Exactly
     }
 
+    It 'installs the verified ARM64 asset from a local source directory' {
+        $armAsset = 'qodo-support-bundle-windows-arm64.exe'
+        $armAssetPath = Join-Path $script:SourceDirectory $armAsset
+        [IO.File]::WriteAllBytes($armAssetPath, [byte[]](5, 6, 7, 8))
+        $digest = (
+            Get-FileHash -LiteralPath $armAssetPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        Set-Content `
+            -LiteralPath (Join-Path $script:SourceDirectory 'checksums.sha256') `
+            -Value "$digest  $armAsset" `
+            -NoNewline
+
+        Install-QodoScout `
+            -RequestedVersion '1.2.3' `
+            -RequestedInstallDirectory $script:InstallDirectory `
+            -RequestedSourceDirectory $script:SourceDirectory `
+            -RuntimeArchitecture 'Arm64'
+
+        $installed = Join-Path $script:InstallDirectory 'qodo-scout.exe'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($installed)) |
+            Should -Be 'BQYHCA=='
+        Assert-MockCalled Invoke-QodoScoutSmokeCheck -Times 1 -Exactly
+    }
+
     It 'preserves an existing install when verification fails' {
         New-Item -ItemType Directory -Path $script:InstallDirectory -Force | Out-Null
         $installed = Join-Path $script:InstallDirectory 'qodo-scout.exe'
@@ -219,6 +249,43 @@ Describe 'Qodo Scout metadata installation' -Skip:(-not $IsWindows) {
         ) -join "`n"
         ($script:DownloadedUris -join "`n") | Should -Be $expectedUris
         Test-Path $script:InstallerTempDirectory | Should -BeFalse
+        Assert-MockCalled Invoke-QodoScoutSmokeCheck -Times 1 -Exactly
+    }
+
+    It 'downloads and verifies the ARM64 asset from the immutable release URL' {
+        Mock Invoke-QodoScoutDownload {
+            param([uri]$Uri, [string]$Destination)
+
+            $script:DownloadedUris += $Uri.AbsoluteUri
+            if ($Uri.AbsolutePath.EndsWith('/version.json')) {
+                Set-Content -LiteralPath $Destination -Value '{ "version": "4.5.6" }'
+                return
+            }
+            if ($Uri.AbsolutePath.EndsWith('/checksums.sha256')) {
+                $asset = 'qodo-support-bundle-windows-arm64.exe'
+                $assetPath = Join-Path (Split-Path -Parent $Destination) $asset
+                $digest = (
+                    Get-FileHash -LiteralPath $assetPath -Algorithm SHA256
+                ).Hash.ToLowerInvariant()
+                Set-Content `
+                    -LiteralPath $Destination `
+                    -Value "$digest  $asset" `
+                    -NoNewline
+                return
+            }
+            [IO.File]::WriteAllBytes($Destination, [byte[]](5, 6, 7, 8))
+        }
+
+        Install-QodoScout `
+            -RequestedInstallDirectory $script:LatestInstallDirectory `
+            -RuntimeArchitecture 'Arm64'
+
+        $expectedUris = @(
+            'https://get.qodo.ai/support-bundle/version.json',
+            'https://get.qodo.ai/support-bundle/releases/4.5.6/qodo-support-bundle-windows-arm64.exe',
+            'https://get.qodo.ai/support-bundle/releases/4.5.6/checksums.sha256'
+        ) -join "`n"
+        ($script:DownloadedUris -join "`n") | Should -Be $expectedUris
         Assert-MockCalled Invoke-QodoScoutSmokeCheck -Times 1 -Exactly
     }
 

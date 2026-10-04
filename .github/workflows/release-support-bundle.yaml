@@ -29,6 +29,7 @@ jobs:
           - macos-latest
           - macos-15-intel
           - windows-latest
+          - windows-11-arm
     steps:
       - name: Checkout source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -52,6 +53,29 @@ jobs:
           Import-Module PSScriptAnalyzer -RequiredVersion 1.24.0
           Invoke-ScriptAnalyzer -Path ./install.ps1 -EnableExit
           Invoke-Pester -Path ./tests/Install.Tests.ps1 -CI
+
+      - name: Exercise native Windows ARM64 release and installer
+        if: ${{ matrix.os == 'windows-11-arm' }}
+        shell: pwsh
+        run: |
+          $release = Join-Path $env:RUNNER_TEMP 'qodo-scout-arm64-release'
+          $install = Join-Path $env:RUNNER_TEMP 'qodo-scout-arm64-install'
+          New-Item -ItemType Directory -Path $release -Force | Out-Null
+          $asset = Join-Path $release 'qodo-support-bundle-windows-arm64.exe'
+          go build -trimpath -o $asset ./cmd/qodo-support-bundle
+          & $asset version
+          if ($LASTEXITCODE -ne 0) { throw 'native ARM64 release smoke check failed' }
+          $digest = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content `
+            -LiteralPath (Join-Path $release 'checksums.sha256') `
+            -Value "$digest  qodo-support-bundle-windows-arm64.exe" `
+            -NoNewline
+          ./install.ps1 `
+            -Version 0.0.0-ci `
+            -SourceDir $release `
+            -InstallDir $install
+          & (Join-Path $install 'qodo-scout.exe') version
+          if ($LASTEXITCODE -ne 0) { throw 'installed ARM64 release smoke check failed' }
 
       - name: Run native CLI bundle smoke test
         run: go test ./internal/e2e -count=1 -v
@@ -96,6 +120,7 @@ jobs:
           test -f qodo-support-bundle-darwin-amd64
           test -f qodo-support-bundle-darwin-arm64
           test -f qodo-support-bundle-windows-amd64.exe
+          test -f qodo-support-bundle-windows-arm64.exe
 
   release:
     if: ${{ github.event_name != 'pull_request' }}
