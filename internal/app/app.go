@@ -622,7 +622,9 @@ func runCollect(
 				true,
 			)
 			closeProgress(progress, stderr)
-			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
+			if !*interactive {
+				_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
+			}
 			_, _ = fmt.Fprintln(stderr, "Bundle created, but temporary data cleanup failed.")
 			return 1
 		}
@@ -645,7 +647,9 @@ func runCollect(
 		false,
 	)
 	closeProgress(progress, stderr)
-	_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
+	if !*interactive {
+		_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
+	}
 	_, _ = fmt.Fprintf(
 		stdout,
 		"Kubernetes scope: %d/%d namespaces, %d pods, %d containers (%d init, %d ephemeral)\n",
