@@ -547,6 +547,7 @@ func runWizardNamespaceDiscovery(
 	kubeContext string,
 	stderr io.Writer,
 	visible bool,
+	explicitNamespaceCount int,
 ) ([]string, error) {
 	if !visible {
 		return discovery.Namespaces(ctx, kubeContext)
@@ -556,6 +557,19 @@ func runWizardNamespaceDiscovery(
 		_, _ = fmt.Fprintln(stderr, "[>] Checking read-only access...")
 		namespaces, err := discovery.Namespaces(ctx, kubeContext)
 		if err != nil {
+			if errors.Is(err, errNamespaceDiscoveryForbidden) &&
+				explicitNamespaceCount > 0 {
+				_, _ = fmt.Fprintf(
+					stderr,
+					"[!] Read-only access available through the provided %s.\n",
+					plural(
+						explicitNamespaceCount,
+						"namespace",
+						"namespaces",
+					),
+				)
+				return nil, err
+			}
 			_, _ = fmt.Fprintln(stderr, "[x] Read-only access check failed.")
 			return nil, err
 		}
@@ -568,6 +582,23 @@ func runWizardNamespaceDiscovery(
 	})
 	namespaces, err := discovery.Namespaces(ctx, kubeContext)
 	if err != nil {
+		if errors.Is(err, errNamespaceDiscoveryForbidden) &&
+			explicitNamespaceCount > 0 {
+			renderer.Update(progressUpdate{
+				ID: "wizard.namespaces",
+				Label: fmt.Sprintf(
+					"Read-only access available through the provided %s",
+					plural(
+						explicitNamespaceCount,
+						"namespace",
+						"namespaces",
+					),
+				),
+				Status: progressWarning,
+			})
+			closeProgress(renderer, stderr)
+			return nil, err
+		}
 		renderer.Update(progressUpdate{
 			ID: "wizard.namespaces", Label: "Read-only access", Status: progressFailed,
 		})

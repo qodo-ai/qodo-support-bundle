@@ -395,6 +395,7 @@ func TestNamespaceDiscoveryProgressUsesRealCallAndNoProgressStaysQuiet(t *testin
 			"customer",
 			&output,
 			visible,
+			0,
 		)
 		if err != nil || len(namespaces) != 1 ||
 			len(discovery.namespaceCalls) != 1 {
@@ -414,6 +415,53 @@ func TestNamespaceDiscoveryProgressUsesRealCallAndNoProgressStaysQuiet(t *testin
 		} else if output.Len() != 0 {
 			t.Fatalf("--no-progress emitted namespace status %q", output.String())
 		}
+	}
+}
+
+func TestNamespaceDiscoveryProgressDistinguishesFallbackFromBlockingFailure(t *testing.T) {
+	t.Setenv("ACCESSIBLE", "1")
+
+	tests := []struct {
+		name                   string
+		err                    error
+		explicitNamespaceCount int
+		wantStatus             string
+	}{
+		{
+			name:                   "explicit namespace fallback",
+			err:                    errNamespaceDiscoveryForbidden,
+			explicitNamespaceCount: 1,
+			wantStatus:             "[!] Read-only access available through the provided namespace.\n",
+		},
+		{
+			name:                   "blocking error",
+			err:                    context.DeadlineExceeded,
+			explicitNamespaceCount: 1,
+			wantStatus:             "[x] Read-only access check failed.\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			discovery := &wizardDiscoveryStub{namespaceErr: test.err}
+			var output strings.Builder
+
+			_, err := runWizardNamespaceDiscovery(
+				context.Background(),
+				discovery,
+				"customer",
+				&output,
+				true,
+				test.explicitNamespaceCount,
+			)
+
+			if !errors.Is(err, test.err) {
+				t.Fatalf("error=%v want=%v", err, test.err)
+			}
+			want := "[>] Checking read-only access...\n" + test.wantStatus
+			if output.String() != want {
+				t.Fatalf("status:\ngot  %q\nwant %q", output.String(), want)
+			}
+		})
 	}
 }
 

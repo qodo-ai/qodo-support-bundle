@@ -315,6 +315,7 @@ func runCollect(
 					discovery interactiveDiscovery,
 					selectedContext string,
 					discoveryOutput io.Writer,
+					explicitNamespaceCount int,
 				) ([]string, error) {
 					return runWizardNamespaceDiscovery(
 						discoveryCtx,
@@ -322,6 +323,7 @@ func runCollect(
 						selectedContext,
 						discoveryOutput,
 						!*noProgress,
+						explicitNamespaceCount,
 					)
 				},
 			},

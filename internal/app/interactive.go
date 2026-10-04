@@ -98,6 +98,7 @@ type interactiveWizardDependencies struct {
 		interactiveDiscovery,
 		string,
 		io.Writer,
+		int,
 	) ([]string, error)
 }
 
@@ -205,11 +206,16 @@ func runInteractiveWizard(
 	}
 	var namespaces []string
 	if dependencies.DiscoverNamespaces != nil {
+		explicitNamespaceCount := 0
+		if !settings.AllNamespaces {
+			explicitNamespaceCount = len(settings.Namespaces)
+		}
 		namespaces, err = dependencies.DiscoverNamespaces(
 			ctx,
 			dependencies.Discovery,
 			settings.Context,
 			stderr,
+			explicitNamespaceCount,
 		)
 	} else {
 		dependencies.Forms.DiscoveryStatus(settings.Context, stderr)
