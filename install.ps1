@@ -164,12 +164,38 @@ function Test-QodoScoutFullyQualifiedPath {
 function Add-QodoScoutToUserPath {
     param([Parameter(Mandatory)][string]$InstallDirectory)
 
-    $current = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $updated = Join-QodoScoutUserPath `
-        -CurrentUserPath $current `
-        -InstallDirectory $InstallDirectory
-    if ($updated -ne $current) {
-        [Environment]::SetEnvironmentVariable('Path', $updated, 'User')
+    $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $mutexName = "Global\QodoScoutInstaller.UserPath.$userSid"
+    $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+    $acquired = $false
+    $changed = $false
+    try {
+        try {
+            $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+        if (-not $acquired) {
+            throw 'timed out waiting to update the current user PATH'
+        }
+
+        $current = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $updated = Join-QodoScoutUserPath `
+            -CurrentUserPath $current `
+            -InstallDirectory $InstallDirectory
+        if ($updated -ne $current) {
+            [Environment]::SetEnvironmentVariable('Path', $updated, 'User')
+            $changed = $true
+        }
+    }
+    finally {
+        if ($acquired) {
+            $mutex.ReleaseMutex()
+        }
+        $mutex.Dispose()
+    }
+    if ($changed) {
         Write-Output "Added $InstallDirectory to the current user's PATH."
     }
     $directoryLiteral = ConvertTo-QodoScoutPowerShellLiteral -Value $InstallDirectory

@@ -105,6 +105,19 @@ Describe 'Qodo Scout Windows installer contracts' {
         $text | Should -Not -Match 'Zone\.Identifier'
         $text | Should -Not -Match 'ExecutionPolicy\s+Bypass'
     }
+
+    It 'serializes the user PATH read modify write sequence' {
+        $text = Get-Content (Join-Path $script:RepositoryRoot 'install.ps1') -Raw
+        $pathUpdate = [regex]::Match(
+            $text,
+            '(?s)function Add-QodoScoutToUserPath \{.*?' +
+                'function Restore-QodoScoutInstallation'
+        ).Value
+
+        $pathUpdate | Should -Match 'System\.Threading\.Mutex'
+        $pathUpdate | Should -Match '\.WaitOne\('
+        $pathUpdate | Should -Match '(?s)finally\s*\{.*?\.ReleaseMutex\(\)'
+    }
 }
 
 Describe 'Qodo Scout local source installation' -Skip:(-not $IsWindows) {
