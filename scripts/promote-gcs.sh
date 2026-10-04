@@ -111,10 +111,16 @@ release_installers | while IFS= read -r filename; do
 done
 
 # The production pointer is last and retains the generation observed pre-promotion.
-gcs_upload_mutable \
+if ! gcs_upload_mutable \
   "$metadata" "$DESTINATION_BUCKET" "${PREFIX}/version.json" \
   application/json "$mutable_cache" "$access_token" "$existing" \
-  promote-gcs "$metadata_generation"
+  promote-gcs "$metadata_generation"; then
+  repair_stable_installers \
+    "$ROOT/scripts/version-contract.py" "$DESTINATION_BUCKET" "$PREFIX" \
+    "$access_token" "$work" "$existing" promote-gcs
+  echo "promote-gcs: activation lost a concurrent update; stable installers were reconciled" >&2
+  exit 1
+fi
 gcs_verify_exact \
   "$metadata" "$DESTINATION_BUCKET" "${PREFIX}/version.json" \
   application/json "$mutable_cache" "$access_token" "$existing" promote-gcs

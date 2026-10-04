@@ -82,6 +82,11 @@ func TestVersionContractRendersStrictMetadataAndOrdersSemantically(t *testing.T)
 	if err := os.WriteFile(current, output, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	read := exec.Command("python3", script, "read", current)
+	readOutput, err := read.CombinedOutput()
+	if err != nil || string(readOutput) != "1.2.3\n" {
+		t.Fatalf("read version metadata: %v\n%s", err, readOutput)
+	}
 	for _, candidate := range []string{"1.2.3", "1.2.4", "2.0.0"} {
 		command := exec.Command("python3", script, "allow-update", current, candidate)
 		if output, err := command.CombinedOutput(); err != nil {
@@ -324,7 +329,16 @@ func TestPublishRejectsConcurrentVersionCASConflict(t *testing.T) {
 	requests := filepath.Join(t.TempDir(), "requests.log")
 	bin := installFakeGCSCommands(t)
 	writeReleaseFixture(t, dist, "candidate")
-	seedActivatedRelease(t, fakeGCS, "qodo-cli-public-dev", dist, "1.0.0")
+	winner := t.TempDir()
+	writeReleaseFixture(t, winner, "winner")
+	copyReleaseFixture(t, winner, filepath.Join(
+		fakeGCS,
+		"qodo-cli-public-dev",
+		"support-bundle",
+		"releases",
+		"1.0.0",
+	))
+	seedActivatedRelease(t, fakeGCS, "qodo-cli-public-dev", winner, "1.0.0")
 
 	command := exec.Command(filepath.Join(root, "scripts/publish-gcs.sh"))
 	command.Env = append(
@@ -333,6 +347,7 @@ func TestPublishRejectsConcurrentVersionCASConflict(t *testing.T) {
 		"FAKE_GCS_ROOT="+fakeGCS,
 		"FAKE_REQUESTS="+requests,
 		"FAKE_CONFLICT_OBJECT=/support-bundle/version.json",
+		"FAKE_CONFLICT_VERSION=1.0.0",
 		"QODO_SUPPORT_BUNDLE_DIST="+dist,
 		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
 	)
@@ -354,6 +369,27 @@ func TestPublishRejectsConcurrentVersionCASConflict(t *testing.T) {
 	}
 	if !strings.Contains(string(metadata), "1.0.0") {
 		t.Fatalf("concurrent pointer was overwritten: %s", metadata)
+	}
+	for _, filename := range releaseInstallers {
+		expected, readErr := os.ReadFile(filepath.Join(winner, filename))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		actual, readErr := os.ReadFile(filepath.Join(
+			fakeGCS,
+			"qodo-cli-public-dev",
+			"support-bundle",
+			filename,
+		))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if string(actual) != string(expected) {
+			t.Fatalf("stable %s was not repaired to the winning version", filename)
+		}
+	}
+	if !strings.Contains(string(output), "stable installers were reconciled") {
+		t.Fatalf("CAS failure did not report reconciliation:\n%s", output)
 	}
 }
 
@@ -591,6 +627,20 @@ func TestCanariesRunVersionOnlyAndReleaseHasTenAssets(t *testing.T) {
 		if strings.Contains(text, " collect") {
 			t.Fatalf("%s can start cluster collection", path)
 		}
+		for _, required := range []string{
+			`= "$EXPECTED_VERSION"`,
+			"metadata-selected binary reports",
+			"pinned binary reports",
+		} {
+			if !strings.Contains(text, required) {
+				t.Fatalf("%s does not contain %q", path, required)
+			}
+		}
+	}
+	dev := readText(t, filepath.Join(root, "scripts/canary-dev-installers.sh"))
+	if !strings.Contains(dev, `PATH="${work}/bin:${PATH}" sh "${work}/install.sh" \`) ||
+		!strings.Contains(dev, `gcloud storage cp \`) {
+		t.Fatal("dev canary does not exercise unpinned network installer resolution")
 	}
 	makefile := readText(t, filepath.Join(root, "Makefile"))
 	for _, required := range []string{
@@ -848,7 +898,11 @@ case "$method" in
       [ ! -f "$FAKE_GCS_ROOT/.conflict-injected" ]; then
       : > "$FAKE_GCS_ROOT/.conflict-injected"
       mkdir -p "$(dirname "$path")"
-      [ -f "$path" ] || printf '%s\n' '{"version": "9.9.9"}' > "$path"
+      if [ -n "${FAKE_CONFLICT_VERSION:-}" ]; then
+        printf '{"version": "%s"}\n' "$FAKE_CONFLICT_VERSION" > "$path"
+      else
+        [ -f "$path" ] || printf '%s\n' '{"version": "9.9.9"}' > "$path"
+      fi
       {
         printf 'generation=999\n'
         printf 'content_type=application/json\n'

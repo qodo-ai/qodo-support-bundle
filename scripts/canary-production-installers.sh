@@ -26,8 +26,16 @@ curl --fail --location --silent --show-error \
 cmp -s "${work}/install.sh" "${work}/versioned-install.sh"
 
 sh "${work}/install.sh" --install-dir "${work}/metadata"
-"${work}/metadata/qodo-scout" version
+metadata_version="$("${work}/metadata/qodo-scout" version)"
+[ "$metadata_version" = "$EXPECTED_VERSION" ] || {
+  echo "canary-production-installers: metadata-selected binary reports ${metadata_version}, expected ${EXPECTED_VERSION}" >&2
+  exit 1
+}
 sh "${work}/install.sh" \
   --version "$EXPECTED_VERSION" \
   --install-dir "${work}/pinned"
-"${work}/pinned/qodo-scout" version
+pinned_version="$("${work}/pinned/qodo-scout" version)"
+[ "$pinned_version" = "$EXPECTED_VERSION" ] || {
+  echo "canary-production-installers: pinned binary reports ${pinned_version}, expected ${EXPECTED_VERSION}" >&2
+  exit 1
+}

@@ -69,10 +69,16 @@ release_installers | while IFS= read -r filename; do
 done
 
 # The discoverable pointer is committed only after every release object validates.
-gcs_upload_mutable \
+if ! gcs_upload_mutable \
   "$metadata" "$BUCKET" "${PREFIX}/version.json" \
   application/json "$mutable_cache" \
-  "$access_token" "$existing" publish-gcs "$metadata_generation"
+  "$access_token" "$existing" publish-gcs "$metadata_generation"; then
+  repair_stable_installers \
+    "$ROOT/scripts/version-contract.py" "$BUCKET" "$PREFIX" "$access_token" \
+    "$work" "$existing" publish-gcs
+  echo "publish-gcs: activation lost a concurrent update; stable installers were reconciled" >&2
+  exit 1
+fi
 gcs_verify_exact \
   "$metadata" "$BUCKET" "${PREFIX}/version.json" \
   application/json "$mutable_cache" \

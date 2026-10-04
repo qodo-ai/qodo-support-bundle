@@ -161,8 +161,12 @@ jobs:
               throw 'stable and versioned Windows installers differ'
           }
           & "$work/install.ps1" -InstallDir "$work/metadata"
-          & "$work/metadata/qodo-scout.exe" version
-          if ($LASTEXITCODE -ne 0) { throw 'metadata-selected Windows ARM64 canary failed' }
+          $metadataVersion = (& "$work/metadata/qodo-scout.exe" version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $metadataVersion -ne $env:EXPECTED_VERSION) {
+              throw "metadata-selected Windows ARM64 binary reports '$metadataVersion', expected '$env:EXPECTED_VERSION'"
+          }
           & "$work/install.ps1" -Version $env:EXPECTED_VERSION -InstallDir "$work/pinned"
-          & "$work/pinned/qodo-scout.exe" version
-          if ($LASTEXITCODE -ne 0) { throw 'pinned Windows ARM64 canary failed' }
+          $pinnedVersion = (& "$work/pinned/qodo-scout.exe" version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $pinnedVersion -ne $env:EXPECTED_VERSION) {
+              throw "pinned Windows ARM64 binary reports '$pinnedVersion', expected '$env:EXPECTED_VERSION'"
+          }

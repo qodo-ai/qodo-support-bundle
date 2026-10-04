@@ -61,12 +61,15 @@ def main() -> int:
                 )
             print(current)
             return 0
+        if len(sys.argv) == 3 and sys.argv[1] == "read":
+            print(read_metadata(sys.argv[2]))
+            return 0
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         print(f"version-contract: {error}", file=sys.stderr)
         return 1
     print(
         "usage: version-contract.py render VERSION | "
-        "allow-update CURRENT_JSON CANDIDATE",
+        "read VERSION_JSON | allow-update CURRENT_JSON CANDIDATE",
         file=sys.stderr,
     )
     return 2

@@ -115,3 +115,61 @@ verify_release_identity() {
     }
   done
 }
+
+repair_stable_installers() {
+  version_script=$1
+  bucket=$2
+  prefix=$3
+  access_token=$4
+  work=$5
+  existing=$6
+  command_name=$7
+  mutable_cache='no-cache, max-age=0, must-revalidate'
+  immutable_cache='public, max-age=31536000, immutable'
+
+  for attempt in 1 2 3; do
+    pointer="${work}/repair-version-${attempt}.json"
+    pointer_headers="${work}/repair-version-${attempt}.headers"
+    gcs_read_exact \
+      "$bucket" "${prefix}/version.json" "$access_token" \
+      "$pointer" "$pointer_headers" "$command_name"
+    pointer_generation="$(gcs_header_value x-goog-generation "$pointer_headers")"
+    active_version="$(python3 "$version_script" read "$pointer")"
+
+    release_installers | while IFS= read -r filename; do
+      winner="${work}/repair-${attempt}-${filename}"
+      winner_headers="${winner}.headers"
+      gcs_read_exact \
+        "$bucket" "${prefix}/releases/${active_version}/${filename}" \
+        "$access_token" "$winner" "$winner_headers" "$command_name"
+      [ "$(gcs_header_value Content-Type "$winner_headers")" = \
+        'text/plain; charset=utf-8' ] &&
+        [ "$(gcs_header_value Cache-Control "$winner_headers")" = \
+          "$immutable_cache" ] || {
+        echo "${command_name}: active versioned installer has unexpected headers" >&2
+        return 1
+      }
+      gcs_upload_mutable \
+        "$winner" "$bucket" "${prefix}/${filename}" \
+        'text/plain; charset=utf-8' "$mutable_cache" \
+        "$access_token" "$existing" "$command_name"
+      gcs_verify_exact \
+        "$winner" "$bucket" "${prefix}/${filename}" \
+        'text/plain; charset=utf-8' "$mutable_cache" \
+        "$access_token" "$existing" "$command_name"
+    done
+
+    after="${work}/repair-after-${attempt}.json"
+    after_headers="${work}/repair-after-${attempt}.headers"
+    gcs_read_exact \
+      "$bucket" "${prefix}/version.json" "$access_token" \
+      "$after" "$after_headers" "$command_name"
+    after_generation="$(gcs_header_value x-goog-generation "$after_headers")"
+    if [ "$after_generation" = "$pointer_generation" ]; then
+      echo "${command_name}: restored stable installers for ${active_version}" >&2
+      return 0
+    fi
+  done
+  echo "${command_name}: version pointer kept changing during installer repair" >&2
+  return 1
+}

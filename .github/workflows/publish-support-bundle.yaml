@@ -156,6 +156,36 @@ jobs:
               throw 'stable and versioned Windows installers differ'
           }
           Remove-Item Env:QODO_SCOUT_INSTALLER_TESTING
-          & "$work/install.ps1" -Version $resolved -SourceDir $release -InstallDir "$work/install"
-          & "$work/install/qodo-scout.exe" version
-          if ($LASTEXITCODE -ne 0) { throw 'native Windows ARM64 canary failed' }
+          & "$work/install.ps1" -Version $resolved -SourceDir $release -InstallDir "$work/pinned"
+          $pinnedVersion = (& "$work/pinned/qodo-scout.exe" version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $pinnedVersion -ne $resolved) {
+              throw "pinned native Windows ARM64 binary reports '$pinnedVersion', expected '$resolved'"
+          }
+
+          function global:curl.exe {
+              param(
+                  [Parameter(ValueFromRemainingArguments = $true)]
+                  [string[]]$CurlArguments
+              )
+              $destination = $null
+              $url = $null
+              for ($index = 0; $index -lt $CurlArguments.Count; $index++) {
+                  if ($CurlArguments[$index] -eq '--output') {
+                      $destination = $CurlArguments[++$index]
+                  } elseif ($CurlArguments[$index] -like 'https://get.qodo.ai/support-bundle/*') {
+                      $url = $CurlArguments[$index]
+                  }
+              }
+              if (-not $destination -or -not $url) {
+                  throw 'dev canary curl received an unexpected request'
+              }
+              $relative = $url.Substring('https://get.qodo.ai/support-bundle/'.Length)
+              gcloud storage cp "gs://$env:QODO_SUPPORT_BUNDLE_BUCKET/$env:QODO_SUPPORT_BUNDLE_PREFIX/$relative" $destination
+              if ($LASTEXITCODE -ne 0) { throw "failed to download dev object: $relative" }
+          }
+
+          & "$work/install.ps1" -InstallDir "$work/metadata"
+          $metadataVersion = (& "$work/metadata/qodo-scout.exe" version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $metadataVersion -ne $resolved) {
+              throw "metadata-selected native Windows ARM64 binary reports '$metadataVersion', expected '$resolved'"
+          }
