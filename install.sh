@@ -235,12 +235,16 @@ add_user_path() {
     *) profile=$HOME/.profile ;;
   esac
   mkdir -p "$HOME"
-  PROFILE_LOCK=$profile.qodo-scout.lock
+  profile_lock_path=$profile.qodo-scout.lock
   lock_attempt=0
-  while ! mkdir "$PROFILE_LOCK" 2>/dev/null; do
+  while :; do
+    if mkdir "$profile_lock_path" 2>/dev/null; then
+      PROFILE_LOCK=$profile_lock_path
+      break
+    fi
     lock_attempt=$((lock_attempt + 1))
-    [ "$lock_attempt" -lt 10 ] ||
-      die "profile update is locked; retry after removing stale lock $PROFILE_LOCK"
+    [ "$lock_attempt" -lt 5 ] ||
+      die "profile update is locked; retry after removing stale lock $profile_lock_path"
     sleep 1
   done
   profile_file=$(resolve_profile_path "$profile")

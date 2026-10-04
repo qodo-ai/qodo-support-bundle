@@ -393,6 +393,17 @@ grep -F '# qodo-scout installer' "$LOCK_HOME/.zprofile" >/dev/null ||
   fail "PATH update did not continue after the profile lock was released"
 pass "PATH persistence serializes profile updates"
 
+TIMEOUT_HOME="$TEST_ROOT/timeout-home"
+mkdir -p "$TIMEOUT_HOME/.zprofile.qodo-scout.lock"
+if SHELL=/bin/zsh run_installer "$TIMEOUT_HOME" "$TOOLS" \
+  --version 1.2.3 --source-dir "$PROFILE_SOURCE" --add-to-path \
+  >"$TEST_ROOT/lock-timeout.out" 2>&1; then
+  fail "installer ignored an active profile lock"
+fi
+[ -d "$TIMEOUT_HOME/.zprofile.qodo-scout.lock" ] ||
+  fail "lock timeout removed a lock owned by another installer"
+pass "profile lock timeouts preserve the active owner's lock"
+
 SPECIAL_INSTALL="$TEST_ROOT/\$(touch should-not-run)'quoted"
 run_installer "$LATEST_HOME" "$TOOLS" \
   --version 1.2.3 \
