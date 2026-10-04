@@ -7,6 +7,8 @@ DESTINATION_BUCKET="${QODO_SUPPORT_BUNDLE_DESTINATION_BUCKET:-qodo-cli-public}"
 PREFIX="${QODO_SUPPORT_BUNDLE_PREFIX:-support-bundle}"
 VERSION="${QODO_SUPPORT_BUNDLE_VERSION:?QODO_SUPPORT_BUNDLE_VERSION is required}"
 RELEASE_DIR="${QODO_SUPPORT_BUNDLE_RELEASE_DIR:?QODO_SUPPORT_BUNDLE_RELEASE_DIR is required}"
+ROOT="$(unset CDPATH; cd "$(dirname "$0")/.." && pwd)"
+. "$ROOT/scripts/gcs-exact-object.sh"
 
 case "$VERSION" in
   -*) echo "promote-gcs: version must not start with '-'" >&2; exit 1 ;;
@@ -91,44 +93,23 @@ printf '%s\n' "$expected_files" | while IFS= read -r filename; do
   }
 done
 
-upload_immutable() {
-  source_path=$1
-  destination=$2
-  content_type=$3
-  expected_sha=$4
-
-  if gcloud storage cp \
-    --content-type="$content_type" \
-    --cache-control="public, max-age=31536000, immutable" \
-    --if-generation-match=0 \
-    "$source_path" "$destination"; then
-    return
-  fi
-
-  gcloud storage cp "$destination" "$existing" || {
-    echo "promote-gcs: immutable upload failed and existing object is unreadable: $destination" >&2
-    return 1
-  }
-  actual_sha="$(sha256sum "$existing" | cut -d' ' -f1)"
-  [ "$actual_sha" = "$expected_sha" ] || {
-    echo "promote-gcs: refusing to overwrite $destination" >&2
-    echo "promote-gcs: existing sha256 $actual_sha, expected $expected_sha" >&2
-    return 1
-  }
-  echo "promote-gcs: immutable object already matches: $destination" >&2
-}
+access_token="$(gcloud auth print-access-token)"
 
 printf '%s\n' "$expected_binaries" | while IFS= read -r filename; do
   source_path="${work}/${filename}"
-  destination="gs://${DESTINATION_BUCKET}/${PREFIX}/releases/${VERSION}/${filename}"
+  object="${PREFIX}/releases/${VERSION}/${filename}"
   digest="$(sha256sum "$source_path" | cut -d' ' -f1)"
-  upload_immutable "$source_path" "$destination" application/octet-stream "$digest"
+  gcs_upload_immutable \
+    "$source_path" "$DESTINATION_BUCKET" "$object" application/octet-stream "$digest" \
+    "$access_token" "$existing" promote-gcs
 done
 
 filename=checksums.sha256
 source_path="${work}/${filename}"
-destination="gs://${DESTINATION_BUCKET}/${PREFIX}/releases/${VERSION}/${filename}"
+object="${PREFIX}/releases/${VERSION}/${filename}"
 digest="$(sha256sum "$source_path" | cut -d' ' -f1)"
-upload_immutable "$source_path" "$destination" text/plain "$digest"
+gcs_upload_immutable \
+  "$source_path" "$DESTINATION_BUCKET" "$object" text/plain "$digest" \
+  "$access_token" "$existing" promote-gcs
 
 echo "promote-gcs: promoted ${VERSION} to gs://${DESTINATION_BUCKET}/${PREFIX}/releases/${VERSION}/" >&2
