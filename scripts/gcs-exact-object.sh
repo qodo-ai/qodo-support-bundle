@@ -93,10 +93,11 @@ gcs_conditional_put() {
   generation=$6
   access_token=$7
   command_name=$8
+  response_headers=${9-}
   gcs_validate_name "$bucket" "$object" "$command_name" || return 1
   endpoint="https://storage.googleapis.com/${bucket}/${object}"
 
-  curl \
+  set -- \
     --fail \
     --silent \
     --show-error \
@@ -105,8 +106,9 @@ gcs_conditional_put() {
     --header "Content-Type: ${content_type}" \
     --header "Cache-Control: ${cache_control}" \
     --header "x-goog-if-generation-match: ${generation}" \
-    --upload-file "$source_path" \
-    "$endpoint"
+    --upload-file "$source_path"
+  [ -z "$response_headers" ] || set -- "$@" --dump-header "$response_headers"
+  curl "$@" "$endpoint"
 }
 
 gcs_upload_immutable() {

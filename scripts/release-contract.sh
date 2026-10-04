@@ -199,10 +199,22 @@ acquire_publication_lock() {
 
   gcs_conditional_put \
     "$desired" "$bucket" "$lock_object" application/json "$lock_cache" \
-    "$current_generation" "$access_token" "$command_name" || {
+    "$current_generation" "$access_token" "$command_name" \
+    "${work}/publication-lock-put.headers" || {
     echo "${command_name}: could not acquire publication lock" >&2
     return 1
   }
+  PUBLICATION_LOCK_GENERATION="$(
+    gcs_header_value \
+      x-goog-generation "${work}/publication-lock-put.headers"
+  )"
+  if [ -z "$PUBLICATION_LOCK_GENERATION" ]; then
+    confirm_publication_lock \
+      "$desired" "$bucket" "$lock_object" "$access_token" \
+      "$current" "$headers" "$command_name"
+    return
+  fi
+  PUBLICATION_LOCK_HELD=1
   confirm_publication_lock \
     "$desired" "$bucket" "$lock_object" "$access_token" \
     "$current" "$headers" "$command_name"

@@ -231,6 +231,46 @@ func TestPublishUsesExactObjectRequestsWithoutListing(t *testing.T) {
 	assertPublishedRelease(t, fakeGCS, "qodo-cli-public-dev", dist, "1.2.3")
 }
 
+func TestPublishReleasesOwnedLockWhenVerificationReadsFail(t *testing.T) {
+	t.Parallel()
+	root := repositoryRoot(t)
+	dist := t.TempDir()
+	fakeGCS := t.TempDir()
+	requests := filepath.Join(t.TempDir(), "requests.log")
+	bin := installFakeGCSCommands(t)
+	writeReleaseFixture(t, dist, "release")
+
+	command := exec.Command(filepath.Join(root, "scripts/publish-gcs.sh"))
+	command.Env = append(
+		os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FAKE_GCS_ROOT="+fakeGCS,
+		"FAKE_REQUESTS="+requests,
+		"FAKE_LOCK_VERIFY_ALWAYS=1",
+		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=failed-verification-test",
+		"QODO_SUPPORT_BUNDLE_DIST="+dist,
+		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
+	)
+	output, err := command.CombinedOutput()
+	if err == nil ||
+		!strings.Contains(string(output), "publication lock verification failed") {
+		t.Fatalf("lock verification result = %v\n%s", err, output)
+	}
+	lock, readErr := os.ReadFile(filepath.Join(
+		fakeGCS,
+		"qodo-cli-public-dev",
+		"support-bundle",
+		"control",
+		"publication-lock.json",
+	))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(lock) != "{\"owner\":\"\"}\n" {
+		t.Fatalf("failed verification stranded publication lock: %s", lock)
+	}
+}
+
 func TestPromotionUsesExactObjectRequestsWithoutListing(t *testing.T) {
 	t.Parallel()
 	root := repositoryRoot(t)
@@ -1057,11 +1097,22 @@ case "$method" in
       printf 'content_type=%s\n' "$content_type"
       printf 'cache_control=%s\n' "$cache_control"
     } > "$metadata"
+    if [ -n "$dump_headers" ]; then
+      {
+        printf 'HTTP/1.1 200 OK\r\n'
+        printf 'x-goog-generation: %s\r\n\r\n' "$next_generation"
+      } > "$dump_headers"
+    fi
     case "$path" in
       */control/publication-lock.json) : > "$FAKE_GCS_ROOT/.lock-written" ;;
     esac
     ;;
   GET)
+    if [ -n "${FAKE_LOCK_VERIFY_ALWAYS:-}" ] &&
+      [ "${url%/control/publication-lock.json}" != "$url" ] &&
+      [ -f "$FAKE_GCS_ROOT/.lock-written" ]; then
+      exit 22
+    fi
     if [ -n "${FAKE_IDENTICAL_REWRITE_OBJECT:-}" ] &&
       [ "${url%$FAKE_IDENTICAL_REWRITE_OBJECT}" != "$url" ]; then
       rewrite_count_file="$FAKE_GCS_ROOT/.identical-rewrite-count"
