@@ -2,6 +2,7 @@ package distribution
 
 import (
 	"crypto/sha256"
+	"debug/pe"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,39 @@ var releaseBinaries = []string{
 	"qodo-support-bundle-linux-amd64",
 	"qodo-support-bundle-linux-arm64",
 	"qodo-support-bundle-windows-amd64.exe",
+	"qodo-support-bundle-windows-arm64.exe",
+}
+
+func TestWindowsARM64ReleaseCrossCompilesToNativePE(t *testing.T) {
+	t.Parallel()
+	root := repositoryRoot(t)
+	executable := filepath.Join(t.TempDir(), "qodo-support-bundle-windows-arm64.exe")
+	command := exec.Command(
+		"go",
+		"build",
+		"-trimpath",
+		"-o",
+		executable,
+		"./cmd/qodo-support-bundle",
+	)
+	command.Dir = root
+	command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=windows", "GOARCH=arm64")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("cross-compile Windows ARM64 release: %v\n%s", err, output)
+	}
+
+	file, err := pe.Open(executable)
+	if err != nil {
+		t.Fatalf("open Windows ARM64 PE: %v", err)
+	}
+	defer file.Close()
+	if file.FileHeader.Machine != pe.IMAGE_FILE_MACHINE_ARM64 {
+		t.Fatalf(
+			"Windows ARM64 release machine = %#x, want %#x",
+			file.FileHeader.Machine,
+			pe.IMAGE_FILE_MACHINE_ARM64,
+		)
+	}
 }
 
 func TestGCSScriptsUseVersionedImmutableSupportBundlePrefix(t *testing.T) {
@@ -42,7 +76,7 @@ func TestGCSScriptsUseVersionedImmutableSupportBundlePrefix(t *testing.T) {
 				"gcs_upload_immutable",
 				"gcloud auth print-access-token",
 				"manifest_files=",
-				"checksum manifest inventory does not match the five binaries",
+				"checksum manifest inventory does not match the six binaries",
 				"sha256sum",
 			} {
 				if !strings.Contains(text, required) {
@@ -521,8 +555,16 @@ func assertExactObjectRequests(t *testing.T, requests, bucket string) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 18 {
-		t.Fatalf("expected 12 create attempts and 6 exact reads, got %d:\n%s", len(lines), data)
+	releaseFileCount := len(releaseBinaries) + 1
+	expectedRequests := releaseFileCount * 3
+	if len(lines) != expectedRequests {
+		t.Fatalf(
+			"expected %d create attempts and %d exact reads, got %d:\n%s",
+			releaseFileCount*2,
+			releaseFileCount,
+			len(lines),
+			data,
+		)
 	}
 	base := "https://storage.googleapis.com/" + bucket + "/support-bundle/releases/1.2.3/"
 	for index, filename := range append(releaseBinaries, "checksums.sha256") {
@@ -545,14 +587,21 @@ func assertExactObjectRequests(t *testing.T, requests, bucket string) {
 			t.Fatalf("unexpected create request:\nwant %q\ngot  %q", expected, fields)
 		}
 	}
-	if !strings.Contains(lines[5], "/checksums.sha256|") {
-		t.Fatalf("checksum was not the final completion-marker upload: %q", lines[5])
+	if !strings.Contains(lines[releaseFileCount-1], "/checksums.sha256|") {
+		t.Fatalf(
+			"checksum was not the final completion-marker upload: %q",
+			lines[releaseFileCount-1],
+		)
 	}
 	for index, filename := range append(releaseBinaries, "checksums.sha256") {
-		put := strings.Split(lines[6+index*2], "|")
-		get := strings.Split(lines[7+index*2], "|")
+		put := strings.Split(lines[releaseFileCount+index*2], "|")
+		get := strings.Split(lines[releaseFileCount+index*2+1], "|")
 		if len(put) != 5 || len(get) != 5 {
-			t.Fatalf("malformed idempotence request pair:\n%s\n%s", lines[6+index*2], lines[7+index*2])
+			t.Fatalf(
+				"malformed idempotence request pair:\n%s\n%s",
+				lines[releaseFileCount+index*2],
+				lines[releaseFileCount+index*2+1],
+			)
 		}
 		expectedURL := base + filename
 		if put[0] != "PUT" || put[1] != expectedURL ||

@@ -25,7 +25,8 @@ expected_binaries='qodo-support-bundle-darwin-amd64
 qodo-support-bundle-darwin-arm64
 qodo-support-bundle-linux-amd64
 qodo-support-bundle-linux-arm64
-qodo-support-bundle-windows-amd64.exe'
+qodo-support-bundle-windows-amd64.exe
+qodo-support-bundle-windows-arm64.exe'
 expected_files="checksums.sha256
 ${expected_binaries}"
 
@@ -57,7 +58,7 @@ if ! awk '
 fi
 manifest_files="$(LC_ALL=C sort "$work/canary-manifest-files")"
 [ "$manifest_files" = "$expected_binaries" ] || {
-  echo "promote-gcs: checksum manifest inventory does not match the five binaries" >&2
+  echo "promote-gcs: checksum manifest inventory does not match the six binaries" >&2
   exit 1
 }
 
@@ -81,7 +82,7 @@ if ! awk '
 fi
 release_manifest_files="$(LC_ALL=C sort "$work/release-manifest-files")"
 [ "$release_manifest_files" = "$expected_binaries" ] || {
-  echo "promote-gcs: authenticated release checksum inventory does not match the five binaries" >&2
+  echo "promote-gcs: authenticated release checksum inventory does not match the six binaries" >&2
   exit 1
 }
 (cd "$RELEASE_DIR" && sha256sum --strict --check checksums.sha256)
