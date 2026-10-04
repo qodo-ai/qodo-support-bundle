@@ -257,13 +257,13 @@ repair_stable_installers() {
     gcs_read_exact \
       "$bucket" "${prefix}/releases/${active_version}/${filename}" \
       "$access_token" "$winner" "$winner_headers" "$command_name"
-    [ "$(gcs_header_value Content-Type "$winner_headers")" = \
-      'text/plain; charset=utf-8' ] &&
-      [ "$(gcs_header_value Cache-Control "$winner_headers")" = \
-        "$immutable_cache" ] || {
+    if [ "$(gcs_header_value Content-Type "$winner_headers")" != \
+      'text/plain; charset=utf-8' ] ||
+      [ "$(gcs_header_value Cache-Control "$winner_headers")" != \
+        "$immutable_cache" ]; then
       echo "${command_name}: active versioned installer has unexpected headers" >&2
       return 1
-    }
+    fi
     gcs_upload_mutable \
       "$winner" "$bucket" "${prefix}/${filename}" \
       'text/plain; charset=utf-8' "$mutable_cache" \
