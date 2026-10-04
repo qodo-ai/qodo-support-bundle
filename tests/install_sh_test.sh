@@ -367,6 +367,32 @@ grep -F '# qodo-scout installer' "$BASH_HOME/.bash_profile" >/dev/null ||
   fail "existing bash profile was not selected"
 pass "PATH persistence selects an existing bash profile"
 
+LINK_HOME="$TEST_ROOT/link-home"
+mkdir -p "$LINK_HOME"
+printf '# linked profile\n' >"$LINK_HOME/profile-target"
+ln -s profile-target "$LINK_HOME/.zprofile"
+SHELL=/bin/zsh run_installer "$LINK_HOME" "$TOOLS" \
+  --version 1.2.3 --source-dir "$PROFILE_SOURCE" --add-to-path >/dev/null
+[ -L "$LINK_HOME/.zprofile" ] ||
+  fail "PATH update replaced a profile symlink"
+grep -F '# qodo-scout installer' "$LINK_HOME/profile-target" >/dev/null ||
+  fail "PATH update did not update the linked profile target"
+pass "PATH persistence preserves profile symlinks"
+
+LOCK_HOME="$TEST_ROOT/lock-home"
+mkdir -p "$LOCK_HOME/.zprofile.qodo-scout.lock"
+(
+  sleep 1
+  rmdir "$LOCK_HOME/.zprofile.qodo-scout.lock"
+) &
+lock_releaser=$!
+SHELL=/bin/zsh run_installer "$LOCK_HOME" "$TOOLS" \
+  --version 1.2.3 --source-dir "$PROFILE_SOURCE" --add-to-path >/dev/null
+wait "$lock_releaser"
+grep -F '# qodo-scout installer' "$LOCK_HOME/.zprofile" >/dev/null ||
+  fail "PATH update did not continue after the profile lock was released"
+pass "PATH persistence serializes profile updates"
+
 SPECIAL_INSTALL="$TEST_ROOT/\$(touch should-not-run)'quoted"
 run_installer "$LATEST_HOME" "$TOOLS" \
   --version 1.2.3 \

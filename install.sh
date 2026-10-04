@@ -13,6 +13,7 @@ TARGET=
 INSTALLED=0
 BACKUP_PRESERVED=0
 PROFILE_STAGED=
+PROFILE_LOCK=
 
 usage() {
   cat <<'EOF'
@@ -50,6 +51,7 @@ cleanup_files() {
   fi
   [ -z "$STAGED_FILE" ] || rm -f "$STAGED_FILE"
   [ -z "$PROFILE_STAGED" ] || rm -f "$PROFILE_STAGED"
+  [ -z "$PROFILE_LOCK" ] || rmdir "$PROFILE_LOCK" 2>/dev/null || true
   if [ "$BACKUP_PRESERVED" -eq 0 ] && [ -n "$BACKUP_FILE" ]; then
     rm -f "$BACKUP_FILE"
   fi
@@ -194,6 +196,31 @@ shell_literal() {
   printf "'%s'" "$escaped"
 }
 
+resolve_profile_path() {
+  current=$1
+  links=0
+  while [ -L "$current" ]; do
+    links=$((links + 1))
+    [ "$links" -le 20 ] || die "profile symlink chain is too deep: $1"
+    link=$(readlink "$current") || die "could not read profile symlink: $current"
+    case "$link" in
+      /*) current=$link ;;
+      *)
+        parent=$(CDPATH='' cd -- "$(dirname "$current")" && pwd -P) ||
+          die "could not resolve profile directory"
+        current=$parent/$link
+        ;;
+    esac
+  done
+  printf '%s\n' "$current"
+}
+
+release_profile_lock() {
+  [ -z "$PROFILE_LOCK" ] || rmdir "$PROFILE_LOCK" ||
+    die "could not release profile lock: $PROFILE_LOCK"
+  PROFILE_LOCK=
+}
+
 add_user_path() {
   directory=$1
   case "${SHELL-}" in
@@ -207,36 +234,47 @@ add_user_path() {
       ;;
     *) profile=$HOME/.profile ;;
   esac
+  mkdir -p "$HOME"
+  PROFILE_LOCK=$profile.qodo-scout.lock
+  lock_attempt=0
+  while ! mkdir "$PROFILE_LOCK" 2>/dev/null; do
+    lock_attempt=$((lock_attempt + 1))
+    [ "$lock_attempt" -lt 10 ] ||
+      die "profile update is locked; retry after removing stale lock $PROFILE_LOCK"
+    sleep 1
+  done
+  profile_file=$(resolve_profile_path "$profile")
   marker='# qodo-scout installer'
   directory_literal=$(shell_literal "$directory")
   # Keep $PATH literal for the shell that loads the profile.
   # shellcheck disable=SC2016
   export_line=$(printf 'export PATH=%s:"$PATH"' "$directory_literal")
-  if [ -f "$profile" ] && grep -Fqx "$export_line" "$profile"; then
+  if [ -f "$profile_file" ] && grep -Fqx "$export_line" "$profile_file"; then
     printf 'PATH entry already exists in %s.\n' "$profile"
+    release_profile_lock
     return
   fi
 
-  mkdir -p "$HOME"
-  if [ -f "$profile" ]; then
-    profile_backup=$(mktemp "$profile.qodo-scout.bak.XXXXXX") ||
+  if [ -f "$profile_file" ]; then
+    profile_backup=$(mktemp "$profile_file.qodo-scout.bak.XXXXXX") ||
       die "could not create profile backup"
-    cp "$profile" "$profile_backup" ||
-      die "could not back up $profile"
-    printf 'Backed up %s to %s.\n' "$profile" "$profile_backup"
+    cp "$profile_file" "$profile_backup" ||
+      die "could not back up $profile_file"
+    printf 'Backed up %s to %s.\n' "$profile_file" "$profile_backup"
   fi
-  PROFILE_STAGED=$(mktemp "$profile.qodo-scout.new.XXXXXX") ||
+  PROFILE_STAGED=$(mktemp "$profile_file.qodo-scout.new.XXXXXX") ||
     die "could not stage profile update"
-  if [ -f "$profile" ]; then
-    cp -p "$profile" "$PROFILE_STAGED" ||
-      die "could not stage $profile"
+  if [ -f "$profile_file" ]; then
+    cp -p "$profile_file" "$PROFILE_STAGED" ||
+      die "could not stage $profile_file"
   fi
   {
     printf '\n%s\n' "$marker"
     printf '%s\n' "$export_line"
   } >>"$PROFILE_STAGED" || die "could not stage PATH update"
-  mv -f "$PROFILE_STAGED" "$profile" || die "could not update $profile"
+  mv -f "$PROFILE_STAGED" "$profile_file" || die "could not update $profile_file"
   PROFILE_STAGED=
+  release_profile_lock
   printf 'Added %s to PATH in %s.\n' "$directory" "$profile"
   profile_literal=$(shell_literal "$profile")
   printf 'Open a new terminal or run: . %s\n' "$profile_literal"
