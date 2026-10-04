@@ -117,17 +117,19 @@ sh ./install.sh \
 Local mode performs no network requests and applies the same exact-row SHA-256
 verification as connected mode.
 
-The handoff directory must contain exactly the selected platform binary and the
-release's binary manifest:
+At minimum, the approved handoff must contain the installer for the customer's
+operating system, the selected platform binary, and the release's binary
+manifest:
 
 ```text
+install.sh or install.ps1
 checksums.sha256
 qodo-support-bundle-<os>-<arch>[.exe]
 ```
 
-Also retain the matching `install.sh` or `install.ps1`, the release version, and
-the source release URL in the approved handoff record. Support should verify
-the connected copy before transfer; the customer verifies it again offline.
+Also retain the release version and source release URL in the approved handoff
+record. Support should verify the connected copy before transfer; the customer
+verifies it again offline.
 
 ## `version.json` contract
 
