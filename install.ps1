@@ -140,6 +140,15 @@ function ConvertTo-QodoScoutPowerShellLiteral {
     return "'" + $Value.Replace("'", "''") + "'"
 }
 
+function Test-QodoScoutFullyQualifiedPath {
+    param([Parameter(Mandatory)][string]$Value)
+
+    return (
+        $Value -match '^[A-Za-z]:[\\/]' -or
+        $Value -match '^[\\/]{2}[^\\/]+[\\/][^\\/]+'
+    )
+}
+
 function Add-QodoScoutToUserPath {
     param([Parameter(Mandatory)][string]$InstallDirectory)
 
@@ -189,7 +198,7 @@ function Install-QodoScout {
         }
         $RequestedInstallDirectory = Join-Path $env:LOCALAPPDATA 'Qodo\bin'
     }
-    if (-not [IO.Path]::IsPathRooted($RequestedInstallDirectory)) {
+    if (-not (Test-QodoScoutFullyQualifiedPath -Value $RequestedInstallDirectory)) {
         throw 'install directory must be an absolute path'
     }
 
@@ -200,7 +209,7 @@ function Install-QodoScout {
         if ([string]::IsNullOrWhiteSpace($RequestedVersion)) {
             throw '-SourceDir requires -Version so the local release is explicit'
         }
-        if (-not [IO.Path]::IsPathRooted($RequestedSourceDirectory)) {
+        if (-not (Test-QodoScoutFullyQualifiedPath -Value $RequestedSourceDirectory)) {
             throw 'source directory must be an absolute path'
         }
         if (-not (Test-Path -LiteralPath $RequestedSourceDirectory -PathType Container)) {

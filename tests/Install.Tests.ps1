@@ -76,6 +76,14 @@ Describe 'Qodo Scout Windows installer contracts' {
             Should -Be "'C:\Users\O''Brien\bin'"
     }
 
+    It 'distinguishes fully qualified Windows paths from current-drive paths' {
+        Test-QodoScoutFullyQualifiedPath -Value 'C:\Qodo\bin' | Should -BeTrue
+        Test-QodoScoutFullyQualifiedPath -Value '\\server\share\release' |
+            Should -BeTrue
+        Test-QodoScoutFullyQualifiedPath -Value '\Qodo\bin' | Should -BeFalse
+        Test-QodoScoutFullyQualifiedPath -Value 'Qodo\bin' | Should -BeFalse
+    }
+
     It 'fails clearly when curl.exe is unavailable in network mode' {
         Mock Get-Command { $null }
         {

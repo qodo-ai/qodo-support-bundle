@@ -193,6 +193,53 @@ unset FAKE_SMOKE_FAIL
   fail "failed smoke check did not restore the existing installation"
 pass "failed smoke checks roll back an existing installation"
 
+SYMLINK_INSTALL="$TEST_ROOT/symlink-install"
+mkdir -p "$SYMLINK_INSTALL"
+printf 'old\n' >"$SYMLINK_INSTALL/old-target"
+ln -s old-target "$SYMLINK_INSTALL/qodo-scout"
+if FAKE_SMOKE_FAIL=1 run_installer "$LATEST_HOME" "$TOOLS" \
+  --version 1.2.3 --source-dir "$SMOKE_SOURCE" --install-dir "$SYMLINK_INSTALL" \
+  >"$TEST_ROOT/symlink.out" 2>&1; then
+  fail "failed symlink upgrade smoke check was accepted"
+fi
+unset FAKE_SMOKE_FAIL
+[ -L "$SYMLINK_INSTALL/qodo-scout" ] ||
+  fail "failed upgrade did not restore the prior symlink"
+[ "$(readlink "$SYMLINK_INSTALL/qodo-scout")" = old-target ] ||
+  fail "restored symlink points to the wrong target"
+pass "failed smoke checks restore existing symlinks"
+
+ROLLBACK_TOOLS=$TEST_ROOT/rollback-tools
+cp -R "$TOOLS" "$ROLLBACK_TOOLS"
+cat >"$ROLLBACK_TOOLS/mv" <<'EOF'
+#!/bin/sh
+for argument in "$@"; do
+  case "$argument" in
+    *.backup.*)
+      [ "${FAKE_ROLLBACK_FAIL:-0}" != 1 ] || exit 95
+      ;;
+  esac
+done
+exec /bin/mv "$@"
+EOF
+chmod 0755 "$ROLLBACK_TOOLS/mv"
+mkdir -p "$TEST_ROOT/rollback-install"
+printf 'old\n' >"$TEST_ROOT/rollback-install/qodo-scout"
+if FAKE_SMOKE_FAIL=1 FAKE_ROLLBACK_FAIL=1 \
+  run_installer "$LATEST_HOME" "$ROLLBACK_TOOLS" \
+    --version 1.2.3 \
+    --source-dir "$SMOKE_SOURCE" \
+    --install-dir "$TEST_ROOT/rollback-install" \
+    >"$TEST_ROOT/rollback.out" 2>&1; then
+  fail "failed rollback was accepted"
+fi
+unset FAKE_SMOKE_FAIL FAKE_ROLLBACK_FAIL
+[ -n "$(find "$TEST_ROOT/rollback-install" -name '.qodo-scout.backup.*' -print)" ] ||
+  fail "failed rollback deleted the preserved executable"
+grep -F 'backup retained at' "$TEST_ROOT/rollback.out" >/dev/null ||
+  fail "failed rollback did not report the preserved backup"
+pass "failed rollback retains and reports the previous executable"
+
 for kind in missing duplicate malformed; do
   source_dir="$TEST_ROOT/manifest-$kind"
   write_release "$source_dir" qodo-support-bundle-darwin-arm64
@@ -300,5 +347,35 @@ PATH="$SESSION_INSTALL:$PATH" SHELL=/bin/zsh \
 [ "$(grep -c '^# qodo-scout installer$' "$SESSION_HOME/.zprofile")" -eq 1 ] ||
   fail "a session-only PATH entry prevented persistent opt-in"
 pass "opt-in PATH persists entries present only in the current session"
+
+SECOND_INSTALL="$PROFILE_HOME/second bin"
+SHELL=/bin/zsh run_installer "$PROFILE_HOME" "$TOOLS" \
+  --version 1.2.3 \
+  --source-dir "$PROFILE_SOURCE" \
+  --install-dir "$SECOND_INSTALL" \
+  --add-to-path >/dev/null
+grep -F "export PATH='$SECOND_INSTALL':\"\$PATH\"" "$PROFILE_HOME/.zprofile" >/dev/null ||
+  fail "a second install directory was not persisted"
+pass "PATH persistence handles a later custom install directory"
+
+BASH_HOME="$TEST_ROOT/bash-home"
+mkdir -p "$BASH_HOME"
+printf '# existing bash profile\n' >"$BASH_HOME/.bash_profile"
+SHELL=/bin/bash run_installer "$BASH_HOME" "$TOOLS" \
+  --version 1.2.3 --source-dir "$PROFILE_SOURCE" --add-to-path >/dev/null
+grep -F '# qodo-scout installer' "$BASH_HOME/.bash_profile" >/dev/null ||
+  fail "existing bash profile was not selected"
+pass "PATH persistence selects an existing bash profile"
+
+SPECIAL_INSTALL="$TEST_ROOT/\$(touch should-not-run)'quoted"
+run_installer "$LATEST_HOME" "$TOOLS" \
+  --version 1.2.3 \
+  --source-dir "$PROFILE_SOURCE" \
+  --install-dir "$SPECIAL_INSTALL" >"$TEST_ROOT/special-path.out"
+expected_special=$(printf '%s' "$SPECIAL_INSTALL/qodo-scout" | sed "s/'/'\\\\''/g")
+grep -F "Run now with: '$expected_special' collect --interactive" \
+  "$TEST_ROOT/special-path.out" >/dev/null ||
+  fail "printed command did not quote shell metacharacters safely"
+pass "printed full-path command is shell-safe"
 
 printf '1..%d\n' "$passed"

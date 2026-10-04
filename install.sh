@@ -11,6 +11,8 @@ STAGED_FILE=
 BACKUP_FILE=
 TARGET=
 INSTALLED=0
+BACKUP_PRESERVED=0
+PROFILE_STAGED=
 
 usage() {
   cat <<'EOF'
@@ -33,15 +35,24 @@ die() {
 cleanup_files() {
   status=$1
   if [ "$status" -ne 0 ] && [ "$INSTALLED" -eq 1 ]; then
-    if [ -n "$BACKUP_FILE" ] && [ -f "$BACKUP_FILE" ]; then
-      mv -f "$BACKUP_FILE" "$TARGET" || true
-      BACKUP_FILE=
+    if [ -n "$BACKUP_FILE" ] &&
+      { [ -e "$BACKUP_FILE" ] || [ -L "$BACKUP_FILE" ]; }; then
+      if mv -f "$BACKUP_FILE" "$TARGET"; then
+        BACKUP_FILE=
+      else
+        BACKUP_PRESERVED=1
+        printf 'qodo-scout installer: rollback failed; backup retained at %s\n' \
+          "$BACKUP_FILE" >&2
+      fi
     else
       rm -f "$TARGET"
     fi
   fi
   [ -z "$STAGED_FILE" ] || rm -f "$STAGED_FILE"
-  [ -z "$BACKUP_FILE" ] || rm -f "$BACKUP_FILE"
+  [ -z "$PROFILE_STAGED" ] || rm -f "$PROFILE_STAGED"
+  if [ "$BACKUP_PRESERVED" -eq 0 ] && [ -n "$BACKUP_FILE" ]; then
+    rm -f "$BACKUP_FILE"
+  fi
   [ -z "$TEMP_DIR" ] || rm -rf "$TEMP_DIR"
 }
 
@@ -178,14 +189,30 @@ path_contains() {
   esac
 }
 
+shell_literal() {
+  escaped=$(printf '%s' "$1" | sed "s/'/'\\\\''/g")
+  printf "'%s'" "$escaped"
+}
+
 add_user_path() {
   directory=$1
   case "${SHELL-}" in
     */zsh) profile=$HOME/.zprofile ;;
+    */bash)
+      if [ -f "$HOME/.bash_profile" ]; then
+        profile=$HOME/.bash_profile
+      else
+        profile=$HOME/.profile
+      fi
+      ;;
     *) profile=$HOME/.profile ;;
   esac
   marker='# qodo-scout installer'
-  if [ -f "$profile" ] && grep -Fqx "$marker" "$profile"; then
+  directory_literal=$(shell_literal "$directory")
+  # Keep $PATH literal for the shell that loads the profile.
+  # shellcheck disable=SC2016
+  export_line=$(printf 'export PATH=%s:"$PATH"' "$directory_literal")
+  if [ -f "$profile" ] && grep -Fqx "$export_line" "$profile"; then
     printf 'PATH entry already exists in %s.\n' "$profile"
     return
   fi
@@ -198,13 +225,21 @@ add_user_path() {
       die "could not back up $profile"
     printf 'Backed up %s to %s.\n' "$profile" "$profile_backup"
   fi
-  escaped_directory=$(printf '%s' "$directory" | sed "s/'/'\\\\''/g")
+  PROFILE_STAGED=$(mktemp "$profile.qodo-scout.new.XXXXXX") ||
+    die "could not stage profile update"
+  if [ -f "$profile" ]; then
+    cp -p "$profile" "$PROFILE_STAGED" ||
+      die "could not stage $profile"
+  fi
   {
     printf '\n%s\n' "$marker"
-    printf "export PATH='%s':\"\$PATH\"\n" "$escaped_directory"
-  } >>"$profile" || die "could not update $profile"
+    printf '%s\n' "$export_line"
+  } >>"$PROFILE_STAGED" || die "could not stage PATH update"
+  mv -f "$PROFILE_STAGED" "$profile" || die "could not update $profile"
+  PROFILE_STAGED=
   printf 'Added %s to PATH in %s.\n' "$directory" "$profile"
-  printf 'Open a new terminal or run: . "%s"\n' "$profile"
+  profile_literal=$(shell_literal "$profile")
+  printf 'Open a new terminal or run: . %s\n' "$profile_literal"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -322,10 +357,17 @@ cp "$binary" "$STAGED_FILE" || die "could not stage verified executable"
 chmod 0755 "$STAGED_FILE" || die "could not set executable permissions"
 
 TARGET=$INSTALL_DIR/qodo-scout
-if [ -e "$TARGET" ]; then
+if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
   BACKUP_FILE=$(mktemp "$INSTALL_DIR/.qodo-scout.backup.XXXXXX") ||
     die "could not create rollback file"
-  cp -p "$TARGET" "$BACKUP_FILE" || die "could not preserve existing installation"
+  if [ -L "$TARGET" ]; then
+    rm -f "$BACKUP_FILE"
+    cp -P -p "$TARGET" "$BACKUP_FILE" ||
+      die "could not preserve existing installation"
+  else
+    cp -p "$TARGET" "$BACKUP_FILE" ||
+      die "could not preserve existing installation"
+  fi
 fi
 mv -f "$STAGED_FILE" "$TARGET" || die "could not install qodo-scout"
 STAGED_FILE=
@@ -347,5 +389,6 @@ elif ! path_contains "$INSTALL_DIR"; then
   printf '%s is not on PATH.\n' "$INSTALL_DIR"
   printf 'Re-run with --add-to-path, or add it to your user PATH.\n'
 fi
-printf 'Run now with: "%s" collect --interactive\n' "$TARGET"
+target_literal=$(shell_literal "$TARGET")
+printf 'Run now with: %s collect --interactive\n' "$target_literal"
 printf 'After PATH is active: qodo-scout collect --interactive\n'
