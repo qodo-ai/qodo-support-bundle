@@ -21,20 +21,23 @@ See [the publication contract and runbook](publication.md).
 After publication, macOS and Linux customers can inspect and run:
 
 ```sh
+rm -f ./install-qodo-scout.sh
 curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  -o install-qodo-scout.sh \
-  https://get.qodo.ai/support-bundle/releases/0.3.0/install.sh
-less install-qodo-scout.sh
+  -o ./install-qodo-scout.sh \
+  https://get.qodo.ai/support-bundle/releases/0.3.0/install.sh &&
+  less ./install-qodo-scout.sh
 sh ./install-qodo-scout.sh --version 0.3.0 --add-to-path
 ```
 
 Windows customers can inspect and run from PowerShell:
 
 ```powershell
+Remove-Item .\install-qodo-scout.ps1 -Force -ErrorAction SilentlyContinue
 curl.exe --fail --location --proto '=https' --tlsv1.2 `
   --proto-redir '=https' `
   --output install-qodo-scout.ps1 `
   https://get.qodo.ai/support-bundle/releases/0.3.0/install.ps1
+if ($LASTEXITCODE -ne 0) { throw 'Installer download failed' }
 Get-Content .\install-qodo-scout.ps1
 & .\install-qodo-scout.ps1 -Version 0.3.0 -AddToPath
 ```

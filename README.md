@@ -28,21 +28,27 @@ must complete the
 macOS and Linux:
 
 ```bash
-curl -fsSLo install-qodo-scout.sh \
-  https://get.qodo.ai/support-bundle/releases/0.3.0/install.sh
-sh ./install-qodo-scout.sh --version 0.3.0
+rm -f ./install-qodo-scout.sh
+curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  -o ./install-qodo-scout.sh \
+  https://get.qodo.ai/support-bundle/releases/0.3.0/install.sh &&
+  sh ./install-qodo-scout.sh --version 0.3.0 --add-to-path
 ```
 
 Windows PowerShell:
 
 ```powershell
-curl.exe --fail --location --output install-qodo-scout.ps1 `
+Remove-Item .\install-qodo-scout.ps1 -Force -ErrorAction SilentlyContinue
+curl.exe --fail --location --proto '=https' --proto-redir '=https' `
+  --tlsv1.2 --output install-qodo-scout.ps1 `
   https://get.qodo.ai/support-bundle/releases/0.3.0/install.ps1
-& .\install-qodo-scout.ps1 -Version 0.3.0
+if ($LASTEXITCODE -ne 0) { throw 'Installer download failed' }
+& .\install-qodo-scout.ps1 -Version 0.3.0 -AddToPath
 ```
 
 The installer runs only a local `version` smoke check. It never starts
-collection. The customer starts the guided flow explicitly:
+collection. After opening a new terminal for any PATH update, the customer
+starts the guided flow explicitly:
 
 ```bash
 qodo-scout collect --interactive
