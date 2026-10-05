@@ -14,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
+	"github.com/qodo-ai/qodo-support-bundle/internal/redact"
 )
 
 type wizardDiscoveryStub struct {
@@ -134,7 +135,7 @@ func TestCollectInteractiveUsesFlagDefaultsAndCancelCreatesNoArchive(t *testing.
 	}
 }
 
-func TestCollectInteractiveAnswersUseExistingCollectionPathAndStdout(t *testing.T) {
+func TestCollectInteractiveShowsSingleFinalArchiveResult(t *testing.T) {
 	root := t.TempDir()
 	kubectl := fakeKubectl(t, root, "")
 	output := root + "/bundle.tar.gz"
@@ -186,13 +187,141 @@ func TestCollectInteractiveAnswersUseExistingCollectionPathAndStdout(t *testing.
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
-	want := fmt.Sprintf(
-		"Support bundle created: %s\n"+
-			"Kubernetes scope: 1/1 namespaces, 1 pods, 1 containers (0 init, 0 ephemeral)\n",
+	wantStdout := "Kubernetes scope: 1/1 namespaces, 1 pods, 1 containers (0 init, 0 ephemeral)\n"
+	if stdout.String() != wantStdout {
+		t.Fatalf("stdout changed:\ngot  %q\nwant %q", stdout.String(), wantStdout)
+	}
+	transcript := stdout.String() + stderr.String()
+	if strings.Count(transcript, "Bundle saved: "+output) != 1 {
+		t.Fatalf("interactive final archive result count changed:\n%s", transcript)
+	}
+	if strings.Contains(transcript, fmt.Sprintf("Support bundle created: %s", output)) {
+		t.Fatalf("interactive output retained legacy archive result:\n%s", transcript)
+	}
+	if _, err := os.Stat(output); err != nil {
+		t.Fatalf("interactive collection did not create archive: %v", err)
+	}
+}
+
+func TestInteractiveNoProgressUsesConciseArchiveResult(t *testing.T) {
+	t.Parallel()
+	const output = "/tmp/bundle.tar.gz"
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	writeFinalArchiveResult(
+		&stdout,
+		&stderr,
+		true,
+		false,
+		false,
+		nil,
+		redact.New(),
 		output,
 	)
-	if stdout.String() != want {
-		t.Fatalf("stdout changed:\ngot  %q\nwant %q", stdout.String(), want)
+
+	if stdout.Len() != 0 {
+		t.Fatalf("interactive fallback changed stdout: %q", stdout.String())
+	}
+	if stderr.String() != "Bundle saved: "+output+"\n" {
+		t.Fatalf("interactive fallback=%q", stderr.String())
+	}
+}
+
+func TestInteractiveFailedProgressUsesRealArchivePathOnStdout(t *testing.T) {
+	t.Parallel()
+	const output = "/private/customer/bundle.tar.gz"
+	renderErr := errors.New("renderer failed before summary")
+	renderer := &progressRenderer{
+		enabled:    true,
+		programErr: renderErr,
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	closeErr := closeProgress(renderer, &stderr)
+	writeFinalArchiveResult(
+		&stdout,
+		&stderr,
+		true,
+		renderer.enabled,
+		renderer.SummaryRendered(),
+		closeErr,
+		redact.New(),
+		output,
+	)
+
+	if !errors.Is(closeErr, renderErr) {
+		t.Fatalf("close error=%v want=%v", closeErr, renderErr)
+	}
+	if stdout.String() != "Support bundle created: "+output+"\n" {
+		t.Fatalf("renderer failure fallback=%q", stdout.String())
+	}
+	if strings.Count(stderr.String(), "interactive display stopped unexpectedly") != 1 {
+		t.Fatalf("renderer failure notice changed: %q", stderr.String())
+	}
+}
+
+func TestFinalArchiveResultPreservesExistingOutputModes(t *testing.T) {
+	t.Parallel()
+	const output = "/private/customer/bundle.tar.gz"
+	tests := []struct {
+		name            string
+		interactive     bool
+		progressEnabled bool
+		summaryRendered bool
+		progressErr     error
+		wantStdout      string
+		wantStderr      string
+	}{
+		{
+			name:       "non-interactive",
+			wantStdout: "Support bundle created: " + output + "\n",
+		},
+		{
+			name:            "interactive renderer succeeds",
+			interactive:     true,
+			progressEnabled: true,
+			summaryRendered: true,
+		},
+		{
+			name:            "interactive renderer fails after summary",
+			interactive:     true,
+			progressEnabled: true,
+			summaryRendered: true,
+			progressErr:     errors.New("renderer failed after summary"),
+		},
+		{
+			name:        "interactive progress disabled",
+			interactive: true,
+			wantStderr:  "Bundle saved: /private/customer/bundle.tar.gz\n",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			writeFinalArchiveResult(
+				&stdout,
+				&stderr,
+				test.interactive,
+				test.progressEnabled,
+				test.summaryRendered,
+				test.progressErr,
+				redact.New(),
+				output,
+			)
+
+			if stdout.String() != test.wantStdout {
+				t.Fatalf("stdout=%q want=%q", stdout.String(), test.wantStdout)
+			}
+			if stderr.String() != test.wantStderr {
+				t.Fatalf("stderr=%q want=%q", stderr.String(), test.wantStderr)
+			}
+		})
 	}
 }
 

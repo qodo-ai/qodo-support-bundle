@@ -73,27 +73,28 @@ type progressStageState struct {
 
 // progressRenderer owns serialized routine progress and its optional heartbeat.
 type progressRenderer struct {
-	mu          sync.Mutex
-	writer      io.Writer
-	enabled     bool
-	interactive bool
-	unicode     bool
-	hyperlink   bool
-	width       int
-	now         func() time.Time
-	startedAt   time.Time
-	stages      map[string]progressStageState
-	pending     map[string]progressUpdate
-	stageOrder  []string
-	frame       int
-	animated    bool
-	stop        chan struct{}
-	done        chan struct{}
-	closeOnce   sync.Once
-	bubbleTea   bool
-	program     *tea.Program
-	programDone chan struct{}
-	programErr  error
+	mu              sync.Mutex
+	writer          io.Writer
+	enabled         bool
+	interactive     bool
+	unicode         bool
+	hyperlink       bool
+	width           int
+	now             func() time.Time
+	startedAt       time.Time
+	stages          map[string]progressStageState
+	pending         map[string]progressUpdate
+	stageOrder      []string
+	frame           int
+	animated        bool
+	stop            chan struct{}
+	done            chan struct{}
+	closeOnce       sync.Once
+	bubbleTea       bool
+	program         *tea.Program
+	programDone     chan struct{}
+	programErr      error
+	summaryRendered bool
 }
 
 func newProgressRenderer(options progressRendererOptions) *progressRenderer {
@@ -224,9 +225,14 @@ func (renderer *progressRenderer) Start() {
 		renderer.programDone = make(chan struct{})
 		go func() {
 			defer close(renderer.programDone)
-			_, err := renderer.program.Run()
+			finalModel, err := renderer.program.Run()
+			summaryRendered := false
+			if model, ok := finalModel.(progressModel); ok {
+				summaryRendered = model.summary != nil
+			}
 			renderer.mu.Lock()
 			renderer.programErr = err
+			renderer.summaryRendered = summaryRendered
 			renderer.mu.Unlock()
 		}()
 		return
@@ -426,10 +432,21 @@ func (renderer *progressRenderer) Err() error {
 	return renderer.programErr
 }
 
-func closeProgress(renderer *progressRenderer, stderr io.Writer) {
-	if err := renderer.Close(); err != nil {
+func (renderer *progressRenderer) SummaryRendered() bool {
+	if renderer == nil {
+		return false
+	}
+	renderer.mu.Lock()
+	defer renderer.mu.Unlock()
+	return renderer.summaryRendered
+}
+
+func closeProgress(renderer *progressRenderer, stderr io.Writer) error {
+	err := renderer.Close()
+	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "Qodo Scout interactive display stopped unexpectedly.")
 	}
+	return err
 }
 
 func (renderer *progressRenderer) clearLocked() {

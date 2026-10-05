@@ -621,8 +621,17 @@ func runCollect(
 				phoenixConfig,
 				true,
 			)
-			closeProgress(progress, stderr)
-			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
+			progressErr := closeProgress(progress, stderr)
+			writeFinalArchiveResult(
+				stdout,
+				stderr,
+				*interactive,
+				progress.enabled,
+				progress.SummaryRendered(),
+				progressErr,
+				redactor,
+				result.ArchivePath,
+			)
 			_, _ = fmt.Fprintln(stderr, "Bundle created, but temporary data cleanup failed.")
 			return 1
 		}
@@ -644,8 +653,17 @@ func runCollect(
 		phoenixConfig,
 		false,
 	)
-	closeProgress(progress, stderr)
-	_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", result.ArchivePath)
+	progressErr := closeProgress(progress, stderr)
+	writeFinalArchiveResult(
+		stdout,
+		stderr,
+		*interactive,
+		progress.enabled,
+		progress.SummaryRendered(),
+		progressErr,
+		redactor,
+		result.ArchivePath,
+	)
 	_, _ = fmt.Fprintf(
 		stdout,
 		"Kubernetes scope: %d/%d namespaces, %d pods, %d containers (%d init, %d ephemeral)\n",
@@ -666,6 +684,33 @@ func runCollect(
 		return 3
 	}
 	return 0
+}
+
+func writeFinalArchiveResult(
+	stdout io.Writer,
+	stderr io.Writer,
+	interactive bool,
+	progressEnabled bool,
+	summaryRendered bool,
+	progressErr error,
+	redactor *redact.Redactor,
+	archivePath string,
+) {
+	if !interactive {
+		_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", archivePath)
+		return
+	}
+	if progressEnabled {
+		if progressErr != nil && !summaryRendered {
+			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", archivePath)
+		}
+		return
+	}
+	_, _ = fmt.Fprintf(
+		stderr,
+		"Bundle saved: %s\n",
+		progressArchivePath(redactor, archivePath),
+	)
 }
 
 func writeProgressSummary(
