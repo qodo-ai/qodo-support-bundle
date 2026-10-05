@@ -214,6 +214,7 @@ func TestInteractiveNoProgressUsesConciseArchiveResult(t *testing.T) {
 		&stderr,
 		true,
 		false,
+		nil,
 		redact.New(),
 		output,
 	)
@@ -223,6 +224,92 @@ func TestInteractiveNoProgressUsesConciseArchiveResult(t *testing.T) {
 	}
 	if stderr.String() != "Bundle saved: "+output+"\n" {
 		t.Fatalf("interactive fallback=%q", stderr.String())
+	}
+}
+
+func TestInteractiveFailedProgressUsesRealArchivePathOnStdout(t *testing.T) {
+	t.Parallel()
+	const output = "/private/customer/bundle.tar.gz"
+	renderErr := errors.New("renderer failed before summary")
+	renderer := &progressRenderer{
+		enabled:    true,
+		programErr: renderErr,
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	closeErr := closeProgress(renderer, &stderr)
+	writeFinalArchiveResult(
+		&stdout,
+		&stderr,
+		true,
+		renderer.enabled,
+		closeErr,
+		redact.New(),
+		output,
+	)
+
+	if !errors.Is(closeErr, renderErr) {
+		t.Fatalf("close error=%v want=%v", closeErr, renderErr)
+	}
+	if stdout.String() != "Support bundle created: "+output+"\n" {
+		t.Fatalf("renderer failure fallback=%q", stdout.String())
+	}
+	if strings.Count(stderr.String(), "interactive display stopped unexpectedly") != 1 {
+		t.Fatalf("renderer failure notice changed: %q", stderr.String())
+	}
+}
+
+func TestFinalArchiveResultPreservesExistingOutputModes(t *testing.T) {
+	t.Parallel()
+	const output = "/private/customer/bundle.tar.gz"
+	tests := []struct {
+		name            string
+		interactive     bool
+		progressEnabled bool
+		progressErr     error
+		wantStdout      string
+		wantStderr      string
+	}{
+		{
+			name:       "non-interactive",
+			wantStdout: "Support bundle created: " + output + "\n",
+		},
+		{
+			name:            "interactive renderer succeeds",
+			interactive:     true,
+			progressEnabled: true,
+		},
+		{
+			name:        "interactive progress disabled",
+			interactive: true,
+			wantStderr:  "Bundle saved: /private/customer/bundle.tar.gz\n",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			writeFinalArchiveResult(
+				&stdout,
+				&stderr,
+				test.interactive,
+				test.progressEnabled,
+				test.progressErr,
+				redact.New(),
+				output,
+			)
+
+			if stdout.String() != test.wantStdout {
+				t.Fatalf("stdout=%q want=%q", stdout.String(), test.wantStdout)
+			}
+			if stderr.String() != test.wantStderr {
+				t.Fatalf("stderr=%q want=%q", stderr.String(), test.wantStderr)
+			}
+		})
 	}
 }
 

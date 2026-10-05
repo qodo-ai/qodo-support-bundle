@@ -621,12 +621,13 @@ func runCollect(
 				phoenixConfig,
 				true,
 			)
-			closeProgress(progress, stderr)
+			progressErr := closeProgress(progress, stderr)
 			writeFinalArchiveResult(
 				stdout,
 				stderr,
 				*interactive,
 				progress.enabled,
+				progressErr,
 				redactor,
 				result.ArchivePath,
 			)
@@ -651,12 +652,13 @@ func runCollect(
 		phoenixConfig,
 		false,
 	)
-	closeProgress(progress, stderr)
+	progressErr := closeProgress(progress, stderr)
 	writeFinalArchiveResult(
 		stdout,
 		stderr,
 		*interactive,
 		progress.enabled,
+		progressErr,
 		redactor,
 		result.ArchivePath,
 	)
@@ -687,6 +689,7 @@ func writeFinalArchiveResult(
 	stderr io.Writer,
 	interactive bool,
 	progressEnabled bool,
+	progressErr error,
 	redactor *redact.Redactor,
 	archivePath string,
 ) {
@@ -694,13 +697,17 @@ func writeFinalArchiveResult(
 		_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", archivePath)
 		return
 	}
-	if !progressEnabled {
-		_, _ = fmt.Fprintf(
-			stderr,
-			"Bundle saved: %s\n",
-			progressArchivePath(redactor, archivePath),
-		)
+	if progressEnabled {
+		if progressErr != nil {
+			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", archivePath)
+		}
+		return
 	}
+	_, _ = fmt.Fprintf(
+		stderr,
+		"Bundle saved: %s\n",
+		progressArchivePath(redactor, archivePath),
+	)
 }
 
 func writeProgressSummary(

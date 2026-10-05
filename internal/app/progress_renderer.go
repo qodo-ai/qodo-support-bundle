@@ -426,10 +426,12 @@ func (renderer *progressRenderer) Err() error {
 	return renderer.programErr
 }
 
-func closeProgress(renderer *progressRenderer, stderr io.Writer) {
-	if err := renderer.Close(); err != nil {
+func closeProgress(renderer *progressRenderer, stderr io.Writer) error {
+	err := renderer.Close()
+	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "Qodo Scout interactive display stopped unexpectedly.")
 	}
+	return err
 }
 
 func (renderer *progressRenderer) clearLocked() {
