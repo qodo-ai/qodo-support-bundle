@@ -30,14 +30,15 @@ metadata, or publication locks in the supported contract. See
 
 The baseline namespace role needs `get` and `list` access to:
 
-- pods, events, services, persistent volume claims, and pod logs;
+- pods, events, services, and persistent volume claims;
 - deployments, stateful sets, and daemon sets;
 - jobs and cron jobs;
 - endpoint slices; and
 - horizontal pod autoscalers.
 
-Qodo Scout never requests Secrets or ConfigMaps. Automatic namespace discovery
-and `--all-namespaces` additionally require cluster-scoped `list` access to
+Pod logs require only `get` on the `pods/log` subresource. Qodo Scout never
+requests Secrets or ConfigMaps. Automatic namespace discovery and
+`--all-namespaces` additionally require cluster-scoped `list` access to
 namespaces. Optional collection requires narrowly scoped `create` access only
 for the selected feature:
 
