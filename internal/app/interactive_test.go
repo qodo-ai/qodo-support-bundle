@@ -214,6 +214,7 @@ func TestInteractiveNoProgressUsesConciseArchiveResult(t *testing.T) {
 		&stderr,
 		true,
 		false,
+		false,
 		nil,
 		redact.New(),
 		output,
@@ -244,6 +245,7 @@ func TestInteractiveFailedProgressUsesRealArchivePathOnStdout(t *testing.T) {
 		&stderr,
 		true,
 		renderer.enabled,
+		renderer.SummaryRendered(),
 		closeErr,
 		redact.New(),
 		output,
@@ -267,6 +269,7 @@ func TestFinalArchiveResultPreservesExistingOutputModes(t *testing.T) {
 		name            string
 		interactive     bool
 		progressEnabled bool
+		summaryRendered bool
 		progressErr     error
 		wantStdout      string
 		wantStderr      string
@@ -279,6 +282,14 @@ func TestFinalArchiveResultPreservesExistingOutputModes(t *testing.T) {
 			name:            "interactive renderer succeeds",
 			interactive:     true,
 			progressEnabled: true,
+			summaryRendered: true,
+		},
+		{
+			name:            "interactive renderer fails after summary",
+			interactive:     true,
+			progressEnabled: true,
+			summaryRendered: true,
+			progressErr:     errors.New("renderer failed after summary"),
 		},
 		{
 			name:        "interactive progress disabled",
@@ -298,6 +309,7 @@ func TestFinalArchiveResultPreservesExistingOutputModes(t *testing.T) {
 				&stderr,
 				test.interactive,
 				test.progressEnabled,
+				test.summaryRendered,
 				test.progressErr,
 				redact.New(),
 				output,

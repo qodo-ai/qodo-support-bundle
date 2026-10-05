@@ -313,6 +313,9 @@ func TestProgressRendererBubbleTeaRunsInlineAndStopsSynchronously(t *testing.T) 
 	if err := renderer.Err(); err != nil {
 		t.Fatalf("Bubble Tea renderer error: %v", err)
 	}
+	if !renderer.SummaryRendered() {
+		t.Fatal("Bubble Tea renderer did not process the final summary")
+	}
 }
 
 func TestProgressRendererTTYHierarchyGoldenTranscript(t *testing.T) {

@@ -627,6 +627,7 @@ func runCollect(
 				stderr,
 				*interactive,
 				progress.enabled,
+				progress.SummaryRendered(),
 				progressErr,
 				redactor,
 				result.ArchivePath,
@@ -658,6 +659,7 @@ func runCollect(
 		stderr,
 		*interactive,
 		progress.enabled,
+		progress.SummaryRendered(),
 		progressErr,
 		redactor,
 		result.ArchivePath,
@@ -689,6 +691,7 @@ func writeFinalArchiveResult(
 	stderr io.Writer,
 	interactive bool,
 	progressEnabled bool,
+	summaryRendered bool,
 	progressErr error,
 	redactor *redact.Redactor,
 	archivePath string,
@@ -698,7 +701,7 @@ func writeFinalArchiveResult(
 		return
 	}
 	if progressEnabled {
-		if progressErr != nil {
+		if progressErr != nil && !summaryRendered {
 			_, _ = fmt.Fprintf(stdout, "Support bundle created: %s\n", archivePath)
 		}
 		return
