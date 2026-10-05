@@ -43,7 +43,7 @@ suite, and `go vet`. When changing Windows installation behavior, also run the
 Pester suite and PSScriptAnalyzer as described in
 [`tests/Install.Tests.ps1`](tests/Install.Tests.ps1). When changing
 release or publication behavior, run the fake-GCS and static workflow contract
-tests under `tests/` and validate workflows with `actionlint`.
+tests in `internal/distribution/` and validate workflows with `actionlint`.
 
 Changes to platform inventory must preserve all six release targets. Verify
 cross-compilation with:
