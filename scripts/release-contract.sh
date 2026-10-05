@@ -268,29 +268,34 @@ repair_stable_installers() {
     fi
     return 1
   fi
-  active_version="$(python3 "$version_script" read "$pointer")"
+  active_version="$(python3 "$version_script" read "$pointer")" || return 1
 
-  release_installers | while IFS= read -r filename; do
+  if ! release_installers | while IFS= read -r filename; do
     winner="${work}/repair-${filename}"
     winner_headers="${winner}.headers"
     gcs_read_exact \
       "$bucket" "${prefix}/releases/${active_version}/${filename}" \
-      "$access_token" "$winner" "$winner_headers" "$command_name"
+      "$access_token" "$winner" "$winner_headers" "$command_name" ||
+      exit 1
     if [ "$(gcs_header_value Content-Type "$winner_headers")" != \
       'text/plain; charset=utf-8' ] ||
       [ "$(gcs_header_value Cache-Control "$winner_headers")" != \
         "$immutable_cache" ]; then
       echo "${command_name}: active versioned installer has unexpected headers" >&2
-      return 1
+      exit 1
     fi
     gcs_upload_mutable \
       "$winner" "$bucket" "${prefix}/${filename}" \
       'text/plain; charset=utf-8' "$mutable_cache" \
-      "$access_token" "$existing" "$command_name"
+      "$access_token" "$existing" "$command_name" ||
+      exit 1
     gcs_verify_exact \
       "$winner" "$bucket" "${prefix}/${filename}" \
       'text/plain; charset=utf-8' "$mutable_cache" \
-      "$access_token" "$existing" "$command_name"
-  done
+      "$access_token" "$existing" "$command_name" ||
+      exit 1
+  done; then
+    return 1
+  fi
   echo "${command_name}: stable installers match active ${active_version}" >&2
 }

@@ -133,6 +133,7 @@ done
 acquire_publication_lock \
   "$PUBLICATION_OWNER" "$DESTINATION_BUCKET" "$PREFIX" "$access_token" \
   "$work" promote-gcs
+MUTABLE_ACTIVATION_STARTED=1
 repair_stable_installers \
   "$ROOT/scripts/version-contract.py" "$DESTINATION_BUCKET" "$PREFIX" \
   "$access_token" "$work" "$existing" promote-gcs
@@ -154,7 +155,6 @@ else
   [ "$read_status" -eq 1 ] || exit 1
 fi
 
-MUTABLE_ACTIVATION_STARTED=1
 release_installers | while IFS= read -r filename; do
   gcs_upload_mutable \
     "${work}/${filename}" "$DESTINATION_BUCKET" "${PREFIX}/${filename}" \

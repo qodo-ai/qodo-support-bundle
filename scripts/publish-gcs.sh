@@ -87,6 +87,7 @@ done
 
 acquire_publication_lock \
   "$PUBLICATION_OWNER" "$BUCKET" "$PREFIX" "$access_token" "$work" publish-gcs
+MUTABLE_ACTIVATION_STARTED=1
 repair_stable_installers \
   "$ROOT/scripts/version-contract.py" "$BUCKET" "$PREFIX" "$access_token" \
   "$work" "$existing" publish-gcs
@@ -109,7 +110,6 @@ else
 fi
 
 mutable_cache='no-cache, max-age=0, must-revalidate'
-MUTABLE_ACTIVATION_STARTED=1
 release_installers | while IFS= read -r filename; do
   gcs_upload_mutable \
     "${DIST}/${filename}" "$BUCKET" "${PREFIX}/${filename}" \
