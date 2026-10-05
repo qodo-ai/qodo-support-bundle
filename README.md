@@ -1,5 +1,7 @@
 # Qodo Scout
 
+<img src="docs/assets/qodo-scout-logo.jpg" alt="Qodo Scout logo: a magnifying glass inspecting protected diagnostics" width="160">
+
 [![Qodo Scout version v0.3.0](https://img.shields.io/badge/version-v0.3.0-blue?style=flat-square)](https://github.com/qodo-ai/qodo-support-bundle/releases/tag/v0.3.0)
 ![Supported platforms: macOS, Linux, and Windows](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-informational?style=flat-square)
 ![Safety: read-only diagnostic collection](https://img.shields.io/badge/safety-read--only%20diagnostic%20collection-success?style=flat-square)
