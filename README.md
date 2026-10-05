@@ -1,4 +1,8 @@
-# Qodo Scout · Read-only on-prem diagnostics
+# Qodo Scout
+
+[![Qodo Scout version v0.3.0](https://img.shields.io/badge/version-v0.3.0-blue?style=flat-square)](https://github.com/qodo-ai/qodo-support-bundle/releases/tag/v0.3.0)
+![Supported platforms: macOS, Linux, and Windows](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-informational?style=flat-square)
+![Safety: read-only diagnostic collection](https://img.shields.io/badge/safety-read--only%20diagnostic%20collection-success?style=flat-square)
 
 Qodo Scout is a portable, read-only CLI for collecting bounded and redacted
 Kubernetes diagnostics. The executable, release assets, and archive filenames
@@ -8,24 +12,13 @@ workload context, optional namespace-scoped Prometheus telemetry, optional
 bounded Arize Phoenix traces, and an optional Platform-to-Zitadel connectivity
 report.
 
-**Collection safeguards**
-
-Read-only diagnostics: no cluster changes, no Kubernetes Secret objects, and
-sensitive text is redacted.
-
 ## Install
 
-Cross-platform installers require an explicit release version, verify the
-matching immutable release artifact, and install the `qodo-scout` command
-without sudo or administrator access. Merging publication code does not
-publish objects; the manual dev and approved production workflows publish only
-version-specific paths. See
-[the installer contract and commands](docs/installers.md) and
-[the publication runbook](docs/publication.md). Maintainers preparing a pilot
-must complete the
-[public distribution readiness checklist](docs/public-readiness.md).
+These version-pinned installers download the immutable 0.3.0 release and verify
+the selected binary with SHA-256 before installing the `qodo-scout` command.
+They do not start a collection.
 
-macOS and Linux:
+### macOS and Linux
 
 ```bash
 rm -f ./install-qodo-scout.sh
@@ -35,29 +28,42 @@ curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 \
   sh ./install-qodo-scout.sh --version 0.3.0 --add-to-path
 ```
 
-Windows PowerShell:
+Use the installed command immediately in the same shell:
 
-```powershell
-Remove-Item .\install-qodo-scout.ps1 -Force -ErrorAction SilentlyContinue
-curl.exe --fail --location --proto '=https' --proto-redir '=https' `
-  --tlsv1.2 --output install-qodo-scout.ps1 `
-  https://get.qodo.ai/support-bundle/releases/0.3.0/install.ps1
-if ($LASTEXITCODE -ne 0) { throw 'Installer download failed' }
-& .\install-qodo-scout.ps1 -Version 0.3.0 -AddToPath
+```bash
+"${XDG_BIN_HOME:-$HOME/.local/bin}/qodo-scout" collect --interactive
 ```
 
-The installer runs only a local `version` smoke check. It never starts
-collection. After opening a new terminal for any PATH update, the customer
-starts the guided flow explicitly:
+Or open a new terminal and run:
 
 ```bash
 qodo-scout collect --interactive
 ```
 
-Security boundaries and platform assurance are documented in the
-[security model](docs/security-model.md). See [CONTRIBUTING.md](CONTRIBUTING.md)
-to propose a change and [SECURITY.md](SECURITY.md) to report a vulnerability
-privately.
+### Windows
+
+Run this in **Command Prompt (cmd.exe)**:
+
+```bat
+curl.exe -fSLo "%TEMP%\install-qodo-scout.ps1" "https://get.qodo.ai/support-bundle/releases/0.3.0/install.ps1" && powershell.exe -NoProfile -File "%TEMP%\install-qodo-scout.ps1" -Version 0.3.0 -AddToPath
+```
+
+Use the installed command immediately in the same Command Prompt session:
+
+```bat
+"%LOCALAPPDATA%\Qodo\bin\qodo-scout.exe" collect --interactive
+```
+
+Or open a new Command Prompt session and run:
+
+```bat
+qodo-scout collect --interactive
+```
+
+Collection creates a local `.tar.gz` for review; Qodo Scout never uploads or
+sends it automatically. For installer security details, air-gapped setup, and
+uninstallation, see [the installer guide](docs/installers.md). See the
+[security model](docs/security-model.md) for collection safeguards.
 
 ## Prerequisites and scope
 
