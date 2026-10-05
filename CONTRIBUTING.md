@@ -61,10 +61,10 @@ verification performed. Add a regression test before a behavioral fix when
 practical. Keep public comments in English and explain why non-obvious code is
 needed rather than restating what it does.
 
-Changes to installers, checksums, release assets, publication ordering,
-`version.json`, object mutability, or cache controls are distribution-contract
-changes. Update the corresponding tests and documentation together, and never
-weaken checksum or compare-and-swap protections to make a test pass.
+Changes to installers, checksums, release assets, immutable publication
+inventory, or cache controls are distribution-contract changes. Update the
+corresponding tests and documentation together, and never weaken checksum or
+create-only protections to make a test pass.
 
 Repository maintainers will apply the configured review, CI, and release
 controls. A merged pull request does not itself authorize a live release,

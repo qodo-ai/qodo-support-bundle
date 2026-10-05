@@ -15,14 +15,31 @@ sensitive text is redacted.
 
 ## Install
 
-Cross-platform installers resolve `version.json`, select and verify the matching
-release artifact, and install the stable `qodo-scout` command without sudo or
-administrator access. Merging the publication code does not publish live
-objects; stable endpoints return 404 until the manual dev and approved
-production workflows run. See [the installer contract and commands](docs/installers.md)
-and [the publication runbook](docs/publication.md). Maintainers preparing a
-pilot must complete the
+Cross-platform installers require an explicit release version, verify the
+matching immutable release artifact, and install the `qodo-scout` command
+without sudo or administrator access. Merging publication code does not
+publish objects; the manual dev and approved production workflows publish only
+version-specific paths. See
+[the installer contract and commands](docs/installers.md) and
+[the publication runbook](docs/publication.md). Maintainers preparing a pilot
+must complete the
 [public distribution readiness checklist](docs/public-readiness.md).
+
+macOS and Linux:
+
+```bash
+curl -fsSLo install-qodo-scout.sh \
+  https://get.qodo.ai/support-bundle/releases/0.3.0/install.sh
+sh ./install-qodo-scout.sh --version 0.3.0
+```
+
+Windows PowerShell:
+
+```powershell
+curl.exe --fail --location --output install-qodo-scout.ps1 `
+  https://get.qodo.ai/support-bundle/releases/0.3.0/install.ps1
+& .\install-qodo-scout.ps1 -Version 0.3.0
+```
 
 The installer runs only a local `version` smoke check. It never starts
 collection. The customer starts the guided flow explicitly:
@@ -706,10 +723,11 @@ concurrency, approval, and rollback.
 
 ## Customer delivery
 
-For a connected customer workstation, use the stable HTTPS installer commands
-in [the installer guide](docs/installers.md). The release artifact keeps the
-compatibility name `qodo-support-bundle-<os>-<arch>[.exe]`; the installer
-provides the stable `qodo-scout` command.
+For a connected customer workstation, use the version-specific HTTPS installer
+commands in [the installer guide](docs/installers.md). The release artifact
+keeps the compatibility name `qodo-support-bundle-<os>-<arch>[.exe]`; the
+installer provides the `qodo-scout` command. Customer documentation must pin
+and be updated for each release.
 
 For an environment that cannot reach Qodo or GitHub, Support prepares the
 documented air-gapped handoff on an approved connected workstation: the

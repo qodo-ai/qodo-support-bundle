@@ -108,30 +108,30 @@ write_fake_tools "$TOOLS"
 LATEST_HOME="$TEST_ROOT/home with spaces"
 LATEST_INSTALL="$LATEST_HOME/bin with spaces"
 mkdir -p "$TEST_ROOT/server/releases/1.2.3"
-printf '{ "version": "1.2.3" }\n' >"$TEST_ROOT/server/version.json"
 write_release "$TEST_ROOT/server/releases/1.2.3" qodo-support-bundle-darwin-arm64
 : >"$TEST_ROOT/exec.log"
 : >"$TEST_ROOT/curl.log"
-run_installer "$LATEST_HOME" "$TOOLS" --install-dir "$LATEST_INSTALL"
+if run_installer "$LATEST_HOME" "$TOOLS" --install-dir "$LATEST_INSTALL" \
+  >"$TEST_ROOT/missing-version.out" 2>&1; then
+  fail "installer accepted a network installation without --version"
+fi
+grep -F -- '--version is required' "$TEST_ROOT/missing-version.out" >/dev/null ||
+  fail "missing version error is unclear"
+pass "network installation requires an explicit version"
+
+run_installer "$LATEST_HOME" "$TOOLS" --version 1.2.3 --install-dir "$LATEST_INSTALL"
 [ -x "$LATEST_INSTALL/qodo-scout" ] || fail "latest install did not create executable"
 [ "$(stat -c '%a' "$LATEST_INSTALL/qodo-scout" 2>/dev/null || stat -f '%Lp' "$LATEST_INSTALL/qodo-scout")" = 755 ] ||
   fail "installed mode is not 0755"
 [ "$(cat "$TEST_ROOT/exec.log")" = version ] || fail "smoke check ran a collecting command"
-grep -Fx 'https://get.qodo.ai/support-bundle/version.json' "$TEST_ROOT/curl.log" >/dev/null ||
-  fail "latest metadata URL was not fetched"
 grep -Fx 'https://get.qodo.ai/support-bundle/releases/1.2.3/qodo-support-bundle-darwin-arm64' "$TEST_ROOT/curl.log" >/dev/null ||
   fail "versioned binary URL was not fetched"
 [ -z "$(find "$TEST_ROOT/tmp" -mindepth 1 -maxdepth 1 -print)" ] ||
   fail "temporary directory was not cleaned"
-pass "latest metadata installs and smoke-checks without collection"
-
-: >"$TEST_ROOT/curl.log"
-PINNED_INSTALL="$TEST_ROOT/pinned"
-run_installer "$LATEST_HOME" "$TOOLS" --version 1.2.3 --install-dir "$PINNED_INSTALL"
-if grep -F '/version.json' "$TEST_ROOT/curl.log" >/dev/null; then
-  fail "pinned install fetched latest metadata"
+if grep -Fv '/releases/1.2.3/' "$TEST_ROOT/curl.log" >/dev/null; then
+  fail "pinned install fetched a mutable URL"
 fi
-pass "pinned override bypasses version metadata"
+pass "pinned install uses only immutable release URLs and smoke-checks without collection"
 
 for mapping in \
   'Darwin x86_64 qodo-support-bundle-darwin-amd64' \
@@ -259,29 +259,20 @@ for kind in missing duplicate malformed; do
 done
 pass "missing duplicate and malformed checksum rows are rejected"
 
-printf '{ "version": "1.2.3", "extra": true }\n' >"$TEST_ROOT/server/version.json"
-if run_installer "$LATEST_HOME" "$TOOLS" --install-dir "$TEST_ROOT/schema" \
-  >"$TEST_ROOT/schema.out" 2>&1; then
-  fail "version metadata with extra properties was accepted"
-fi
-pass "version metadata requires the strict minimal schema"
-
-printf '{ "version": "../escape" }\n' >"$TEST_ROOT/server/version.json"
-if run_installer "$LATEST_HOME" "$TOOLS" --install-dir "$TEST_ROOT/version" \
+if run_installer "$LATEST_HOME" "$TOOLS" --version ../escape --install-dir "$TEST_ROOT/version" \
   >"$TEST_ROOT/version.out" 2>&1; then
   fail "unsafe version was accepted"
 fi
 pass "unsafe version strings are rejected"
 
-printf '{ "version": "1.2. 3" }\n' >"$TEST_ROOT/server/version.json"
-if run_installer "$LATEST_HOME" "$TOOLS" --install-dir "$TEST_ROOT/version-whitespace" \
+if run_installer "$LATEST_HOME" "$TOOLS" --version '1.2. 3' --install-dir "$TEST_ROOT/version-whitespace" \
   >"$TEST_ROOT/version-whitespace.out" 2>&1; then
   fail "whitespace inside a version string was normalized"
 fi
-pass "version metadata preserves and rejects value whitespace"
+pass "version arguments preserve and reject value whitespace"
 
-printf '{ "version": "1.2.3" }\n' >"$TEST_ROOT/server/version.json"
-if FAKE_CURL_FAIL=1 run_installer "$LATEST_HOME" "$TOOLS" --install-dir "$TEST_ROOT/download" \
+if FAKE_CURL_FAIL=1 run_installer "$LATEST_HOME" "$TOOLS" \
+  --version 1.2.3 --install-dir "$TEST_ROOT/download" \
   >"$TEST_ROOT/download.out" 2>&1; then
   fail "download failure was ignored"
 fi
@@ -301,7 +292,7 @@ if HOME="$LATEST_HOME" \
   FAKE_UNAME_S=Darwin \
   FAKE_UNAME_M=arm64 \
   TMPDIR="$TEST_ROOT/tmp" \
-  sh "$INSTALLER" --install-dir "$TEST_ROOT/no-curl" \
+  sh "$INSTALLER" --version 1.2.3 --install-dir "$TEST_ROOT/no-curl" \
     >"$TEST_ROOT/no-curl.out" 2>&1; then
   fail "network install without curl was accepted"
 fi

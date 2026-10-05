@@ -19,10 +19,10 @@ The operator workstation is the main trust boundary:
 - optional Prometheus, Phoenix, and Zitadel operations occur only when selected
   and use the bounded behaviors documented in the main README.
 
-The distribution boundary consists of GitHub release provenance, immutable GCS
-release objects, stable HTTPS installer endpoints, and the strict
-`version.json` pointer. Publication verifies exact bytes and headers in dev,
-requires production approval, and activates metadata last. See
+The distribution boundary consists of GitHub release provenance and immutable,
+version-specific GCS objects. Publication verifies exact bytes and headers in
+dev and requires production approval. There are no mutable aliases, latest
+metadata, or publication locks in the supported contract. See
 [the publication runbook](publication.md).
 
 ## Explicit non-goals

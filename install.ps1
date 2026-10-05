@@ -17,22 +17,6 @@ function Assert-QodoScoutVersion {
     }
 }
 
-function ConvertFrom-QodoScoutVersionJson {
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Json)
-
-    $match = [regex]::Match(
-        $Json,
-        '^\s*\{\s*"version"\s*:\s*"([^"]+)"\s*\}\s*$',
-        [Text.RegularExpressions.RegexOptions]::CultureInvariant
-    )
-    if (-not $match.Success) {
-        throw 'version.json must contain only a string version property'
-    }
-    $resolvedVersion = $match.Groups[1].Value
-    Assert-QodoScoutVersion -Value $resolvedVersion
-    return $resolvedVersion
-}
-
 function Get-QodoScoutReleaseBaseUrl {
     param([Parameter(Mandatory)][string]$Version)
 
@@ -242,9 +226,10 @@ function Install-QodoScout {
         throw 'install directory must be an absolute path'
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($RequestedVersion)) {
-        Assert-QodoScoutVersion -Value $RequestedVersion
+    if ([string]::IsNullOrWhiteSpace($RequestedVersion)) {
+        throw '-Version is required; install an explicit release'
     }
+    Assert-QodoScoutVersion -Value $RequestedVersion
     if (-not [string]::IsNullOrWhiteSpace($RequestedSourceDirectory)) {
         if ([string]::IsNullOrWhiteSpace($RequestedVersion)) {
             throw '-SourceDir requires -Version so the local release is explicit'
@@ -264,15 +249,6 @@ function Install-QodoScout {
     $stagedInstall = $null
     $rollbackFile = $null
     try {
-        if ([string]::IsNullOrWhiteSpace($RequestedVersion)) {
-            $metadataPath = Join-Path $temporaryDirectory 'version.json'
-            Invoke-QodoScoutDownload `
-                -Uri "$script:QodoScoutBaseUrl/version.json" `
-                -Destination $metadataPath
-            $metadata = Get-Content -LiteralPath $metadataPath -Raw
-            $RequestedVersion = ConvertFrom-QodoScoutVersionJson -Json $metadata
-        }
-
         $releaseBaseUrl = Get-QodoScoutReleaseBaseUrl -Version $RequestedVersion
         $assetUrl = Get-QodoScoutAssetUrl `
             -Version $RequestedVersion `

@@ -61,16 +61,5 @@ release_files | while IFS= read -r filename; do
     "$(release_content_type "$filename")" "$immutable_cache" "cdn-release/${filename}"
 done
 
-mutable_cache='no-cache, max-age=0, must-revalidate'
-release_installers | while IFS= read -r filename; do
-  download_and_verify \
-    "${RELEASE_DIR}/${filename}" "${BASE_URL}/${filename}" \
-    'text/plain; charset=utf-8' "$mutable_cache" "stable-${filename}"
-done
-
-python3 "$ROOT/scripts/version-contract.py" render "$VERSION" > "${work}/expected-version.json"
-download_and_verify \
-  "${work}/expected-version.json" "${BASE_URL}/version.json" \
-  application/json "$mutable_cache" version.json
 (cd "${work}/cdn-release" && sha256sum --strict --check checksums.sha256)
 (cd "${work}/cdn-release" && sha256sum --strict --check installer-checksums.sha256)

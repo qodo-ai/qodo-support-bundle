@@ -21,7 +21,6 @@ env:
   QODO_SUPPORT_BUNDLE_SOURCE_BUCKET: qodo-cli-public-dev
   QODO_SUPPORT_BUNDLE_DESTINATION_BUCKET: qodo-cli-public
   QODO_SUPPORT_BUNDLE_PREFIX: support-bundle
-  QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER: github-${{ github.run_id }}-${{ github.run_attempt }}
   GCP_PROJECT_NUMBER: "67590289846"
   GCP_SERVICE_ACCOUNT: qodo-support-bundle-publisher@codium-production.iam.gserviceaccount.com
 
@@ -130,7 +129,7 @@ jobs:
           ref: main
           persist-credentials: false
 
-      - name: Exercise pinned and metadata-selected production installers
+      - name: Exercise pinned production installer
         env:
           QODO_SUPPORT_BUNDLE_VERSION: ${{ needs.promote.outputs.version }}
         run: sh scripts/canary-production-installers.sh
@@ -140,7 +139,7 @@ jobs:
     runs-on: windows-11-arm
     timeout-minutes: 10
     steps:
-      - name: Exercise pinned and metadata-selected production installer
+      - name: Exercise pinned production installer
         shell: pwsh
         env:
           EXPECTED_VERSION: ${{ needs.promote.outputs.version }}
@@ -148,24 +147,7 @@ jobs:
           $base = 'https://get.qodo.ai/support-bundle'
           $work = Join-Path $env:RUNNER_TEMP 'qodo-scout-production-arm64'
           New-Item -ItemType Directory -Path $work -Force | Out-Null
-          curl.exe --fail --location --silent --show-error --output "$work/install.ps1" "$base/install.ps1"
-          curl.exe --fail --location --silent --show-error --output "$work/version.json" "$base/version.json"
-          $metadata = Get-Content "$work/version.json" -Raw | ConvertFrom-Json
-          if (
-              @($metadata.PSObject.Properties).Count -ne 1 -or
-              $metadata.version -ne $env:EXPECTED_VERSION
-          ) {
-              throw 'production version.json does not match the promoted version'
-          }
-          curl.exe --fail --location --silent --show-error --output "$work/versioned-install.ps1" "$base/releases/$env:EXPECTED_VERSION/install.ps1"
-          if ((Get-FileHash "$work/install.ps1").Hash -ne (Get-FileHash "$work/versioned-install.ps1").Hash) {
-              throw 'stable and versioned Windows installers differ'
-          }
-          & "$work/install.ps1" -InstallDir "$work/metadata"
-          $metadataVersion = (& "$work/metadata/qodo-scout.exe" version).Trim()
-          if ($LASTEXITCODE -ne 0 -or $metadataVersion -ne $env:EXPECTED_VERSION) {
-              throw "metadata-selected Windows ARM64 binary reports '$metadataVersion', expected '$env:EXPECTED_VERSION'"
-          }
+          curl.exe --fail --location --silent --show-error --output "$work/install.ps1" "$base/releases/$env:EXPECTED_VERSION/install.ps1"
           & "$work/install.ps1" -Version $env:EXPECTED_VERSION -InstallDir "$work/pinned"
           $pinnedVersion = (& "$work/pinned/qodo-scout.exe" version).Trim()
           if ($LASTEXITCODE -ne 0 -or $pinnedVersion -ne $env:EXPECTED_VERSION) {

@@ -22,7 +22,7 @@ usage() {
 Usage: sh install.sh [options]
 
 Options:
-  --version VERSION       Install an exact release instead of version.json
+  --version VERSION       Install the required exact release
   --source-dir DIRECTORY  Install from a local binary and checksums.sha256
   --install-dir DIRECTORY Install to a user-owned directory
   --add-to-path           Add the install directory to the user shell profile
@@ -103,43 +103,6 @@ validate_version() {
   printf '%s\n' "$value" |
     grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$' ||
     die "invalid version: $value"
-}
-
-parse_version_json() {
-  file=$1
-  compact=$(awk '
-    BEGIN {
-      in_string = 0
-      escaped = 0
-    }
-    {
-      for (i = 1; i <= length($0); i++) {
-        character = substr($0, i, 1)
-        if (character == "\"" && !escaped) {
-          in_string = !in_string
-        }
-        if (in_string || character !~ /[[:space:]]/) {
-          printf "%s", character
-        }
-        if (character == "\\" && !escaped) {
-          escaped = 1
-        } else {
-          escaped = 0
-        }
-      }
-      if (in_string) {
-        printf "\n"
-      }
-    }
-    END {
-      print ""
-    }
-  ' "$file")
-  parsed=$(printf '%s\n' "$compact" |
-    sed -n 's/^{"version":"\([^"]*\)"}$/\1/p')
-  [ -n "$parsed" ] || die "version.json must contain only a string version property"
-  validate_version "$parsed"
-  printf '%s\n' "$parsed"
 }
 
 download() {
@@ -353,9 +316,8 @@ case "$INSTALL_DIR" in
   *) die "install directory must be an absolute path" ;;
 esac
 
-if [ -n "$VERSION" ]; then
-  validate_version "$VERSION"
-fi
+[ -n "$VERSION" ] || die "--version is required; install an explicit release"
+validate_version "$VERSION"
 if [ -n "$SOURCE_DIR" ]; then
   [ -n "$VERSION" ] ||
     die "--source-dir requires --version so the local release is explicit"
@@ -384,10 +346,6 @@ TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/qodo-scout.XXXXXX") ||
   die "could not create a private temporary directory"
 chmod 0700 "$TEMP_DIR" || die "could not secure temporary directory"
 
-if [ -z "$VERSION" ]; then
-  download "$BASE_URL/version.json" "$TEMP_DIR/version.json"
-  VERSION=$(parse_version_json "$TEMP_DIR/version.json")
-fi
 release_url=$BASE_URL/releases/$VERSION
 binary=$TEMP_DIR/$asset
 manifest=$TEMP_DIR/checksums.sha256

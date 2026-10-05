@@ -1,9 +1,10 @@
 # Qodo Scout installers
 
 `install.sh` and `install.ps1` provide the customer-side installation flow for
-Qodo Scout. They detect the supported platform, resolve a release, download one
-binary and its checksum manifest, verify the exact artifact, install it under
-the stable `qodo-scout` name, and run only the non-collecting `version` command.
+Qodo Scout. They require an explicit version, detect the supported platform,
+download one binary and its checksum manifest from that immutable release,
+verify the exact artifact, install it as `qodo-scout`, and run only the
+non-collecting `version` command.
 Collection starts only when the customer runs:
 
 ```text
@@ -21,10 +22,10 @@ After publication, macOS and Linux customers can inspect and run:
 
 ```sh
 curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 \
-  -o install.sh \
-  https://get.qodo.ai/support-bundle/install.sh
-less install.sh
-sh ./install.sh --add-to-path
+  -o install-qodo-scout.sh \
+  https://get.qodo.ai/support-bundle/releases/0.3.0/install.sh
+less install-qodo-scout.sh
+sh ./install-qodo-scout.sh --version 0.3.0 --add-to-path
 ```
 
 Windows customers can inspect and run from PowerShell:
@@ -32,10 +33,10 @@ Windows customers can inspect and run from PowerShell:
 ```powershell
 curl.exe --fail --location --proto '=https' --tlsv1.2 `
   --proto-redir '=https' `
-  --output install.ps1 `
-  https://get.qodo.ai/support-bundle/install.ps1
-Get-Content .\install.ps1
-& .\install.ps1 -AddToPath
+  --output install-qodo-scout.ps1 `
+  https://get.qodo.ai/support-bundle/releases/0.3.0/install.ps1
+Get-Content .\install-qodo-scout.ps1
+& .\install-qodo-scout.ps1 -Version 0.3.0 -AddToPath
 ```
 
 For convenience, the same endpoints can be executed without saving a copy:
@@ -48,8 +49,8 @@ For convenience, the same endpoints can be executed without saving a copy:
   trap 'exit 1' HUP INT TERM
   curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 \
     -o "$installer" \
-    https://get.qodo.ai/support-bundle/install.sh
-  sh "$installer" --add-to-path
+    https://get.qodo.ai/support-bundle/releases/0.3.0/install.sh
+  sh "$installer" --version 0.3.0 --add-to-path
 )
 ```
 
@@ -61,9 +62,9 @@ For convenience, the same endpoints can be executed without saving a copy:
   try {
     curl.exe --fail --location --proto '=https' --proto-redir '=https' `
       --tlsv1.2 --output $installer `
-      https://get.qodo.ai/support-bundle/install.ps1
+      https://get.qodo.ai/support-bundle/releases/0.3.0/install.ps1
     if ($LASTEXITCODE -ne 0) { throw 'Installer download failed' }
-    & $installer -AddToPath
+    & $installer -Version 0.3.0 -AddToPath
     if (-not $?) { throw 'Installer execution failed' }
   } finally {
     Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
@@ -81,14 +82,14 @@ new terminal before using the short command. The installer also prints a
 full-path command that works immediately. Neither installer requests
 administrator privileges or changes machine-wide PATH configuration.
 
-To install a known release for reproducibility or rollback:
+All installations are pinned for reproducibility:
 
 ```sh
-sh ./install.sh --version 0.2.0 --add-to-path
+sh ./install-qodo-scout.sh --version 0.3.0 --add-to-path
 ```
 
 ```powershell
-& .\install.ps1 -Version 0.2.0 -AddToPath
+& .\install-qodo-scout.ps1 -Version 0.3.0 -AddToPath
 ```
 
 The published artifact names remain
@@ -125,14 +126,14 @@ An approved local directory may contain the platform binary and the release's
 
 ```sh
 sh ./install.sh \
-  --version 0.2.0 \
+  --version 0.3.0 \
   --source-dir /approved/qodo-scout-release \
   --add-to-path
 ```
 
 ```powershell
 & .\install.ps1 `
-  -Version 0.2.0 `
+  -Version 0.3.0 `
   -SourceDir C:\Approved\QodoScoutRelease `
   -AddToPath
 ```
@@ -193,27 +194,20 @@ Also retain the release version and source release URL in the approved handoff
 record. Support should verify the connected copy before transfer; the customer
 verifies it again offline.
 
-## `version.json` contract
+## Immutable version contract
 
-The unversioned metadata response has exactly one string property:
-
-```json
-{ "version": "0.2.0" }
-```
-
-Installers reject additional properties, missing values, non-string values, and
-versions outside the release version grammar. A resolved release uses:
+Both installers require `--version` or `-Version` and reject missing or invalid
+versions. Every download uses the selected release directory:
 
 ```text
 https://get.qodo.ai/support-bundle/releases/<version>/
 ```
 
-The publication workflow updates `version.json` atomically only after every
-production artifact, manifest, and stable installer has been published and
-verified. Metadata uses
-`Cache-Control: no-cache, max-age=0, must-revalidate`; immutable release
-objects retain one-year immutable caching. No live-current metadata file is
-committed to the repository because it could drift from production.
+All release objects use one-year immutable caching. Root installer aliases and
+current-version metadata are unsupported and may be absent. Documentation and
+portal instructions must be updated to an exact version for every release.
+This makes customer commands reproducible and lets publication remain
+create-only, at the cost of no automatic latest-version selection.
 
 ## Security and proxy behavior
 
@@ -245,7 +239,7 @@ For independent provenance verification, download the versioned release assets
 from the matching GitHub release and verify their attestations:
 
 ```sh
-release_tag=v0.2.0
+release_tag=v0.3.0
 release_sha="$(
   gh api "repos/qodo-ai/qodo-support-bundle/commits/$release_tag" --jq .sha
 )"
@@ -311,9 +305,9 @@ used, substitute that exact directory.
 
 ## Troubleshooting
 
-- **Stable URL returns 404:** expected before the first approved production
-  promotion. Maintainers should verify publication status; customers should not
-  substitute an unapproved URL.
+- **Root installer or metadata URL returns 404:** those mutable paths are not
+  supported. Use the documented version-specific installer URL and explicit
+  version.
 - **`curl` or checksum tool missing:** install `curl` and either `sha256sum` or
   `shasum` through the workstation's approved software channel. Windows uses
   built-in `curl.exe` and `Get-FileHash`.
