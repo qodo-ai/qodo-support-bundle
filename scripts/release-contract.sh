@@ -247,6 +247,7 @@ repair_stable_installers() {
   work=$5
   existing=$6
   command_name=$7
+  require_active_version=${8:-0}
   mutable_cache='no-cache, max-age=0, must-revalidate'
   immutable_cache='public, max-age=31536000, immutable'
 
@@ -258,7 +259,13 @@ repair_stable_installers() {
     :
   else
     read_status=$?
-    [ "$read_status" -eq 1 ] && return 0
+    if [ "$read_status" -eq 1 ]; then
+      if [ "$require_active_version" -eq 1 ]; then
+        echo "${command_name}: cannot reconcile stable installers without an active version" >&2
+        return 1
+      fi
+      return 0
+    fi
     return 1
   fi
   active_version="$(python3 "$version_script" read "$pointer")"

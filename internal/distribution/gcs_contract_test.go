@@ -464,6 +464,136 @@ func TestPublishRejectsConcurrentVersionCASConflict(t *testing.T) {
 	}
 }
 
+func TestPublicationRepairsStableInstallersAfterPartialUploadFailure(t *testing.T) {
+	t.Parallel()
+	root := repositoryRoot(t)
+	for _, test := range []struct {
+		name   string
+		script string
+		bucket string
+	}{
+		{
+			name:   "publish",
+			script: "scripts/publish-gcs.sh",
+			bucket: "qodo-cli-public-dev",
+		},
+		{
+			name:   "promote",
+			script: "scripts/promote-gcs.sh",
+			bucket: "qodo-cli-public",
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			candidate := t.TempDir()
+			active := t.TempDir()
+			fakeGCS := t.TempDir()
+			requests := filepath.Join(t.TempDir(), "requests.log")
+			bin := installFakeGCSCommands(t)
+			writeReleaseFixture(t, candidate, "candidate")
+			writeReleaseFixture(t, active, "active")
+			copyReleaseFixture(t, active, filepath.Join(
+				fakeGCS,
+				test.bucket,
+				"support-bundle",
+				"releases",
+				"1.0.0",
+			))
+			seedActivatedRelease(t, fakeGCS, test.bucket, active, "1.0.0")
+
+			environment := []string{
+				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"FAKE_GCS_ROOT=" + fakeGCS,
+				"FAKE_REQUESTS=" + requests,
+				"FAKE_FAIL_PUT_OBJECT=/support-bundle/install.ps1",
+				"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=partial-upload-test",
+				"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
+			}
+			if test.name == "publish" {
+				environment = append(
+					environment,
+					"QODO_SUPPORT_BUNDLE_DIST="+candidate,
+				)
+			} else {
+				copyReleaseFixture(t, candidate, filepath.Join(
+					fakeGCS,
+					"qodo-cli-public-dev",
+					"support-bundle",
+					"releases",
+					"1.2.3",
+				))
+				seedActivatedRelease(
+					t,
+					fakeGCS,
+					"qodo-cli-public-dev",
+					candidate,
+					"1.2.3",
+				)
+				environment = append(
+					environment,
+					"QODO_SUPPORT_BUNDLE_RELEASE_DIR="+candidate,
+				)
+			}
+
+			command := exec.Command(filepath.Join(root, test.script))
+			command.Env = append(os.Environ(), environment...)
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatal("publication accepted a failed stable installer upload")
+			}
+			if !strings.Contains(string(output), "stable installers were reconciled") {
+				t.Fatalf("failure did not report reconciliation:\n%s", output)
+			}
+
+			for _, filename := range releaseInstallers {
+				expected, readErr := os.ReadFile(filepath.Join(active, filename))
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				actual, readErr := os.ReadFile(filepath.Join(
+					fakeGCS,
+					test.bucket,
+					"support-bundle",
+					filename,
+				))
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if string(actual) != string(expected) {
+					t.Fatalf("stable %s was not restored to the active version", filename)
+				}
+			}
+
+			metadata, readErr := os.ReadFile(filepath.Join(
+				fakeGCS,
+				test.bucket,
+				"support-bundle",
+				"version.json",
+			))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !strings.Contains(string(metadata), "1.0.0") {
+				t.Fatalf("failed activation changed the version pointer: %s", metadata)
+			}
+			lock, readErr := os.ReadFile(filepath.Join(
+				fakeGCS,
+				test.bucket,
+				"support-bundle",
+				"control",
+				"publication-lock.json",
+			))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if string(lock) != "{\"owner\":\"\"}\n" {
+				t.Fatalf("reconciled failure did not release the lock: %s", lock)
+			}
+		})
+	}
+}
+
 func TestPublishRejectsIdenticalVersionRewrite(t *testing.T) {
 	t.Parallel()
 	root := repositoryRoot(t)
@@ -1064,6 +1194,12 @@ printf '%s|%s|%s|%s|%s\n' \
   "$method" "$url" "$content_type" "$cache_control" "$generation" >> "$FAKE_REQUESTS"
 case "$method" in
   PUT)
+    if [ -n "${FAKE_FAIL_PUT_OBJECT:-}" ] &&
+      [ "${url%$FAKE_FAIL_PUT_OBJECT}" != "$url" ] &&
+      [ ! -f "$FAKE_GCS_ROOT/.put-failure-injected" ]; then
+      : > "$FAKE_GCS_ROOT/.put-failure-injected"
+      exit 22
+    fi
     if [ -n "${FAKE_CONFLICT_OBJECT:-}" ] &&
       [ "${url%$FAKE_CONFLICT_OBJECT}" != "$url" ] &&
       [ ! -f "$FAKE_GCS_ROOT/.conflict-injected" ]; then

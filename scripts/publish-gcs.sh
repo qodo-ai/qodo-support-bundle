@@ -24,10 +24,24 @@ validate_release_directory "$DIST" publish-gcs
 access_token="$(gcloud auth print-access-token)"
 work="$(mktemp -d)"
 PUBLICATION_LOCK_HELD=0
+MUTABLE_ACTIVATION_STARTED=0
+ACTIVATION_COMMITTED=0
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
   if [ "$PUBLICATION_LOCK_HELD" -eq 1 ]; then
+    if [ "$status" -ne 0 ] &&
+      [ "$MUTABLE_ACTIVATION_STARTED" -eq 1 ] &&
+      [ "$ACTIVATION_COMMITTED" -eq 0 ]; then
+      if ! repair_stable_installers \
+        "$ROOT/scripts/version-contract.py" "$BUCKET" "$PREFIX" "$access_token" \
+        "$work" "$existing" publish-gcs 1; then
+        echo "publish-gcs: activation failed and stable installers could not be reconciled; publication lock retained for operator recovery" >&2
+        rm -rf "$work"
+        exit 1
+      fi
+      echo "publish-gcs: activation failed; stable installers were reconciled" >&2
+    fi
     release_publication_lock \
       "$BUCKET" "$PREFIX" "$access_token" "$work" publish-gcs || status=1
   fi
@@ -95,6 +109,7 @@ else
 fi
 
 mutable_cache='no-cache, max-age=0, must-revalidate'
+MUTABLE_ACTIVATION_STARTED=1
 release_installers | while IFS= read -r filename; do
   gcs_upload_mutable \
     "${DIST}/${filename}" "$BUCKET" "${PREFIX}/${filename}" \
@@ -107,20 +122,15 @@ release_installers | while IFS= read -r filename; do
 done
 
 # The discoverable pointer is committed only after every release object validates.
-if ! gcs_upload_mutable \
+gcs_upload_mutable \
   "$metadata" "$BUCKET" "${PREFIX}/version.json" \
   application/json "$mutable_cache" \
-  "$access_token" "$existing" publish-gcs "$metadata_generation"; then
-  repair_stable_installers \
-    "$ROOT/scripts/version-contract.py" "$BUCKET" "$PREFIX" "$access_token" \
-    "$work" "$existing" publish-gcs
-  echo "publish-gcs: activation lost a concurrent update; stable installers were reconciled" >&2
-  exit 1
-fi
+  "$access_token" "$existing" publish-gcs "$metadata_generation"
 gcs_verify_exact \
   "$metadata" "$BUCKET" "${PREFIX}/version.json" \
   application/json "$mutable_cache" \
   "$access_token" "$existing" publish-gcs
+ACTIVATION_COMMITTED=1
 
 release_publication_lock \
   "$BUCKET" "$PREFIX" "$access_token" "$work" publish-gcs

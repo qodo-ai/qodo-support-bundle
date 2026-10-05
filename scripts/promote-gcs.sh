@@ -24,10 +24,24 @@ work="$(mktemp -d)"
 existing="${work}/existing"
 access_token=
 PUBLICATION_LOCK_HELD=0
+MUTABLE_ACTIVATION_STARTED=0
+ACTIVATION_COMMITTED=0
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
   if [ "$PUBLICATION_LOCK_HELD" -eq 1 ]; then
+    if [ "$status" -ne 0 ] &&
+      [ "$MUTABLE_ACTIVATION_STARTED" -eq 1 ] &&
+      [ "$ACTIVATION_COMMITTED" -eq 0 ]; then
+      if ! repair_stable_installers \
+        "$ROOT/scripts/version-contract.py" "$DESTINATION_BUCKET" "$PREFIX" \
+        "$access_token" "$work" "$existing" promote-gcs 1; then
+        echo "promote-gcs: activation failed and stable installers could not be reconciled; publication lock retained for operator recovery" >&2
+        rm -rf "$work"
+        exit 1
+      fi
+      echo "promote-gcs: activation failed; stable installers were reconciled" >&2
+    fi
     release_publication_lock \
       "$DESTINATION_BUCKET" "$PREFIX" "$access_token" "$work" promote-gcs ||
       status=1
@@ -140,6 +154,7 @@ else
   [ "$read_status" -eq 1 ] || exit 1
 fi
 
+MUTABLE_ACTIVATION_STARTED=1
 release_installers | while IFS= read -r filename; do
   gcs_upload_mutable \
     "${work}/${filename}" "$DESTINATION_BUCKET" "${PREFIX}/${filename}" \
@@ -152,19 +167,14 @@ release_installers | while IFS= read -r filename; do
 done
 
 # The production pointer is last and retains the generation observed pre-promotion.
-if ! gcs_upload_mutable \
+gcs_upload_mutable \
   "$metadata" "$DESTINATION_BUCKET" "${PREFIX}/version.json" \
   application/json "$mutable_cache" "$access_token" "$existing" \
-  promote-gcs "$metadata_generation"; then
-  repair_stable_installers \
-    "$ROOT/scripts/version-contract.py" "$DESTINATION_BUCKET" "$PREFIX" \
-    "$access_token" "$work" "$existing" promote-gcs
-  echo "promote-gcs: activation lost a concurrent update; stable installers were reconciled" >&2
-  exit 1
-fi
+  promote-gcs "$metadata_generation"
 gcs_verify_exact \
   "$metadata" "$DESTINATION_BUCKET" "${PREFIX}/version.json" \
   application/json "$mutable_cache" "$access_token" "$existing" promote-gcs
+ACTIVATION_COMMITTED=1
 
 release_publication_lock \
   "$DESTINATION_BUCKET" "$PREFIX" "$access_token" "$work" promote-gcs
