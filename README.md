@@ -15,12 +15,12 @@ sensitive text is redacted.
 
 ## Install
 
-Cross-platform installers are included for review but are not published by this
-change. After the follow-up publication work is deployed, they will resolve
-`version.json`, select and verify the matching release artifact, and install the
-stable `qodo-scout` command without sudo or administrator access. See
-[the installer contract and commands](docs/installers.md) for connected,
-pinned, PATH, proxy, and air-gapped usage.
+Cross-platform installers resolve `version.json`, select and verify the matching
+release artifact, and install the stable `qodo-scout` command without sudo or
+administrator access. Merging the publication code does not publish live
+objects; stable endpoints return 404 until the manual dev and approved
+production workflows run. See [the installer contract and commands](docs/installers.md)
+and [the publication runbook](docs/publication.md).
 
 The installer runs only a local `version` smoke check. It never starts
 collection. The customer starts the guided flow explicitly:
@@ -700,8 +700,8 @@ gh attestation verify ./qodo-support-bundle-linux-amd64 \
 ```
 
 After a GitHub release is validated, the manually dispatched dev-publication
-workflow downloads and verifies its attestations before publishing the exact
-bytes to the existing Qodo CLI dev-canary bucket under an isolated prefix:
+workflow downloads and verifies all ten asset attestations before publishing
+the exact bytes to the existing Qodo CLI dev-canary bucket:
 
 ```text
 gs://qodo-cli-public-dev/support-bundle/releases/<version>/
@@ -709,22 +709,20 @@ gs://qodo-cli-public-dev/support-bundle/releases/<version>/
 
 After canary validation, the manually approved promotion workflow independently
 downloads and verifies the attested GitHub release, rejects any dev-canary
-object that is not byte-identical to it, and then copies those bytes without
-rebuilding to:
+object that is not byte-identical to it, and promotes those bytes without
+rebuilding. Stable installers are validated before `version.json` is updated:
 
 ```text
 gs://qodo-cli-public/support-bundle/releases/<version>/
 https://get.qodo.ai/support-bundle/releases/<version>/
 ```
 
-The Qodo CLI continues to own the bucket root. Support Bundle workflows read
-and create only objects under the `support-bundle/` prefix. Uploads use
-exact-object Cloud Storage API requests with a zero-generation precondition;
-an existing object is accepted only after an exact-object download matches its
-expected SHA-256. The six binaries are created before `checksums.sha256`, which
-acts as the release completion marker. The publisher does not need
-`storage.objects.list`, overwrite, or delete permission, so it cannot enumerate
-names elsewhere in the shared bucket.
+The Qodo CLI continues to own the bucket root. Support Bundle workflows operate
+only under `support-bundle/`. Versioned uploads use create-only exact-object
+requests; stable installers and metadata use generation CAS. Identical reruns
+succeed without overwriting, conflicts fail, and semantic version checks prevent
+pointer rollback. The publisher does not need `storage.objects.list` or delete
+permission. See [the exact object, ordering, cache, and rollback contract](docs/publication.md).
 
 ## Customer delivery
 
