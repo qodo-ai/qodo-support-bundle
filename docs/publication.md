@@ -78,6 +78,31 @@ misconfigured.
 
 Neither canary starts cluster collection.
 
+## Operator dispatch checklist
+
+1. Confirm the intended commit is on `main`, the version follows the installer
+   grammar, and the matching GitHub release is published.
+2. Let `.github/workflows/release-support-bundle.yaml` process the published
+   release. A manual release run is recovery-only: run it from the matching tag
+   ref and provide that same tag, never from an unrelated branch.
+3. After the release assets, attestations, and native smoke jobs pass, manually
+   dispatch `.github/workflows/publish-support-bundle.yaml` from `main` with the
+   release version (for example `1.2.3`; the workflow also resolves its matching
+   `v1.2.3` tag).
+4. Review all dev object validation and pinned and metadata-driven canary
+   evidence. Stop on any mismatch; do not proceed merely because immutable
+   uploads succeeded.
+5. Manually dispatch `.github/workflows/promote-support-bundle.yaml` from
+   `main` with the same version. A named reviewer must approve the protected
+   `production` environment before promotion can run.
+6. Review exact GitHub/dev/CDN byte identity, headers, and every public canary.
+   Preserve the workflow URLs, checksums, object generations, and approver in
+   the release record.
+
+Workflow dispatch, environment approval, cloud credentials, and any lock
+recovery are live operational actions. This runbook documents them but does not
+authorize them.
+
 ## Concurrency, reruns, and rollback
 
 Versioned objects are create-only with generation-match `0`. Identical bytes
@@ -118,6 +143,9 @@ fixed version. The monotonic pointer contract intentionally rejects moving
 Merging code does not publish anything. The following remain explicit operator
 actions:
 
+- complete and approve the
+  [public distribution readiness checklist](public-readiness.md) before a
+  customer pilot;
 - dispatch dev publication from `main`;
 - review dev canary evidence;
 - approve the protected production environment;

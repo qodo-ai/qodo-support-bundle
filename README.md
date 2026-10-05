@@ -20,7 +20,9 @@ release artifact, and install the stable `qodo-scout` command without sudo or
 administrator access. Merging the publication code does not publish live
 objects; stable endpoints return 404 until the manual dev and approved
 production workflows run. See [the installer contract and commands](docs/installers.md)
-and [the publication runbook](docs/publication.md).
+and [the publication runbook](docs/publication.md). Maintainers preparing a
+pilot must complete the
+[public distribution readiness checklist](docs/public-readiness.md).
 
 The installer runs only a local `version` smoke check. It never starts
 collection. The customer starts the guided flow explicitly:
@@ -28,6 +30,11 @@ collection. The customer starts the guided flow explicitly:
 ```bash
 qodo-scout collect --interactive
 ```
+
+Security boundaries and platform assurance are documented in the
+[security model](docs/security-model.md). See [CONTRIBUTING.md](CONTRIBUTING.md)
+to propose a change and [SECURITY.md](SECURITY.md) to report a vulnerability
+privately.
 
 ## Prerequisites and scope
 
@@ -690,60 +697,30 @@ Checksums detect corruption but do not authenticate provenance. Treat bundles
 as sensitive, review them before sharing, and use an approved authenticated
 channel.
 
-Official release binaries include six targets (Linux amd64/arm64, macOS
-amd64/arm64, and Windows amd64/arm64), distribution checksums, and GitHub build
-provenance. Verify a downloaded binary with:
-
-```bash
-gh attestation verify ./qodo-support-bundle-linux-amd64 \
-  --repo qodo-ai/qodo-support-bundle
-```
-
-After a GitHub release is validated, the manually dispatched dev-publication
-workflow downloads and verifies all ten asset attestations before publishing
-the exact bytes to the existing Qodo CLI dev-canary bucket:
-
-```text
-gs://qodo-cli-public-dev/support-bundle/releases/<version>/
-```
-
-After canary validation, the manually approved promotion workflow independently
-downloads and verifies the attested GitHub release, rejects any dev-canary
-object that is not byte-identical to it, and promotes those bytes without
-rebuilding. Stable installers are validated before `version.json` is updated:
-
-```text
-gs://qodo-cli-public/support-bundle/releases/<version>/
-https://get.qodo.ai/support-bundle/releases/<version>/
-```
-
-The Qodo CLI continues to own the bucket root. Support Bundle workflows operate
-only under `support-bundle/`. Versioned uploads use create-only exact-object
-requests; stable installers and metadata use generation CAS. Identical reruns
-succeed without overwriting, conflicts fail, and semantic version checks prevent
-pointer rollback. The publisher does not need `storage.objects.list` or delete
-permission. See [the exact object, ordering, cache, and rollback contract](docs/publication.md).
+Official releases include six native targets, checksum manifests, installer
+scripts, and GitHub build provenance. Customer verification commands live in
+[the installer guide](docs/installers.md). Maintainers should use
+[the publication runbook](docs/publication.md) as the single source for object
+inventory, attestation constraints, publication ordering, cache behavior,
+concurrency, approval, and rollback.
 
 ## Customer delivery
 
-For a customer workstation that can reach GitHub, provide the matching binary,
-`checksums.sha256`, and the release URL. The customer verifies the binary after
-download, makes it executable on Linux or macOS, and runs it from any directory:
+For a connected customer workstation, use the stable HTTPS installer commands
+in [the installer guide](docs/installers.md). The release artifact keeps the
+compatibility name `qodo-support-bundle-<os>-<arch>[.exe]`; the installer
+provides the stable `qodo-scout` command.
 
-```bash
-grep ' qodo-support-bundle-darwin-arm64$' checksums.sha256 | shasum -a 256 -c -
-chmod 700 qodo-support-bundle-darwin-arm64
-./qodo-support-bundle-darwin-arm64 collect --context customer-production
-```
-
-For a customer environment that cannot reach Qodo or GitHub, Support downloads
-the same release binary and checksum on an approved connected workstation,
-verifies them, and places them together in the existing case-specific customer
-handoff ZIP. Deliver that ZIP through the channel already approved for the
-customer, such as a private support-case attachment or authenticated,
-time-limited download. The customer transfers it to the operator workstation
-and verifies the checksum again before running it. No cluster image, Helm
-upgrade, sidecar, or permanent installation is required.
+For an environment that cannot reach Qodo or GitHub, Support prepares the
+documented air-gapped handoff on an approved connected workstation: the
+platform installer, matching native binary, `checksums.sha256`,
+`installer-checksums.sha256`, exact release version, and source release record.
+Deliver it through the channel already approved for the customer, such as a
+private support-case attachment or authenticated, time-limited download. The
+customer verifies the installer first, then uses its `--source-dir` or
+`-SourceDir` mode to verify and install the binary without network requests.
+No cluster image, Helm upgrade, sidecar, or administrator installation is
+required.
 
 ## Build, test, and release
 
