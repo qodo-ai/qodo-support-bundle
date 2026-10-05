@@ -17,13 +17,35 @@ The operator workstation is the main trust boundary:
 - collected data and the final archive remain on the local filesystem until
   the customer shares them through an approved channel; and
 - optional Prometheus, Phoenix, and Zitadel operations occur only when selected
-  and use the bounded behaviors documented in the main README.
+  and use the bounded behaviors documented in the
+  [collection guide](collection.md).
 
 The distribution boundary consists of GitHub release provenance and immutable,
 version-specific GCS objects. Publication verifies exact bytes and headers in
 dev and requires production approval. There are no mutable aliases, latest
 metadata, or publication locks in the supported contract. See
 [the publication runbook](publication.md).
+
+## Kubernetes RBAC
+
+The baseline namespace role needs `get` and `list` access to:
+
+- pods, events, services, persistent volume claims, and pod logs;
+- deployments, stateful sets, and daemon sets;
+- jobs and cron jobs;
+- endpoint slices; and
+- horizontal pod autoscalers.
+
+Qodo Scout never requests Secrets or ConfigMaps. Automatic namespace discovery
+and `--all-namespaces` additionally require cluster-scoped `list` access to
+namespaces. Optional collection requires narrowly scoped `create` access only
+for the selected feature:
+
+- `pods/portforward` in each selected Prometheus or Phoenix service namespace;
+- `pods/exec` in the selected Platform namespace for the Zitadel check.
+
+Remove temporary bindings after collection. The customer controls all RBAC
+grants; Qodo Scout does not create roles or bindings.
 
 ## Explicit non-goals
 

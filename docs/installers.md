@@ -13,12 +13,12 @@ qodo-scout collect --interactive
 
 ## Publication status
 
-Publication is implemented as manually dispatched dev and approved production
-workflows. Merging the implementation does not run either workflow. The URLs
-below return 404 until an operator publishes and promotes the first release.
-See [the publication contract and runbook](publication.md).
+Version 0.3.0 is published at the immutable URLs below. Future versions require
+the manually dispatched dev and approved production workflows; merging
+publication code alone does not publish release objects. See
+[the publication contract and runbook](publication.md).
 
-After publication, macOS and Linux customers can inspect and run:
+macOS and Linux customers can inspect and run:
 
 ```sh
 rm -f ./install-qodo-scout.sh
