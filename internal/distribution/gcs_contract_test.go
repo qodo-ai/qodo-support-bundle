@@ -422,6 +422,7 @@ func TestGCSWorkflowsUseOIDCAndSeparateDevFromProduction(t *testing.T) {
 		"canary-dev-installers.sh",
 		"windows-11-arm",
 		"qodo-scout.exe\" version",
+		"function global:curl.exe",
 		"group: support-bundle-dev-publication",
 	} {
 		if !strings.Contains(publication, required) {
@@ -461,6 +462,9 @@ func TestGCSWorkflowsUseOIDCAndSeparateDevFromProduction(t *testing.T) {
 	}
 	if strings.Contains(publication, "qodo-cli-public\n") {
 		t.Fatal("publication workflow can write the production bucket directly")
+	}
+	if strings.Contains(publication, "-SourceDir") {
+		t.Fatal("dev Windows canary bypasses the network download path")
 	}
 	for name, workflow := range map[string]string{
 		"publication": publication,
@@ -529,8 +533,9 @@ func TestCanariesRunVersionOnlyAndReleaseHasTenAssets(t *testing.T) {
 		}
 	}
 	dev := readText(t, filepath.Join(root, "scripts/canary-dev-installers.sh"))
-	if !strings.Contains(dev, `sh "${release}/install.sh" \`) ||
-		!strings.Contains(dev, `gcloud storage cp \`) {
+	if !strings.Contains(dev, `PATH="${work}/bin:${PATH}" sh "${work}/install.sh" \`) ||
+		!strings.Contains(dev, `gcloud storage cp \`) ||
+		!strings.Contains(dev, `"releases/${QODO_SUPPORT_BUNDLE_VERSION}/checksums.sha256"`) {
 		t.Fatal("dev canary does not exercise the versioned installer")
 	}
 	makefile := readText(t, filepath.Join(root, "Makefile"))

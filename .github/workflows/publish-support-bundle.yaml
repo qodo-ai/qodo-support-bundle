@@ -135,17 +135,42 @@ jobs:
           EXPECTED_VERSION: ${{ inputs.version }}
         run: |
           $work = Join-Path $env:RUNNER_TEMP 'qodo-scout-dev-arm64'
-          $release = Join-Path $work 'release'
           $version = $env:EXPECTED_VERSION.TrimStart('v')
-          New-Item -ItemType Directory -Path $release -Force | Out-Null
-          foreach ($name in @(
-              'install.ps1',
-              'checksums.sha256',
-              'qodo-support-bundle-windows-arm64.exe'
-          )) {
-              gcloud storage cp "gs://$env:QODO_SUPPORT_BUNDLE_BUCKET/$env:QODO_SUPPORT_BUNDLE_PREFIX/releases/$version/$name" "$release/$name"
+          New-Item -ItemType Directory -Path $work -Force | Out-Null
+          gcloud storage cp "gs://$env:QODO_SUPPORT_BUNDLE_BUCKET/$env:QODO_SUPPORT_BUNDLE_PREFIX/releases/$version/install.ps1" "$work/install.ps1"
+
+          function global:curl.exe {
+              param(
+                  [Parameter(ValueFromRemainingArguments = $true)]
+                  [string[]]$CurlArguments
+              )
+              $destination = $null
+              $url = $null
+              for ($index = 0; $index -lt $CurlArguments.Count; $index++) {
+                  if ($CurlArguments[$index] -eq '--output') {
+                      $destination = $CurlArguments[++$index]
+                  } elseif ($CurlArguments[$index] -like 'https://get.qodo.ai/support-bundle/*') {
+                      $url = $CurlArguments[$index]
+                  }
+              }
+              if (-not $destination -or -not $url) {
+                  throw 'dev canary curl received an unexpected request'
+              }
+              $relative = $url.Substring('https://get.qodo.ai/support-bundle/'.Length)
+              $allowed = @(
+                  "releases/$version/checksums.sha256",
+                  "releases/$version/qodo-support-bundle-windows-arm64.exe"
+              )
+              if ($relative -notin $allowed) {
+                  throw "dev canary curl received an unexpected object: $relative"
+              }
+              gcloud storage cp "gs://$env:QODO_SUPPORT_BUNDLE_BUCKET/$env:QODO_SUPPORT_BUNDLE_PREFIX/$relative" $destination
+              if ($LASTEXITCODE -ne 0) {
+                  throw "failed to download dev object: $relative"
+              }
           }
-          & "$release/install.ps1" -Version $version -SourceDir $release -InstallDir "$work/pinned"
+
+          & "$work/install.ps1" -Version $version -InstallDir "$work/pinned"
           $pinnedVersion = (& "$work/pinned/qodo-scout.exe" version).Trim()
           if ($LASTEXITCODE -ne 0 -or $pinnedVersion -ne $version) {
               throw "pinned native Windows ARM64 binary reports '$pinnedVersion', expected '$version'"
