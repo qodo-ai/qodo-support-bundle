@@ -146,50 +146,6 @@ gcs_upload_immutable() {
   return 1
 }
 
-gcs_upload_mutable() {
-  source_path=$1
-  bucket=$2
-  object=$3
-  content_type=$4
-  cache_control=$5
-  access_token=$6
-  existing=$7
-  command_name=$8
-  expected_generation=${9-}
-  headers="${existing}.headers"
-
-  if gcs_read_exact \
-    "$bucket" "$object" "$access_token" "$existing" "$headers" "$command_name"; then
-    observed_generation="$(gcs_header_value x-goog-generation "$headers")"
-    [ -n "$observed_generation" ] || {
-      echo "${command_name}: existing object has no generation: gs://${bucket}/${object}" >&2
-      return 1
-    }
-    if [ -n "$expected_generation" ] &&
-      [ "$observed_generation" != "$expected_generation" ]; then
-      echo "${command_name}: generation changed for gs://${bucket}/${object}" >&2
-      return 1
-    fi
-    if gcs_object_matches \
-      "$source_path" "$existing" "$headers" "$content_type" "$cache_control"; then
-      echo "${command_name}: mutable object already matches: gs://${bucket}/${object}" >&2
-      return
-    fi
-  else
-    read_status=$?
-    [ "$read_status" -eq 1 ] || return 1
-    observed_generation=0
-  fi
-
-  generation=${expected_generation:-$observed_generation}
-  if ! gcs_conditional_put \
-    "$source_path" "$bucket" "$object" "$content_type" "$cache_control" \
-    "$generation" "$access_token" "$command_name"; then
-    echo "${command_name}: conditional write conflict for gs://${bucket}/${object}" >&2
-    return 1
-  fi
-}
-
 gcs_verify_exact() {
   expected_path=$1
   bucket=$2

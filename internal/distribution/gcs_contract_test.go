@@ -65,65 +65,6 @@ func TestWindowsARM64ReleaseCrossCompilesToNativePE(t *testing.T) {
 	}
 }
 
-func TestVersionContractRendersStrictMetadataAndOrdersSemantically(t *testing.T) {
-	t.Parallel()
-	root := repositoryRoot(t)
-	script := filepath.Join(root, "scripts/version-contract.py")
-	render := exec.Command("python3", script, "render", "1.2.3")
-	output, err := render.CombinedOutput()
-	if err != nil {
-		t.Fatalf("render version metadata: %v\n%s", err, output)
-	}
-	if string(output) != "{\"version\": \"1.2.3\"}\n" {
-		t.Fatalf("unexpected version metadata: %q", output)
-	}
-
-	current := filepath.Join(t.TempDir(), "version.json")
-	if err := os.WriteFile(current, output, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	read := exec.Command("python3", script, "read", current)
-	readOutput, err := read.CombinedOutput()
-	if err != nil || string(readOutput) != "1.2.3\n" {
-		t.Fatalf("read version metadata: %v\n%s", err, readOutput)
-	}
-	for _, candidate := range []string{"1.2.3", "1.2.4", "2.0.0"} {
-		command := exec.Command("python3", script, "allow-update", current, candidate)
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("allow update to %s: %v\n%s", candidate, err, output)
-		}
-	}
-	command := exec.Command("python3", script, "allow-update", current, "1.2.2")
-	if output, err := command.CombinedOutput(); err == nil ||
-		!strings.Contains(string(output), "refusing version downgrade") {
-		t.Fatalf("downgrade result = %v\n%s", err, output)
-	}
-
-	duplicate := filepath.Join(t.TempDir(), "duplicate-version.json")
-	if err := os.WriteFile(
-		duplicate,
-		[]byte(`{"version":"1.2.3","version":"1.2.4"}`),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	for _, arguments := range [][]string{
-		{"read", duplicate},
-		{"allow-update", duplicate, "1.2.5"},
-	} {
-		command := exec.Command("python3", append([]string{script}, arguments...)...)
-		if output, err := command.CombinedOutput(); err == nil ||
-			!strings.Contains(string(output), "duplicate JSON property") {
-			t.Fatalf("duplicate metadata result = %v\n%s", err, output)
-		}
-	}
-	invalid := exec.Command("python3", script, "render", "1.2.3--")
-	if output, err := invalid.CombinedOutput(); err == nil ||
-		!strings.Contains(string(output), "invalid version") {
-		t.Fatalf("punctuation-leading suffix result = %v\n%s", err, output)
-	}
-}
-
 func TestGCSScriptsUseVersionedImmutableSupportBundlePrefix(t *testing.T) {
 	t.Parallel()
 	root := repositoryRoot(t)
@@ -144,22 +85,24 @@ func TestGCSScriptsUseVersionedImmutableSupportBundlePrefix(t *testing.T) {
 				"support-bundle",
 				"releases/${VERSION}",
 				"gcs-exact-object.sh",
-				"gcs_upload_mutable",
+				"upload_immutable_release",
 				"gcloud auth print-access-token",
-				"release_installers",
-				"version.json",
-				"no-cache, max-age=0, must-revalidate",
+				"public, max-age=31536000, immutable",
 			} {
 				if !strings.Contains(text, required) {
 					t.Fatalf("%s does not contain %q", script, required)
 				}
 			}
-			immutableUpload := strings.LastIndex(text, "upload_immutable_release")
-			stableUpload := strings.LastIndex(text, "release_installers | while")
-			metadataUpload := strings.LastIndex(text, `"${PREFIX}/version.json"`)
-			if immutableUpload < 0 || stableUpload < immutableUpload ||
-				metadataUpload < stableUpload {
-				t.Fatalf("%s does not publish immutable, stable, then metadata", script)
+			for _, forbidden := range []string{
+				"gcs_upload_mutable",
+				"version.json",
+				"publication-lock",
+				"PUBLICATION_OWNER",
+				`"${PREFIX}/${filename}"`,
+			} {
+				if strings.Contains(text, forbidden) {
+					t.Fatalf("%s contains mutable publication behavior %q", script, forbidden)
+				}
 			}
 			command := exec.Command("sh", "-n", filepath.Join(root, script))
 			if output, err := command.CombinedOutput(); err != nil {
@@ -189,15 +132,18 @@ func TestGCSScriptsUseVersionedImmutableSupportBundlePrefix(t *testing.T) {
 		"install.ps1",
 		"checksum manifest inventory does not match the six binaries",
 		"installer checksum inventory does not match both installers",
-		"acquire_publication_lock",
-		"release_publication_lock",
-		"control/publication-lock.json",
 	} {
 		if !strings.Contains(releaseContract, required) {
 			t.Fatalf("release contract does not contain %q", required)
 		}
 	}
-	for _, forbidden := range []string{"gcloud storage", "--request DELETE"} {
+	for _, forbidden := range []string{
+		"gcloud storage",
+		"--request DELETE",
+		"gcs_upload_mutable",
+		"publication_lock",
+		"version.json",
+	} {
 		if strings.Contains(helper, forbidden) {
 			t.Fatalf("exact-object helper contains forbidden operation %q", forbidden)
 		}
@@ -216,7 +162,6 @@ func TestPublishUsesExactObjectRequestsWithoutListing(t *testing.T) {
 	runDistributionScript(t, filepath.Join(root, "scripts/publish-gcs.sh"), bin, []string{
 		"FAKE_GCS_ROOT=" + fakeGCS,
 		"FAKE_REQUESTS=" + requests,
-		"FAKE_LOCK_VERIFY_FAILURE=1",
 		"QODO_SUPPORT_BUNDLE_DIST=" + dist,
 		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
 	})
@@ -229,46 +174,6 @@ func TestPublishUsesExactObjectRequestsWithoutListing(t *testing.T) {
 
 	assertExactObjectRequests(t, requests, "qodo-cli-public-dev")
 	assertPublishedRelease(t, fakeGCS, "qodo-cli-public-dev", dist, "1.2.3")
-}
-
-func TestPublishReleasesOwnedLockWhenVerificationReadsFail(t *testing.T) {
-	t.Parallel()
-	root := repositoryRoot(t)
-	dist := t.TempDir()
-	fakeGCS := t.TempDir()
-	requests := filepath.Join(t.TempDir(), "requests.log")
-	bin := installFakeGCSCommands(t)
-	writeReleaseFixture(t, dist, "release")
-
-	command := exec.Command(filepath.Join(root, "scripts/publish-gcs.sh"))
-	command.Env = append(
-		os.Environ(),
-		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"FAKE_GCS_ROOT="+fakeGCS,
-		"FAKE_REQUESTS="+requests,
-		"FAKE_LOCK_VERIFY_ALWAYS=1",
-		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=failed-verification-test",
-		"QODO_SUPPORT_BUNDLE_DIST="+dist,
-		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
-	)
-	output, err := command.CombinedOutput()
-	if err == nil ||
-		!strings.Contains(string(output), "publication lock verification failed") {
-		t.Fatalf("lock verification result = %v\n%s", err, output)
-	}
-	lock, readErr := os.ReadFile(filepath.Join(
-		fakeGCS,
-		"qodo-cli-public-dev",
-		"support-bundle",
-		"control",
-		"publication-lock.json",
-	))
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if string(lock) != "{\"owner\":\"\"}\n" {
-		t.Fatalf("failed verification stranded publication lock: %s", lock)
-	}
 }
 
 func TestPromotionUsesExactObjectRequestsWithoutListing(t *testing.T) {
@@ -286,7 +191,6 @@ func TestPromotionUsesExactObjectRequestsWithoutListing(t *testing.T) {
 		"releases",
 		"1.2.3",
 	))
-	seedActivatedRelease(t, fakeGCS, "qodo-cli-public-dev", release, "1.2.3")
 
 	runDistributionScript(t, filepath.Join(root, "scripts/promote-gcs.sh"), bin, []string{
 		"FAKE_GCS_ROOT=" + fakeGCS,
@@ -334,7 +238,6 @@ func TestExactObjectPublishingRefusesDifferentExistingBytes(t *testing.T) {
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_GCS_ROOT="+fakeGCS,
 		"FAKE_REQUESTS="+requests,
-		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=different-bytes-test",
 		"QODO_SUPPORT_BUNDLE_DIST="+dist,
 		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
 	)
@@ -352,330 +255,6 @@ func TestExactObjectPublishingRefusesDifferentExistingBytes(t *testing.T) {
 	}
 	if string(data) != "different" {
 		t.Fatalf("existing object was changed: %q", data)
-	}
-}
-
-func TestPublishRejectsVersionDowngradeBeforeAnyWrite(t *testing.T) {
-	t.Parallel()
-	root := repositoryRoot(t)
-	dist := t.TempDir()
-	fakeGCS := t.TempDir()
-	requests := filepath.Join(t.TempDir(), "requests.log")
-	bin := installFakeGCSCommands(t)
-	writeReleaseFixture(t, dist, "candidate")
-	seedActivatedRelease(t, fakeGCS, "qodo-cli-public-dev", dist, "2.0.0")
-
-	command := exec.Command(filepath.Join(root, "scripts/publish-gcs.sh"))
-	command.Env = append(
-		os.Environ(),
-		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"FAKE_GCS_ROOT="+fakeGCS,
-		"FAKE_REQUESTS="+requests,
-		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=downgrade-test",
-		"QODO_SUPPORT_BUNDLE_DIST="+dist,
-		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
-	)
-	output, err := command.CombinedOutput()
-	if err == nil {
-		t.Fatal("publish accepted a stale version downgrade")
-	}
-	if !strings.Contains(string(output), "refusing version downgrade") {
-		t.Fatalf("unexpected downgrade failure:\n%s", output)
-	}
-	requestData, readErr := os.ReadFile(requests)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if strings.Contains(string(requestData), "PUT|") {
-		t.Fatalf("downgrade wrote objects before rejection:\n%s", requestData)
-	}
-}
-
-func TestPublishRejectsConcurrentVersionCASConflict(t *testing.T) {
-	t.Parallel()
-	root := repositoryRoot(t)
-	dist := t.TempDir()
-	fakeGCS := t.TempDir()
-	requests := filepath.Join(t.TempDir(), "requests.log")
-	bin := installFakeGCSCommands(t)
-	writeReleaseFixture(t, dist, "candidate")
-	winner := t.TempDir()
-	writeReleaseFixture(t, winner, "winner")
-	copyReleaseFixture(t, winner, filepath.Join(
-		fakeGCS,
-		"qodo-cli-public-dev",
-		"support-bundle",
-		"releases",
-		"1.0.0",
-	))
-	seedActivatedRelease(t, fakeGCS, "qodo-cli-public-dev", winner, "1.0.0")
-
-	command := exec.Command(filepath.Join(root, "scripts/publish-gcs.sh"))
-	command.Env = append(
-		os.Environ(),
-		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"FAKE_GCS_ROOT="+fakeGCS,
-		"FAKE_REQUESTS="+requests,
-		"FAKE_CONFLICT_OBJECT=/support-bundle/version.json",
-		"FAKE_CONFLICT_VERSION=1.0.0",
-		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=conflict-test",
-		"QODO_SUPPORT_BUNDLE_DIST="+dist,
-		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
-	)
-	output, err := command.CombinedOutput()
-	if err == nil {
-		t.Fatal("publish accepted a concurrent version pointer change")
-	}
-	if !strings.Contains(string(output), "conditional write conflict") {
-		t.Fatalf("unexpected CAS failure:\n%s", output)
-	}
-	metadata, readErr := os.ReadFile(filepath.Join(
-		fakeGCS,
-		"qodo-cli-public-dev",
-		"support-bundle",
-		"version.json",
-	))
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if !strings.Contains(string(metadata), "1.0.0") {
-		t.Fatalf("concurrent pointer was overwritten: %s", metadata)
-	}
-	for _, filename := range releaseInstallers {
-		expected, readErr := os.ReadFile(filepath.Join(winner, filename))
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		actual, readErr := os.ReadFile(filepath.Join(
-			fakeGCS,
-			"qodo-cli-public-dev",
-			"support-bundle",
-			filename,
-		))
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		if string(actual) != string(expected) {
-			t.Fatalf("stable %s was not repaired to the winning version", filename)
-		}
-	}
-	if !strings.Contains(string(output), "stable installers were reconciled") {
-		t.Fatalf("CAS failure did not report reconciliation:\n%s", output)
-	}
-}
-
-func TestPublicationRepairsStableInstallersAfterPartialUploadFailure(t *testing.T) {
-	t.Parallel()
-	root := repositoryRoot(t)
-	for _, test := range []struct {
-		name   string
-		script string
-		bucket string
-	}{
-		{
-			name:   "publish",
-			script: "scripts/publish-gcs.sh",
-			bucket: "qodo-cli-public-dev",
-		},
-		{
-			name:   "promote",
-			script: "scripts/promote-gcs.sh",
-			bucket: "qodo-cli-public",
-		},
-	} {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			candidate := t.TempDir()
-			active := t.TempDir()
-			fakeGCS := t.TempDir()
-			requests := filepath.Join(t.TempDir(), "requests.log")
-			bin := installFakeGCSCommands(t)
-			writeReleaseFixture(t, candidate, "candidate")
-			writeReleaseFixture(t, active, "active")
-			copyReleaseFixture(t, active, filepath.Join(
-				fakeGCS,
-				test.bucket,
-				"support-bundle",
-				"releases",
-				"1.0.0",
-			))
-			seedActivatedRelease(t, fakeGCS, test.bucket, active, "1.0.0")
-
-			environment := []string{
-				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
-				"FAKE_GCS_ROOT=" + fakeGCS,
-				"FAKE_REQUESTS=" + requests,
-				"FAKE_FAIL_PUT_OBJECT=/support-bundle/install.ps1",
-				"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=partial-upload-test",
-				"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
-			}
-			if test.name == "publish" {
-				environment = append(
-					environment,
-					"QODO_SUPPORT_BUNDLE_DIST="+candidate,
-				)
-			} else {
-				copyReleaseFixture(t, candidate, filepath.Join(
-					fakeGCS,
-					"qodo-cli-public-dev",
-					"support-bundle",
-					"releases",
-					"1.2.3",
-				))
-				seedActivatedRelease(
-					t,
-					fakeGCS,
-					"qodo-cli-public-dev",
-					candidate,
-					"1.2.3",
-				)
-				environment = append(
-					environment,
-					"QODO_SUPPORT_BUNDLE_RELEASE_DIR="+candidate,
-				)
-			}
-
-			command := exec.Command(filepath.Join(root, test.script))
-			command.Env = append(os.Environ(), environment...)
-			output, err := command.CombinedOutput()
-			if err == nil {
-				t.Fatal("publication accepted a failed stable installer upload")
-			}
-			if !strings.Contains(string(output), "stable installers were reconciled") {
-				t.Fatalf("failure did not report reconciliation:\n%s", output)
-			}
-
-			for _, filename := range releaseInstallers {
-				expected, readErr := os.ReadFile(filepath.Join(active, filename))
-				if readErr != nil {
-					t.Fatal(readErr)
-				}
-				actual, readErr := os.ReadFile(filepath.Join(
-					fakeGCS,
-					test.bucket,
-					"support-bundle",
-					filename,
-				))
-				if readErr != nil {
-					t.Fatal(readErr)
-				}
-				if string(actual) != string(expected) {
-					t.Fatalf("stable %s was not restored to the active version", filename)
-				}
-			}
-
-			metadata, readErr := os.ReadFile(filepath.Join(
-				fakeGCS,
-				test.bucket,
-				"support-bundle",
-				"version.json",
-			))
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			if !strings.Contains(string(metadata), "1.0.0") {
-				t.Fatalf("failed activation changed the version pointer: %s", metadata)
-			}
-			lock, readErr := os.ReadFile(filepath.Join(
-				fakeGCS,
-				test.bucket,
-				"support-bundle",
-				"control",
-				"publication-lock.json",
-			))
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			if string(lock) != "{\"owner\":\"\"}\n" {
-				t.Fatalf("reconciled failure did not release the lock: %s", lock)
-			}
-		})
-	}
-}
-
-func TestPublishRejectsIdenticalVersionRewrite(t *testing.T) {
-	t.Parallel()
-	root := repositoryRoot(t)
-	dist := t.TempDir()
-	fakeGCS := t.TempDir()
-	requests := filepath.Join(t.TempDir(), "requests.log")
-	bin := installFakeGCSCommands(t)
-	writeReleaseFixture(t, dist, "candidate")
-	environment := []string{
-		"FAKE_GCS_ROOT=" + fakeGCS,
-		"FAKE_REQUESTS=" + requests,
-		"QODO_SUPPORT_BUNDLE_DIST=" + dist,
-		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
-	}
-	runDistributionScript(
-		t,
-		filepath.Join(root, "scripts/publish-gcs.sh"),
-		bin,
-		environment,
-	)
-
-	command := exec.Command(filepath.Join(root, "scripts/publish-gcs.sh"))
-	command.Env = append(
-		append(
-			os.Environ(),
-			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-			"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=rewrite-test",
-			"FAKE_IDENTICAL_REWRITE_OBJECT=/support-bundle/version.json",
-		),
-		environment...,
-	)
-	output, err := command.CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "generation changed") {
-		t.Fatalf("identical rewrite result = %v\n%s", err, output)
-	}
-}
-
-func TestPublishRefusesAnotherPublicationOwner(t *testing.T) {
-	t.Parallel()
-	root := repositoryRoot(t)
-	dist := t.TempDir()
-	fakeGCS := t.TempDir()
-	requests := filepath.Join(t.TempDir(), "requests.log")
-	bin := installFakeGCSCommands(t)
-	writeReleaseFixture(t, dist, "candidate")
-	lock := filepath.Join(
-		fakeGCS,
-		"qodo-cli-public-dev",
-		"support-bundle",
-		"control",
-		"publication-lock.json",
-	)
-	if err := os.MkdirAll(filepath.Dir(lock), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(lock, []byte("{\"owner\":\"other-run\"}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	command := exec.Command(filepath.Join(root, "scripts/publish-gcs.sh"))
-	command.Env = append(
-		os.Environ(),
-		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"FAKE_GCS_ROOT="+fakeGCS,
-		"FAKE_REQUESTS="+requests,
-		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=this-run",
-		"QODO_SUPPORT_BUNDLE_DIST="+dist,
-		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
-	)
-	output, err := command.CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "lock is held by another publisher") {
-		t.Fatalf("held publication lock result = %v\n%s", err, output)
-	}
-	for _, filename := range releaseInstallers {
-		if _, statErr := os.Stat(filepath.Join(
-			fakeGCS,
-			"qodo-cli-public-dev",
-			"support-bundle",
-			filename,
-		)); !os.IsNotExist(statErr) {
-			t.Fatalf("held lock allowed stable %s to be written", filename)
-		}
 	}
 }
 
@@ -740,7 +319,6 @@ func TestPublishRejectsIncompleteDuplicateAndUnexpectedChecksumEntries(t *testin
 			command := exec.Command(filepath.Join(root, "scripts/publish-gcs.sh"))
 			command.Env = append(
 				os.Environ(),
-				"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=manifest-test",
 				"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
 				"QODO_SUPPORT_BUNDLE_DIST="+dist,
 			)
@@ -793,7 +371,6 @@ esac
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_CANARY="+canary,
 		"FAKE_UPLOADS="+uploads,
-		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=identity-test",
 		"QODO_SUPPORT_BUNDLE_RELEASE_DIR="+release,
 		"QODO_SUPPORT_BUNDLE_VERSION=1.2.3",
 	)
@@ -845,7 +422,7 @@ func TestGCSWorkflowsUseOIDCAndSeparateDevFromProduction(t *testing.T) {
 		"canary-dev-installers.sh",
 		"windows-11-arm",
 		"qodo-scout.exe\" version",
-		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER",
+		"function global:curl.exe",
 		"group: support-bundle-dev-publication",
 	} {
 		if !strings.Contains(publication, required) {
@@ -877,7 +454,6 @@ func TestGCSWorkflowsUseOIDCAndSeparateDevFromProduction(t *testing.T) {
 		"https://get.qodo.ai/support-bundle",
 		"windows-11-arm",
 		"qodo-scout.exe\" version",
-		"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER",
 		"group: support-bundle-production-promotion",
 	} {
 		if !strings.Contains(promotion, required) {
@@ -886,6 +462,24 @@ func TestGCSWorkflowsUseOIDCAndSeparateDevFromProduction(t *testing.T) {
 	}
 	if strings.Contains(publication, "qodo-cli-public\n") {
 		t.Fatal("publication workflow can write the production bucket directly")
+	}
+	if strings.Contains(publication, "-SourceDir") {
+		t.Fatal("dev Windows canary bypasses the network download path")
+	}
+	for name, workflow := range map[string]string{
+		"publication": publication,
+		"promotion":   promotion,
+	} {
+		for _, forbidden := range []string{
+			"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER",
+			"version.json",
+			`"$base/install.sh"`,
+			`"$base/install.ps1"`,
+		} {
+			if strings.Contains(workflow, forbidden) {
+				t.Fatalf("%s workflow contains mutable contract %q", name, forbidden)
+			}
+		}
 	}
 }
 
@@ -930,8 +524,8 @@ func TestCanariesRunVersionOnlyAndReleaseHasTenAssets(t *testing.T) {
 		}
 		for _, required := range []string{
 			`= "$EXPECTED_VERSION"`,
-			"metadata-selected binary reports",
 			"pinned binary reports",
+			"/releases/",
 		} {
 			if !strings.Contains(text, required) {
 				t.Fatalf("%s does not contain %q", path, required)
@@ -940,8 +534,9 @@ func TestCanariesRunVersionOnlyAndReleaseHasTenAssets(t *testing.T) {
 	}
 	dev := readText(t, filepath.Join(root, "scripts/canary-dev-installers.sh"))
 	if !strings.Contains(dev, `PATH="${work}/bin:${PATH}" sh "${work}/install.sh" \`) ||
-		!strings.Contains(dev, `gcloud storage cp \`) {
-		t.Fatal("dev canary does not exercise unpinned network installer resolution")
+		!strings.Contains(dev, `gcloud storage cp \`) ||
+		!strings.Contains(dev, `"releases/${QODO_SUPPORT_BUNDLE_VERSION}/checksums.sha256"`) {
+		t.Fatal("dev canary does not exercise the versioned installer")
 	}
 	makefile := readText(t, filepath.Join(root, "Makefile"))
 	for _, required := range []string{
@@ -1106,34 +701,6 @@ func copyReleaseFixture(t *testing.T, source, destination string) {
 	}
 }
 
-func seedActivatedRelease(
-	t *testing.T,
-	fakeGCS, bucket, source, version string,
-) {
-	t.Helper()
-	root := filepath.Join(fakeGCS, bucket, "support-bundle")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, filename := range releaseInstallers {
-		data, err := os.ReadFile(filepath.Join(source, filename))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, filename), data, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	metadata := fmt.Sprintf("{\"version\": \"%s\"}\n", version)
-	if err := os.WriteFile(
-		filepath.Join(root, "version.json"),
-		[]byte(metadata),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func installFakeGCSCommands(t *testing.T) string {
 	t.Helper()
 	bin := t.TempDir()
@@ -1194,83 +761,23 @@ printf '%s|%s|%s|%s|%s\n' \
   "$method" "$url" "$content_type" "$cache_control" "$generation" >> "$FAKE_REQUESTS"
 case "$method" in
   PUT)
-    if [ -n "${FAKE_FAIL_PUT_OBJECT:-}" ] &&
-      [ "${url%$FAKE_FAIL_PUT_OBJECT}" != "$url" ] &&
-      [ ! -f "$FAKE_GCS_ROOT/.put-failure-injected" ]; then
-      : > "$FAKE_GCS_ROOT/.put-failure-injected"
-      exit 22
-    fi
-    if [ -n "${FAKE_CONFLICT_OBJECT:-}" ] &&
-      [ "${url%$FAKE_CONFLICT_OBJECT}" != "$url" ] &&
-      [ ! -f "$FAKE_GCS_ROOT/.conflict-injected" ]; then
-      : > "$FAKE_GCS_ROOT/.conflict-injected"
-      mkdir -p "$(dirname "$path")"
-      if [ -n "${FAKE_CONFLICT_VERSION:-}" ]; then
-        printf '{"version": "%s"}\n' "$FAKE_CONFLICT_VERSION" > "$path"
-      else
-        [ -f "$path" ] || printf '%s\n' '{"version": "9.9.9"}' > "$path"
-      fi
-      {
-        printf 'generation=999\n'
-        printf 'content_type=application/json\n'
-        printf 'cache_control=no-cache, max-age=0, must-revalidate\n'
-      } > "$metadata"
-      exit 22
-    fi
-    if [ -f "$path" ]; then
-      current_generation=1
-      [ ! -f "$metadata" ] || current_generation=$(awk -F= '$1 == "generation" { print $2 }' "$metadata")
-      [ "$generation" = "$current_generation" ] || exit 22
-      next_generation=$((current_generation + 1))
-    else
-      [ "$generation" = 0 ] || exit 22
-      next_generation=1
-    fi
+    [ "$generation" = 0 ] || exit 22
+    [ ! -f "$path" ] || exit 22
     mkdir -p "$(dirname "$path")"
     cp "$upload" "$path"
     {
-      printf 'generation=%s\n' "$next_generation"
+      printf 'generation=1\n'
       printf 'content_type=%s\n' "$content_type"
       printf 'cache_control=%s\n' "$cache_control"
     } > "$metadata"
     if [ -n "$dump_headers" ]; then
       {
         printf 'HTTP/1.1 200 OK\r\n'
-        printf 'x-goog-generation: %s\r\n\r\n' "$next_generation"
+        printf 'x-goog-generation: 1\r\n\r\n'
       } > "$dump_headers"
     fi
-    case "$path" in
-      */control/publication-lock.json) : > "$FAKE_GCS_ROOT/.lock-written" ;;
-    esac
     ;;
   GET)
-    if [ -n "${FAKE_LOCK_VERIFY_ALWAYS:-}" ] &&
-      [ "${url%/control/publication-lock.json}" != "$url" ] &&
-      [ -f "$FAKE_GCS_ROOT/.lock-written" ]; then
-      exit 22
-    fi
-    if [ -n "${FAKE_IDENTICAL_REWRITE_OBJECT:-}" ] &&
-      [ "${url%$FAKE_IDENTICAL_REWRITE_OBJECT}" != "$url" ]; then
-      rewrite_count_file="$FAKE_GCS_ROOT/.identical-rewrite-count"
-      rewrite_count=0
-      [ ! -f "$rewrite_count_file" ] || rewrite_count=$(cat "$rewrite_count_file")
-      rewrite_count=$((rewrite_count + 1))
-      printf '%s\n' "$rewrite_count" > "$rewrite_count_file"
-      if [ "$rewrite_count" -eq 4 ]; then
-        {
-          printf 'generation=999\n'
-          printf 'content_type=application/json\n'
-          printf 'cache_control=no-cache, max-age=0, must-revalidate\n'
-        } > "$metadata"
-      fi
-    fi
-    if [ -n "${FAKE_LOCK_VERIFY_FAILURE:-}" ] &&
-      [ "${url%/control/publication-lock.json}" != "$url" ] &&
-      [ -f "$FAKE_GCS_ROOT/.lock-written" ] &&
-      [ ! -f "$FAKE_GCS_ROOT/.lock-read-failed" ]; then
-      : > "$FAKE_GCS_ROOT/.lock-read-failed"
-      exit 22
-    fi
     if [ ! -f "$path" ]; then
       [ -z "$dump_headers" ] || : > "$dump_headers"
       printf 404
@@ -1279,16 +786,9 @@ case "$method" in
     cp "$path" "$output"
     current_generation=1
     case "$path" in
-      */version.json)
-        current_content_type=application/json
-        current_cache_control='no-cache, max-age=0, must-revalidate'
-        ;;
       */install.sh|*/install.ps1)
         current_content_type='text/plain; charset=utf-8'
-        case "$path" in
-          */releases/*) current_cache_control='public, max-age=31536000, immutable' ;;
-          *) current_cache_control='no-cache, max-age=0, must-revalidate' ;;
-        esac
+        current_cache_control='public, max-age=31536000, immutable'
         ;;
       */checksums.sha256|*/installer-checksums.sha256)
         current_content_type='text/plain; charset=utf-8'
@@ -1333,7 +833,6 @@ func runDistributionScript(t *testing.T, script, bin string, environment []strin
 		append(
 			os.Environ(),
 			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-			"QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER=test-publisher",
 		),
 		environment...,
 	)
@@ -1359,6 +858,10 @@ func assertExactObjectRequests(t *testing.T, requests, bucket string) {
 		if strings.HasPrefix(line, "DELETE|") || strings.Contains(line, "storage.objects.list") {
 			t.Fatalf("broad or destructive request logged: %q", line)
 		}
+		if strings.HasPrefix(fields[1], base) &&
+			!strings.HasPrefix(fields[1], base+"releases/1.2.3/") {
+			t.Fatalf("request is outside the immutable release prefix: %q", line)
+		}
 		if fields[0] != "PUT" || !strings.HasPrefix(fields[1], base) {
 			continue
 		}
@@ -1382,65 +885,22 @@ func assertExactObjectRequests(t *testing.T, requests, bucket string) {
 			if fields[2] != expectedType {
 				t.Fatalf("immutable write has wrong content type: %q", line)
 			}
-		} else if relative == "control/publication-lock.json" {
-			if fields[2] != "application/json" || fields[3] != "no-store" {
-				t.Fatalf("publication lock has wrong response metadata: %q", line)
-			}
-		} else if fields[3] != "no-cache, max-age=0, must-revalidate" {
-			t.Fatalf("mutable write has wrong cache control: %q", line)
 		} else {
-			expectedType := "text/plain; charset=utf-8"
-			if relative == "version.json" {
-				expectedType = "application/json"
-			}
-			if fields[2] != expectedType {
-				t.Fatalf("mutable write has wrong content type: %q", line)
-			}
+			t.Fatalf("write is outside the immutable release prefix: %q", line)
 		}
 	}
-	for _, filename := range releaseFiles() {
+	if len(firstWrites) != len(releaseFiles()) {
+		t.Fatalf("published %d objects, want %d:\n%s", len(firstWrites), len(releaseFiles()), data)
+	}
+	for index, filename := range releaseFiles() {
 		relative := "releases/1.2.3/" + filename
-		if _, ok := firstWrites[relative]; !ok {
+		actualIndex, ok := firstWrites[relative]
+		if !ok {
 			t.Fatalf("missing immutable write for %s:\n%s", filename, data)
 		}
-	}
-	installSH, okSH := firstWrites["install.sh"]
-	installPS1, okPS1 := firstWrites["install.ps1"]
-	version, okVersion := firstWrites["version.json"]
-	if !okSH || !okPS1 || !okVersion ||
-		version < installSH || version < installPS1 {
-		t.Fatalf("version.json was not the final mutable write:\n%s", data)
-	}
-	lockWrites := 0
-	firstLock := -1
-	lastLock := -1
-	installSHLine := -1
-	installPS1Line := -1
-	versionLine := -1
-	for index, line := range lines {
-		if strings.HasPrefix(
-			line,
-			"PUT|"+base+"control/publication-lock.json|",
-		) {
-			lockWrites++
-			if firstLock == -1 {
-				firstLock = index
-			}
-			lastLock = index
+		if actualIndex != index {
+			t.Fatalf("immutable write order for %s = %d, want %d:\n%s", filename, actualIndex, index, data)
 		}
-		if strings.HasPrefix(line, "PUT|"+base+"install.sh|") {
-			installSHLine = index
-		}
-		if strings.HasPrefix(line, "PUT|"+base+"install.ps1|") {
-			installPS1Line = index
-		}
-		if strings.HasPrefix(line, "PUT|"+base+"version.json|") {
-			versionLine = index
-		}
-	}
-	if lockWrites < 2 || firstLock >= installSHLine || firstLock >= installPS1Line ||
-		lastLock <= versionLine {
-		t.Fatalf("publication lock does not bracket mutable activation:\n%s", data)
 	}
 }
 

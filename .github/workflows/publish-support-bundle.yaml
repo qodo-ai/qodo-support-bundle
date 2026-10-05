@@ -20,7 +20,6 @@ concurrency:
 env:
   QODO_SUPPORT_BUNDLE_BUCKET: qodo-cli-public-dev
   QODO_SUPPORT_BUNDLE_PREFIX: support-bundle
-  QODO_SUPPORT_BUNDLE_PUBLICATION_OWNER: github-${{ github.run_id }}-${{ github.run_attempt }}
   GCP_PROJECT_NUMBER: "430654255805"
   GCP_SERVICE_ACCOUNT: qodo-support-bundle-publisher@codium-development.iam.gserviceaccount.com
 
@@ -103,7 +102,7 @@ jobs:
           QODO_SUPPORT_BUNDLE_VERSION: ${{ steps.release.outputs.version }}
         run: ./scripts/publish-gcs.sh
 
-      - name: Exercise pinned and metadata-selected dev installers
+      - name: Exercise pinned dev installer
         env:
           QODO_SUPPORT_BUNDLE_VERSION: ${{ steps.release.outputs.version }}
         run: sh scripts/canary-dev-installers.sh
@@ -136,32 +135,9 @@ jobs:
           EXPECTED_VERSION: ${{ inputs.version }}
         run: |
           $work = Join-Path $env:RUNNER_TEMP 'qodo-scout-dev-arm64'
-          $release = Join-Path $work 'release'
-          New-Item -ItemType Directory -Path $release -Force | Out-Null
-          gcloud storage cp "gs://$env:QODO_SUPPORT_BUNDLE_BUCKET/$env:QODO_SUPPORT_BUNDLE_PREFIX/version.json" "$work/version.json"
-          $env:QODO_SCOUT_INSTALLER_TESTING = '1'
-          . ./install.ps1
-          $resolved = ConvertFrom-QodoScoutVersionJson (Get-Content "$work/version.json" -Raw)
-          if ($resolved -ne $env:EXPECTED_VERSION.TrimStart('v')) {
-              throw "dev metadata selected $resolved, expected $env:EXPECTED_VERSION"
-          }
-          foreach ($name in @(
-              'install.ps1',
-              'checksums.sha256',
-              'qodo-support-bundle-windows-arm64.exe'
-          )) {
-              gcloud storage cp "gs://$env:QODO_SUPPORT_BUNDLE_BUCKET/$env:QODO_SUPPORT_BUNDLE_PREFIX/releases/$resolved/$name" "$release/$name"
-          }
-          gcloud storage cp "gs://$env:QODO_SUPPORT_BUNDLE_BUCKET/$env:QODO_SUPPORT_BUNDLE_PREFIX/install.ps1" "$work/install.ps1"
-          if ((Get-FileHash "$work/install.ps1").Hash -ne (Get-FileHash "$release/install.ps1").Hash) {
-              throw 'stable and versioned Windows installers differ'
-          }
-          Remove-Item Env:QODO_SCOUT_INSTALLER_TESTING
-          & "$work/install.ps1" -Version $resolved -SourceDir $release -InstallDir "$work/pinned"
-          $pinnedVersion = (& "$work/pinned/qodo-scout.exe" version).Trim()
-          if ($LASTEXITCODE -ne 0 -or $pinnedVersion -ne $resolved) {
-              throw "pinned native Windows ARM64 binary reports '$pinnedVersion', expected '$resolved'"
-          }
+          $version = $env:EXPECTED_VERSION.TrimStart('v')
+          New-Item -ItemType Directory -Path $work -Force | Out-Null
+          gcloud storage cp "gs://$env:QODO_SUPPORT_BUNDLE_BUCKET/$env:QODO_SUPPORT_BUNDLE_PREFIX/releases/$version/install.ps1" "$work/install.ps1"
 
           function global:curl.exe {
               param(
@@ -181,12 +157,21 @@ jobs:
                   throw 'dev canary curl received an unexpected request'
               }
               $relative = $url.Substring('https://get.qodo.ai/support-bundle/'.Length)
+              $allowed = @(
+                  "releases/$version/checksums.sha256",
+                  "releases/$version/qodo-support-bundle-windows-arm64.exe"
+              )
+              if ($relative -notin $allowed) {
+                  throw "dev canary curl received an unexpected object: $relative"
+              }
               gcloud storage cp "gs://$env:QODO_SUPPORT_BUNDLE_BUCKET/$env:QODO_SUPPORT_BUNDLE_PREFIX/$relative" $destination
-              if ($LASTEXITCODE -ne 0) { throw "failed to download dev object: $relative" }
+              if ($LASTEXITCODE -ne 0) {
+                  throw "failed to download dev object: $relative"
+              }
           }
 
-          & "$work/install.ps1" -InstallDir "$work/metadata"
-          $metadataVersion = (& "$work/metadata/qodo-scout.exe" version).Trim()
-          if ($LASTEXITCODE -ne 0 -or $metadataVersion -ne $resolved) {
-              throw "metadata-selected native Windows ARM64 binary reports '$metadataVersion', expected '$resolved'"
+          & "$work/install.ps1" -Version $version -InstallDir "$work/pinned"
+          $pinnedVersion = (& "$work/pinned/qodo-scout.exe" version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $pinnedVersion -ne $version) {
+              throw "pinned native Windows ARM64 binary reports '$pinnedVersion', expected '$version'"
           }

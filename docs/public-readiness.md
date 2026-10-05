@@ -43,13 +43,13 @@ visibility change, release publication, bucket write, or customer rollout.
 - [ ] Publish to dev, then verify exact object names, bytes, checksums, content
   types, cache controls, provenance, and native smoke evidence for every
   supported target.
-- [ ] Validate pinned and metadata-driven installer resolution in dev. Installer
-  smoke must run only `version`, never collection.
+- [ ] Validate version-pinned installer resolution in dev. Installer smoke must
+  run only `version`, never collection.
 - [ ] Confirm anonymous access only to intended
   `support-bundle/` customer objects; verify that bucket listing and unrelated
   prefixes remain denied.
-- [ ] Record the expected 404 response for stable endpoints before initial
-  deployment and the intended response after activation.
+- [ ] Confirm root installer aliases and current-version metadata are not part
+  of the supported contract; customer instructions must use versioned URLs.
 - [ ] Obtain production approval and execute the
   [publication runbook](publication.md) without bypassing its canaries.
 - [ ] Validate GitHub, GCS, and CDN byte identity and headers after production
@@ -64,9 +64,8 @@ visibility change, release publication, bucket write, or customer rollout.
   representative proxy and endpoint policies.
 - [ ] Confirm support ownership, vulnerability triage, incident response,
   retention, and customer archive handling before onboarding pilot users.
-- [ ] Rehearse rollback using a new higher semantic version with known-good
-  bytes. `version.json` is monotonic and deliberately rejects an older version;
-  do not overwrite immutable release objects or force a pointer downgrade.
+- [ ] Rehearse rollback using a new semantic version with known-good bytes and
+  updated customer instructions; do not overwrite immutable release objects.
 - [ ] Document how to pause activation, revoke compromised credentials, and
   communicate a withdrawn release without deleting audit evidence.
 

@@ -21,17 +21,6 @@ Describe 'Qodo Scout Windows installer contracts' {
         } | Should -Throw '*unsupported platform*'
     }
 
-    It 'accepts only the minimal version metadata object' {
-        ConvertFrom-QodoScoutVersionJson '{ "version": "1.2.3" }' |
-            Should -Be '1.2.3'
-        {
-            ConvertFrom-QodoScoutVersionJson '{ "version": "1.2.3", "extra": true }'
-        } | Should -Throw '*version.json*'
-        {
-            ConvertFrom-QodoScoutVersionJson '{ "version": "../escape" }'
-        } | Should -Throw '*version*'
-    }
-
     It 'constructs the immutable release base URL from the selected version' {
         Get-QodoScoutReleaseBaseUrl -Version '1.2.3' |
             Should -Be 'https://get.qodo.ai/support-bundle/releases/1.2.3'
@@ -94,8 +83,8 @@ Describe 'Qodo Scout Windows installer contracts' {
         Mock Get-Command { $null }
         {
             Invoke-QodoScoutDownload `
-                -Uri 'https://get.qodo.ai/support-bundle/version.json' `
-                -Destination (Join-Path $TestDrive 'version.json')
+                -Uri 'https://get.qodo.ai/support-bundle/releases/1.2.3/install.ps1' `
+                -Destination (Join-Path $TestDrive 'install.ps1')
         } | Should -Throw '*curl.exe is required*'
     }
 
@@ -224,7 +213,7 @@ Describe 'Qodo Scout local source installation' -Skip:(-not $IsWindows) {
     }
 }
 
-Describe 'Qodo Scout metadata installation' -Skip:(-not $IsWindows) {
+Describe 'Qodo Scout pinned network installation' -Skip:(-not $IsWindows) {
     BeforeEach {
         $script:DownloadedUris = @()
         $script:InstallerTempDirectory = $null
@@ -235,10 +224,6 @@ Describe 'Qodo Scout metadata installation' -Skip:(-not $IsWindows) {
 
             $script:DownloadedUris += $Uri.AbsoluteUri
             $script:InstallerTempDirectory = Split-Path -Parent $Destination
-            if ($Uri.AbsolutePath.EndsWith('/version.json')) {
-                Set-Content -LiteralPath $Destination -Value '{ "version": "4.5.6" }'
-                return
-            }
             if ($Uri.AbsolutePath.EndsWith('/checksums.sha256')) {
                 $assetPath = Join-Path `
                     (Split-Path -Parent $Destination) `
@@ -256,13 +241,22 @@ Describe 'Qodo Scout metadata installation' -Skip:(-not $IsWindows) {
         }
     }
 
-    It 'resolves metadata and downloads from one immutable release directory' {
+    It 'requires an explicit version' {
+        {
+            Install-QodoScout `
+                -RequestedInstallDirectory $script:LatestInstallDirectory `
+                -RuntimeArchitecture 'X64'
+        } | Should -Throw '*-Version is required*'
+        Assert-MockCalled Invoke-QodoScoutDownload -Times 0 -Exactly
+    }
+
+    It 'downloads only from one immutable release directory' {
         Install-QodoScout `
+            -RequestedVersion '4.5.6' `
             -RequestedInstallDirectory $script:LatestInstallDirectory `
             -RuntimeArchitecture 'X64'
 
         $expectedUris = @(
-            'https://get.qodo.ai/support-bundle/version.json',
             'https://get.qodo.ai/support-bundle/releases/4.5.6/qodo-support-bundle-windows-amd64.exe',
             'https://get.qodo.ai/support-bundle/releases/4.5.6/checksums.sha256'
         ) -join "`n"
@@ -276,10 +270,6 @@ Describe 'Qodo Scout metadata installation' -Skip:(-not $IsWindows) {
             param([uri]$Uri, [string]$Destination)
 
             $script:DownloadedUris += $Uri.AbsoluteUri
-            if ($Uri.AbsolutePath.EndsWith('/version.json')) {
-                Set-Content -LiteralPath $Destination -Value '{ "version": "4.5.6" }'
-                return
-            }
             if ($Uri.AbsolutePath.EndsWith('/checksums.sha256')) {
                 $asset = 'qodo-support-bundle-windows-arm64.exe'
                 $assetPath = Join-Path (Split-Path -Parent $Destination) $asset
@@ -296,11 +286,11 @@ Describe 'Qodo Scout metadata installation' -Skip:(-not $IsWindows) {
         }
 
         Install-QodoScout `
+            -RequestedVersion '4.5.6' `
             -RequestedInstallDirectory $script:LatestInstallDirectory `
             -RuntimeArchitecture 'Arm64'
 
         $expectedUris = @(
-            'https://get.qodo.ai/support-bundle/version.json',
             'https://get.qodo.ai/support-bundle/releases/4.5.6/qodo-support-bundle-windows-arm64.exe',
             'https://get.qodo.ai/support-bundle/releases/4.5.6/checksums.sha256'
         ) -join "`n"
@@ -319,6 +309,7 @@ Describe 'Qodo Scout metadata installation' -Skip:(-not $IsWindows) {
 
         {
             Install-QodoScout `
+                -RequestedVersion '4.5.6' `
                 -RequestedInstallDirectory $script:LatestInstallDirectory `
                 -RuntimeArchitecture 'X64'
         } | Should -Throw '*download failed*'
