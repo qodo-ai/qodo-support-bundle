@@ -138,7 +138,7 @@ func kubeconfigArguments(kubeconfig string) []string {
 
 func writeAuthenticationHelperGuidance(
 	writer io.Writer,
-	unavailable *kubernetes.AuthenticationHelperUnavailableError,
+	_ *kubernetes.AuthenticationHelperUnavailableError,
 	kubeContext string,
 	namespace string,
 ) {
@@ -146,22 +146,17 @@ func writeAuthenticationHelperGuidance(
 		namespace = "default"
 	}
 	contextDisplay := terminalLine(kubeContext)
-	commandDisplay := terminalLine(unavailable.Command)
 	namespaceDisplay := terminalLine(namespace)
 	contextArgument := verificationCommandArgument(contextDisplay, "<context>")
 	namespaceArgument := verificationCommandArgument(namespaceDisplay, "<namespace>")
 	_, _ = fmt.Fprintf(
 		writer,
-		"Kubernetes authentication helper is unavailable\n\n"+
-			"Context: %s\n"+
-			"Required command: %s\n\n"+
-			"This kubeconfig requires an external authentication command that Scout could not find or start on this workstation.\n\n"+
-			"Install and authenticate with the required helper using your organization’s approved setup, ensure it is available on PATH, then verify:\n\n"+
+		"Kubernetes authentication is unavailable\n\n"+
+			"Context: %s\n\n"+
+			"Configure authentication for this context, then verify:\n\n"+
 			"kubectl --context %s get pods --namespace %s\n\n"+
-			"After kubectl succeeds, rerun Qodo Scout.\n\n"+
-			"If you do not recognize the required command, contact your Kubernetes or platform administrator.\n",
+			"Rerun Qodo Scout after kubectl succeeds.\n",
 		contextDisplay,
-		commandDisplay,
 		contextArgument,
 		namespaceArgument,
 	)
