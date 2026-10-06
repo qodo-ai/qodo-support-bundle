@@ -484,6 +484,8 @@ func collectLogs(
 	if workers == 0 {
 		return ctx.Err()
 	}
+	workerContext, cancelWorkers := context.WithCancel(ctx)
+	defer cancelWorkers()
 	results := make(chan collectedLog, workers)
 	remaining := config.MaxTotalLogBytes
 	next := 0
@@ -504,7 +506,7 @@ func collectLogs(
 			next++
 			active++
 			go func() {
-				results <- readLog(ctx, config, runner, redactor, request)
+				results <- readLog(workerContext, config, runner, redactor, request)
 			}()
 		}
 		if active == 0 {
@@ -536,6 +538,11 @@ func collectLogs(
 			continue
 		}
 		if result.err != nil {
+			cancelWorkers()
+			for active > 0 {
+				<-results
+				active--
+			}
 			return result.err
 		}
 		retained := int64(0)
