@@ -250,6 +250,192 @@ func TestCollectFailsWhenPodsCannotBeListed(t *testing.T) {
 	}
 }
 
+func TestCollectStopsAcrossExplicitNamespacesForMissingAuthenticationHelper(
+	t *testing.T,
+) {
+	t.Parallel()
+	runner := &fakeRunner{
+		run: func(string) (CommandResult, error) {
+			return CommandResult{Stderr: []byte(
+				"getting credentials: exec: executable company-kube-auth not found\n" +
+					"raw-stderr-secret",
+			)}, errors.New("exit 1")
+		},
+	}
+
+	_, err := Collect(
+		context.Background(),
+		Config{
+			Namespaces:       []string{"qodo", "monitoring"},
+			Since:            time.Minute,
+			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
+			MaxLogBytes:      1024,
+			MaxTotalLogBytes: 1024,
+			LogWorkers:       1,
+		},
+		runner,
+		&memorySink{},
+		redact.New(),
+	)
+
+	var unavailable *AuthenticationHelperUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Command != "company-kube-auth" {
+		t.Fatalf("error=%T %v", err, err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("collector continued after missing helper: %v", runner.calls)
+	}
+	if strings.Contains(err.Error(), "raw-stderr-secret") {
+		t.Fatalf("typed error leaked stderr: %v", err)
+	}
+}
+
+func TestCollectPropagatesMissingAuthenticationHelperFromLaterCommands(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, stage := range []string{"events", "logs"} {
+		stage := stage
+		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
+			runner := &fakeRunner{
+				run: func(arguments string) (CommandResult, error) {
+					switch {
+					case strings.Contains(arguments, "get pods"):
+						return CommandResult{Stdout: []byte(prettyJSONLogPodJSON)}, nil
+					case strings.Contains(arguments, "get events"):
+						if stage == "events" {
+							return missingAuthenticationHelperResult()
+						}
+						return CommandResult{Stdout: []byte(`{"items":[]}`)}, nil
+					case strings.HasPrefix(arguments, "logs "):
+						if stage == "logs" {
+							return missingAuthenticationHelperResult()
+						}
+						return CommandResult{Stdout: []byte("ready\n")}, nil
+					default:
+						return CommandResult{}, errors.New("unexpected command")
+					}
+				},
+			}
+
+			_, err := Collect(
+				context.Background(),
+				Config{
+					Namespaces:       []string{"qodo"},
+					Since:            time.Minute,
+					Timeout:          time.Second,
+					MaxMetadataBytes: 1 << 20,
+					MaxLogBytes:      1024,
+					MaxTotalLogBytes: 1024,
+					LogWorkers:       1,
+				},
+				runner,
+				&memorySink{},
+				redact.New(),
+			)
+
+			var unavailable *AuthenticationHelperUnavailableError
+			if !errors.As(err, &unavailable) ||
+				unavailable.Command != "company-kube-auth" {
+				t.Fatalf("error=%T %v", err, err)
+			}
+			if strings.Contains(err.Error(), "raw-stderr-secret") {
+				t.Fatalf("typed error leaked stderr: %v", err)
+			}
+		})
+	}
+}
+
+func TestCollectCancelsAndJoinsLogWorkersAfterMissingAuthenticationHelper(
+	t *testing.T,
+) {
+	t.Parallel()
+	runner := &authenticationLogCancellationRunner{
+		secondStarted: make(chan struct{}),
+		secondStopped: make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, err := Collect(
+		ctx,
+		Config{
+			Namespaces:       []string{"qodo"},
+			Since:            time.Minute,
+			Timeout:          time.Minute,
+			MaxMetadataBytes: 1 << 20,
+			MaxLogBytes:      1024,
+			MaxTotalLogBytes: 2048,
+			LogWorkers:       2,
+		},
+		runner,
+		&memorySink{},
+		redact.New(),
+	)
+
+	var unavailable *AuthenticationHelperUnavailableError
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("error=%T %v", err, err)
+	}
+	select {
+	case <-runner.secondStopped:
+	case <-time.After(time.Second):
+		t.Fatal("collector returned before the sibling log worker stopped")
+	}
+}
+
+type authenticationLogCancellationRunner struct {
+	mutex         sync.Mutex
+	logCalls      int
+	secondStarted chan struct{}
+	secondStopped chan struct{}
+}
+
+func (runner *authenticationLogCancellationRunner) Run(
+	ctx context.Context,
+	_ int64,
+	arguments ...string,
+) (CommandResult, error) {
+	joined := strings.Join(arguments, " ")
+	switch {
+	case strings.Contains(joined, "get pods"):
+		return CommandResult{Stdout: []byte(`{"items":[{
+			"metadata":{"name":"platform","namespace":"qodo"},
+			"spec":{"containers":[{"name":"one"},{"name":"two"}]},
+			"status":{"phase":"Running","containerStatuses":[
+				{"name":"one","ready":true},{"name":"two","ready":true}
+			]}
+		}]}`)}, nil
+	case strings.Contains(joined, "get events"):
+		return CommandResult{Stdout: []byte(`{"items":[]}`)}, nil
+	case strings.HasPrefix(joined, "logs "):
+		runner.mutex.Lock()
+		runner.logCalls++
+		call := runner.logCalls
+		runner.mutex.Unlock()
+		if call == 1 {
+			<-runner.secondStarted
+			return missingAuthenticationHelperResult()
+		}
+		close(runner.secondStarted)
+		<-ctx.Done()
+		close(runner.secondStopped)
+		return CommandResult{}, ctx.Err()
+	default:
+		return CommandResult{}, errors.New("unexpected command")
+	}
+}
+
+func missingAuthenticationHelperResult() (CommandResult, error) {
+	return CommandResult{Stderr: []byte(
+		"Unable to connect to the server: getting credentials: " +
+			"exec: executable company-kube-auth not found\n" +
+			"raw-stderr-secret",
+	)}, errors.New("exit 1")
+}
+
 func TestCollectCoversMultipleNamespacesAndInitContainers(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{

@@ -1295,6 +1295,7 @@ func TestDefaultOutputPathRejectsUnusableHome(t *testing.T) {
 func TestCollectDefaultOutputErrorsOmitHomePath(t *testing.T) {
 	const username = "review-home-canary"
 	root := t.TempDir()
+	kubectl := fakeKubectl(t, filepath.Join(root, "bin"), "")
 	home := filepath.Join(root, "Users", username)
 	if err := os.MkdirAll(filepath.Dir(home), 0o700); err != nil {
 		t.Fatal(err)
@@ -1309,7 +1310,12 @@ func TestCollectDefaultOutputErrorsOmitHomePath(t *testing.T) {
 	var stderr bytes.Buffer
 	code := Run(
 		context.Background(),
-		[]string{"collect", "--namespace", "qodo"},
+		[]string{
+			"collect",
+			"--namespace", "qodo",
+			"--context", "customer",
+			"--kubectl", kubectl,
+		},
 		&bytes.Buffer{},
 		&stderr,
 	)
@@ -1331,6 +1337,7 @@ func TestCollectDefaultOutputErrorsOmitHomePath(t *testing.T) {
 func TestCollectDefaultBundleNewErrorsOmitHomePath(t *testing.T) {
 	const username = "review-new-canary"
 	root := t.TempDir()
+	kubectl := fakeKubectl(t, filepath.Join(root, "bin"), "")
 	home := filepath.Join(root, "Users", username)
 	if err := os.MkdirAll(filepath.Join(home, "qodo-support-bundles"), 0o700); err != nil {
 		t.Fatal(err)
@@ -1359,7 +1366,12 @@ func TestCollectDefaultBundleNewErrorsOmitHomePath(t *testing.T) {
 	var stderr bytes.Buffer
 	code := Run(
 		context.Background(),
-		[]string{"collect", "--namespace", "qodo"},
+		[]string{
+			"collect",
+			"--namespace", "qodo",
+			"--context", "customer",
+			"--kubectl", kubectl,
+		},
 		&bytes.Buffer{},
 		&stderr,
 	)
@@ -1563,6 +1575,12 @@ func fakeKubectl(t *testing.T, directory string, probeOutput string) string {
 	}
 	script := `#!/bin/sh
 case " $* " in
+  *" config current-context "*)
+    printf '%s\n' 'customer'
+    ;;
+  *" config view --minify --output=json "*)
+    printf '%s\n' '{"users":[{"name":"customer","user":{"token":"REDACTED"}}]}'
+    ;;
   *" get namespaces "*)
     printf '%s\n' '{"items":[{"metadata":{"name":"qodo"}},{"metadata":{"name":"kube-system"}}]}'
     ;;

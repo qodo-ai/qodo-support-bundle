@@ -169,7 +169,8 @@ func Collect(
 				runErr,
 				redactor,
 			)
-			if len(namespaces) == 1 {
+			var unavailable *AuthenticationHelperUnavailableError
+			if errors.As(namespaceErr, &unavailable) || len(namespaces) == 1 {
 				return report, namespaceErr
 			}
 			report.Issues = append(report.Issues, Issue{
@@ -414,6 +415,9 @@ func collectEvents(
 		if contextErr := ctx.Err(); contextErr != nil {
 			return contextErr
 		}
+		if unavailable := ClassifyAuthenticationHelperUnavailable(result); unavailable != nil {
+			return unavailable
+		}
 		report.Issues = append(
 			report.Issues,
 			issueFromCommand("list events", namespace, result, err, redactor),
@@ -480,6 +484,8 @@ func collectLogs(
 	if workers == 0 {
 		return ctx.Err()
 	}
+	workerContext, cancelWorkers := context.WithCancel(ctx)
+	defer cancelWorkers()
 	results := make(chan collectedLog, workers)
 	remaining := config.MaxTotalLogBytes
 	next := 0
@@ -500,7 +506,7 @@ func collectLogs(
 			next++
 			active++
 			go func() {
-				results <- readLog(ctx, config, runner, redactor, request)
+				results <- readLog(workerContext, config, runner, redactor, request)
 			}()
 		}
 		if active == 0 {
@@ -530,6 +536,14 @@ func collectLogs(
 		completed++
 		if ctx.Err() != nil {
 			continue
+		}
+		if result.err != nil {
+			cancelWorkers()
+			for active > 0 {
+				<-results
+				active--
+			}
+			return result.err
 		}
 		retained := int64(0)
 		if result.issue != nil {
@@ -606,6 +620,9 @@ func readLog(
 	)
 	resource := request.namespace + "/" + request.podName + "/" + request.containerName
 	if err != nil {
+		if unavailable := ClassifyAuthenticationHelperUnavailable(result); unavailable != nil {
+			return collectedLog{err: unavailable, reserved: request.maxBytes}
+		}
 		issue := issueFromCommand(operation, resource, result, err, redactor)
 		return collectedLog{issue: &issue, reserved: request.maxBytes}
 	}
@@ -1326,6 +1343,9 @@ func commandError(
 	err error,
 	redactor *redact.Redactor,
 ) error {
+	if unavailable := ClassifyAuthenticationHelperUnavailable(result); unavailable != nil {
+		return unavailable
+	}
 	issue := issueFromCommand(operation, resource, result, err, redactor)
 	return errors.New(issue.Message)
 }

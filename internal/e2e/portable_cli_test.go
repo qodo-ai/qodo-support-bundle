@@ -204,6 +204,11 @@ func runFakeKubectl(arguments []string, stdout io.Writer, stderr io.Writer) int 
 		return 1
 	}
 	switch {
+	case hasArguments(arguments, "config", "view", "--minify", "--output=json"):
+		_, _ = io.WriteString(
+			stdout,
+			`{"users":[{"name":"portability","user":{"token":"REDACTED"}}]}`,
+		)
 	case hasArguments(arguments, "get", "pods"):
 		if !hasExpectedNamespace(arguments) {
 			_, _ = fmt.Fprintln(stderr, "unexpected fake pod namespace")

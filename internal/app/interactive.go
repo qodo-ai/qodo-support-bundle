@@ -56,6 +56,7 @@ type interactiveSettings struct {
 type interactiveDiscovery interface {
 	Contexts(context.Context) ([]string, error)
 	CurrentContext(context.Context) (string, error)
+	CheckAuthenticationHelper(context.Context, string) error
 	Namespaces(context.Context, string) ([]string, error)
 }
 
@@ -204,6 +205,15 @@ func runInteractiveWizard(
 	if !containsString(contexts, settings.Context) {
 		return settings, errors.New("select a Kubernetes context")
 	}
+	if err := dependencies.Discovery.CheckAuthenticationHelper(
+		ctx,
+		settings.Context,
+	); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return settings, errInteractiveCanceled
+		}
+		return settings, err
+	}
 	var namespaces []string
 	if dependencies.DiscoverNamespaces != nil {
 		explicitNamespaceCount := 0
@@ -273,6 +283,8 @@ func conciseNamespaceDiscoveryError(err error) error {
 		return errors.New(
 			"namespace discovery failed; kubectl is unavailable",
 		)
+	case isAuthenticationHelperUnavailable(err):
+		return err
 	default:
 		return errors.New(
 			"namespace discovery failed; check kubectl and the selected context",
@@ -319,6 +331,19 @@ func (discovery kubernetesWizardDiscovery) CurrentContext(
 	return values[0], nil
 }
 
+func (discovery kubernetesWizardDiscovery) CheckAuthenticationHelper(
+	ctx context.Context,
+	kubeContext string,
+) error {
+	return checkAuthenticationHelper(
+		ctx,
+		discovery.Runner,
+		discovery.Kubeconfig,
+		kubeContext,
+		nil,
+	)
+}
+
 func (discovery kubernetesWizardDiscovery) Namespaces(
 	ctx context.Context,
 	kubeContext string,
@@ -356,6 +381,11 @@ func (discovery kubernetesWizardDiscovery) run(
 		if result.StderrTruncated {
 			return nil, errDiscoveryErrorOutputTruncated
 		}
+		if unavailable := kubernetes.ClassifyAuthenticationHelperUnavailable(
+			result,
+		); unavailable != nil {
+			return nil, unavailable
+		}
 		stderr := strings.ToLower(string(result.Stderr))
 		if strings.Contains(stderr, "forbidden") ||
 			strings.Contains(stderr, "permission denied") {
@@ -380,4 +410,9 @@ func (discovery kubernetesWizardDiscovery) run(
 		values = append(values, value)
 	}
 	return values, nil
+}
+
+func isAuthenticationHelperUnavailable(err error) bool {
+	var unavailable *kubernetes.AuthenticationHelperUnavailableError
+	return errors.As(err, &unavailable)
 }
