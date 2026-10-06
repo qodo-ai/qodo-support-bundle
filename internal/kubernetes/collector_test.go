@@ -250,6 +250,47 @@ func TestCollectFailsWhenPodsCannotBeListed(t *testing.T) {
 	}
 }
 
+func TestCollectStopsAcrossExplicitNamespacesForMissingAuthenticationHelper(
+	t *testing.T,
+) {
+	t.Parallel()
+	runner := &fakeRunner{
+		run: func(string) (CommandResult, error) {
+			return CommandResult{Stderr: []byte(
+				"getting credentials: exec: executable company-kube-auth not found\n" +
+					"raw-stderr-secret",
+			)}, errors.New("exit 1")
+		},
+	}
+
+	_, err := Collect(
+		context.Background(),
+		Config{
+			Namespaces:       []string{"qodo", "monitoring"},
+			Since:            time.Minute,
+			Timeout:          time.Second,
+			MaxMetadataBytes: 1 << 20,
+			MaxLogBytes:      1024,
+			MaxTotalLogBytes: 1024,
+			LogWorkers:       1,
+		},
+		runner,
+		&memorySink{},
+		redact.New(),
+	)
+
+	var unavailable *AuthenticationHelperUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Command != "company-kube-auth" {
+		t.Fatalf("error=%T %v", err, err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("collector continued after missing helper: %v", runner.calls)
+	}
+	if strings.Contains(err.Error(), "raw-stderr-secret") {
+		t.Fatalf("typed error leaked stderr: %v", err)
+	}
+}
+
 func TestCollectCoversMultipleNamespacesAndInitContainers(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{

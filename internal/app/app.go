@@ -329,7 +329,20 @@ func runCollect(
 			},
 		)
 		if wizardErr != nil {
-			_, _ = fmt.Fprintln(stderr, wizardErr)
+			var unavailable *kubernetes.AuthenticationHelperUnavailableError
+			if errors.As(wizardErr, &unavailable) {
+				writeAuthenticationHelperGuidance(
+					stderr,
+					unavailable,
+					settings.Context,
+					authenticationVerificationNamespace(
+						settings.AllNamespaces,
+						settings.Namespaces,
+					),
+				)
+			} else {
+				_, _ = fmt.Fprintln(stderr, wizardErr)
+			}
 			if errors.Is(wizardErr, errInteractiveCanceled) {
 				return 1
 			}
@@ -465,6 +478,55 @@ func runCollect(
 		}
 		phoenixConfig = &config
 	}
+	redactor := redact.New()
+	resolvedKubectl, err := resolveKubectl(*kubectl)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
+		return 1
+	}
+	if !*interactive {
+		discovery := kubernetesWizardDiscovery{
+			Runner:     kubernetes.ExecRunner{Binary: resolvedKubectl},
+			Kubeconfig: *kubeconfig,
+		}
+		selectedContext, contextErr := resolveSelectedKubeContext(
+			ctx,
+			discovery.Runner,
+			*kubeconfig,
+			*kubeContext,
+		)
+		if contextErr != nil {
+			_, _ = fmt.Fprintln(stderr, contextErr)
+			return 1
+		}
+		*kubeContext = selectedContext
+		if authErr := discovery.CheckAuthenticationHelper(
+			ctx,
+			selectedContext,
+		); authErr != nil {
+			var unavailable *kubernetes.AuthenticationHelperUnavailableError
+			if errors.As(authErr, &unavailable) {
+				writeAuthenticationHelperGuidance(
+					stderr,
+					unavailable,
+					selectedContext,
+					authenticationVerificationNamespace(
+						*allNamespaces,
+						selectedNamespaces,
+					),
+				)
+			} else {
+				_, _ = fmt.Fprintln(stderr, authErr)
+			}
+			return 1
+		}
+		if prometheusConfig != nil {
+			prometheusConfig.Context = selectedContext
+		}
+		if phoenixConfig != nil {
+			phoenixConfig.Context = selectedContext
+		}
+	}
 	usedDefaultOutput := false
 	if *output == "" {
 		usedDefaultOutput = true
@@ -475,7 +537,6 @@ func runCollect(
 		}
 	}
 
-	redactor := redact.New()
 	if *allNamespaces {
 		message := "Warning: collecting all namespaces includes non-Qodo workloads."
 		if *excludeSystemNamespaces {
@@ -515,16 +576,6 @@ func runCollect(
 		ID: "preflight", Label: "kubectl ready", Level: 1,
 		Status: progressActive,
 	})
-	resolvedKubectl, err := resolveKubectl(*kubectl)
-	if err != nil {
-		progress.Update(progressUpdate{
-			ID: "preflight", Label: "kubectl ready", Level: 1,
-			Status: progressFailed,
-		})
-		closeProgress(progress, stderr)
-		_, _ = fmt.Fprintln(stderr, terminalText(redactor, err.Error()))
-		return 1
-	}
 	progress.Update(progressUpdate{
 		ID: "preflight", Label: "kubectl ready", Level: 1,
 		Status: progressCompleted,
@@ -608,6 +659,24 @@ func runCollect(
 		return 1
 	}
 	if err != nil {
+		var unavailable *kubernetes.AuthenticationHelperUnavailableError
+		if errors.As(err, &unavailable) {
+			progress.Update(progressUpdate{
+				ID: "collection", Label: "Qodo Scout collection",
+				Status: progressFailed,
+			})
+			closeProgress(progress, stderr)
+			writeAuthenticationHelperGuidance(
+				stderr,
+				unavailable,
+				*kubeContext,
+				authenticationVerificationNamespace(
+					*allNamespaces,
+					selectedNamespaces,
+				),
+			)
+			return 1
+		}
 		if errors.Is(err, bundle.ErrCleanup) {
 			progress.Update(progressUpdate{
 				ID: "archive", Label: "Redaction and archive", Level: 1,

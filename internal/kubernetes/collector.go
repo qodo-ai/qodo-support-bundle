@@ -169,7 +169,8 @@ func Collect(
 				runErr,
 				redactor,
 			)
-			if len(namespaces) == 1 {
+			var unavailable *AuthenticationHelperUnavailableError
+			if errors.As(namespaceErr, &unavailable) || len(namespaces) == 1 {
 				return report, namespaceErr
 			}
 			report.Issues = append(report.Issues, Issue{
@@ -1326,6 +1327,9 @@ func commandError(
 	err error,
 	redactor *redact.Redactor,
 ) error {
+	if unavailable := ClassifyAuthenticationHelperUnavailable(result); unavailable != nil {
+		return unavailable
+	}
 	issue := issueFromCommand(operation, resource, result, err, redactor)
 	return errors.New(issue.Message)
 }

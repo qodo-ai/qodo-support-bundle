@@ -214,6 +214,10 @@ func Execute(
 		return result, ctx.Err()
 	}
 	if kubernetesErr != nil {
+		var unavailable *kubernetes.AuthenticationHelperUnavailableError
+		if errors.As(kubernetesErr, &unavailable) {
+			return result, unavailable
+		}
 		kubernetesReport.Issues = append(kubernetesReport.Issues, kubernetes.Issue{
 			Operation: "collect Kubernetes diagnostics",
 			Message:   redactor.Text(kubernetesErr.Error()),

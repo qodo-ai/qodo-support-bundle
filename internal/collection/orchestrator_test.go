@@ -145,6 +145,63 @@ func TestExecutePublishesCompleteKubernetesCollection(t *testing.T) {
 	}
 }
 
+func TestExecuteStopsBeforeArchiveForMissingAuthenticationHelper(t *testing.T) {
+	t.Parallel()
+	archive := &recordingArchive{}
+	workloadCalled := false
+
+	_, err := Execute(
+		context.Background(),
+		Request{
+			CollectorVersion: "test",
+			CurrentTime:      time.Now,
+			Kubernetes: kubernetes.Config{
+				Namespaces: []string{"qodo"},
+			},
+		},
+		unusedRunner{},
+		archive,
+		redact.New(),
+		Collectors{
+			Kubernetes: func(
+				context.Context,
+				kubernetes.Config,
+				kubernetes.Runner,
+				kubernetes.Sink,
+				*redact.Redactor,
+			) (kubernetes.Report, error) {
+				return kubernetes.Report{},
+					&kubernetes.AuthenticationHelperUnavailableError{
+						Command: "company-kube-auth",
+					}
+			},
+			Workload: func(
+				context.Context,
+				workload.Config,
+				kubernetes.Runner,
+				kubernetes.Sink,
+				*redact.Redactor,
+			) (workload.Report, error) {
+				workloadCalled = true
+				return workload.Report{}, nil
+			},
+		},
+	)
+
+	var unavailable *kubernetes.AuthenticationHelperUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Command != "company-kube-auth" {
+		t.Fatalf("error=%T %v", err, err)
+	}
+	if workloadCalled || archive.finalizeCalls != 0 || len(archive.files) != 0 {
+		t.Fatalf(
+			"collection continued: workload=%t finalize=%d files=%v",
+			workloadCalled,
+			archive.finalizeCalls,
+			archive.files,
+		)
+	}
+}
+
 func TestExecuteReportsKubernetesWorkloadAndSummaryStages(t *testing.T) {
 	t.Parallel()
 	archive := &recordingArchive{}

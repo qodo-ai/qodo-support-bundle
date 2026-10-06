@@ -1563,6 +1563,12 @@ func fakeKubectl(t *testing.T, directory string, probeOutput string) string {
 	}
 	script := `#!/bin/sh
 case " $* " in
+  *" config current-context "*)
+    printf '%s\n' 'customer'
+    ;;
+  *" config view --minify --output=json "*)
+    printf '%s\n' '{"users":[{"name":"customer","user":{"token":"REDACTED"}}]}'
+    ;;
   *" get namespaces "*)
     printf '%s\n' '{"items":[{"metadata":{"name":"qodo"}},{"metadata":{"name":"kube-system"}}]}'
     ;;
