@@ -2,7 +2,7 @@
 
 <img src="docs/assets/qodo-scout-logo.jpg" alt="Qodo Scout logo: a magnifying glass inspecting protected diagnostics" width="160">
 
-[![Qodo Scout version v0.3.0](https://img.shields.io/badge/version-v0.3.0-blue?style=flat-square)](https://github.com/qodo-ai/qodo-support-bundle/releases/tag/v0.3.0)
+[![Qodo Scout version v0.3.1](https://img.shields.io/badge/version-v0.3.1-blue?style=flat-square)](https://github.com/qodo-ai/qodo-support-bundle/releases/tag/v0.3.1)
 ![Supported platforms: macOS, Linux, and Windows](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-informational?style=flat-square)
 ![Safety: read-only diagnostic collection](https://img.shields.io/badge/safety-read--only%20diagnostic%20collection-success?style=flat-square)
 
@@ -12,7 +12,7 @@ existing `kubectl` access and never uploads the resulting bundle automatically.
 
 ## Install
 
-The version-pinned installers download the immutable 0.3.0 release and verify
+The version-pinned installers download the immutable 0.3.1 release and verify
 the selected binary with SHA-256 before installing the `qodo-scout` command.
 They do not start a collection.
 
@@ -22,8 +22,8 @@ They do not start a collection.
 rm -f ./install-qodo-scout.sh
 curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 \
   -o ./install-qodo-scout.sh \
-  https://get.qodo.ai/support-bundle/releases/0.3.0/install.sh &&
-  sh ./install-qodo-scout.sh --version 0.3.0 --add-to-path
+  https://get.qodo.ai/support-bundle/releases/0.3.1/install.sh &&
+  sh ./install-qodo-scout.sh --version 0.3.1 --add-to-path
 ```
 
 Use the installed command immediately in the same shell:
@@ -43,7 +43,7 @@ qodo-scout collect --interactive
 Run this in **Command Prompt (cmd.exe)**:
 
 ```bat
-curl.exe -fSLo "%TEMP%\install-qodo-scout.ps1" "https://get.qodo.ai/support-bundle/releases/0.3.0/install.ps1" && powershell.exe -NoProfile -File "%TEMP%\install-qodo-scout.ps1" -Version 0.3.0 -AddToPath
+curl.exe -fSLo "%TEMP%\install-qodo-scout.ps1" "https://get.qodo.ai/support-bundle/releases/0.3.1/install.ps1" && powershell.exe -NoProfile -File "%TEMP%\install-qodo-scout.ps1" -Version 0.3.1 -AddToPath
 ```
 
 Use the installed command immediately in the same Command Prompt session:
