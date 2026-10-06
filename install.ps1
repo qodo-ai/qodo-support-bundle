@@ -48,6 +48,53 @@ function Resolve-QodoScoutAsset {
     throw "unsupported platform: $OperatingSystem $Architecture"
 }
 
+function ConvertTo-QodoScoutArchitecture {
+    param([Parameter(Mandatory)][string]$Value)
+
+    switch ($Value.Trim().ToUpperInvariant()) {
+        'AMD64' { return 'X64' }
+        'X64' { return 'X64' }
+        'ARM64' { return 'Arm64' }
+        default { throw "unsupported Windows architecture: $Value" }
+    }
+}
+
+function Resolve-QodoScoutArchitecture {
+    param(
+        [AllowNull()][object]$RuntimeArchitecture,
+        [AllowNull()][string]$ProcessorArchitectureW6432 = (
+            $env:PROCESSOR_ARCHITEW6432
+        ),
+        [AllowNull()][string]$ProcessorArchitecture = (
+            $env:PROCESSOR_ARCHITECTURE
+        )
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ProcessorArchitectureW6432)) {
+        return ConvertTo-QodoScoutArchitecture `
+            -Value $ProcessorArchitectureW6432
+    }
+    if (-not $PSBoundParameters.ContainsKey('RuntimeArchitecture')) {
+        try {
+            $RuntimeArchitecture = (
+                [Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+            )
+        }
+        catch {
+            $RuntimeArchitecture = $null
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$RuntimeArchitecture)) {
+        return ConvertTo-QodoScoutArchitecture `
+            -Value ([string]$RuntimeArchitecture)
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ProcessorArchitecture)) {
+        throw 'unable to detect a supported Windows architecture'
+    }
+    return ConvertTo-QodoScoutArchitecture -Value $ProcessorArchitecture
+}
+
 function Get-QodoScoutManifestDigest {
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$ManifestText,
@@ -201,9 +248,7 @@ function Install-QodoScout {
         [string]$RequestedVersion,
         [string]$RequestedInstallDirectory,
         [string]$RequestedSourceDirectory,
-        [string]$RuntimeArchitecture = (
-            [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-        ),
+        [string]$RuntimeArchitecture,
         [switch]$UpdateUserPath
     )
 
@@ -212,9 +257,16 @@ function Install-QodoScout {
         )) {
         throw 'unsupported platform: install.ps1 requires Windows'
     }
+    if ($PSBoundParameters.ContainsKey('RuntimeArchitecture')) {
+        $resolvedArchitecture = ConvertTo-QodoScoutArchitecture `
+            -Value $RuntimeArchitecture
+    }
+    else {
+        $resolvedArchitecture = Resolve-QodoScoutArchitecture
+    }
     $asset = Resolve-QodoScoutAsset `
         -OperatingSystem 'windows' `
-        -Architecture $RuntimeArchitecture
+        -Architecture $resolvedArchitecture
 
     if ([string]::IsNullOrWhiteSpace($RequestedInstallDirectory)) {
         if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {

@@ -1,4 +1,10 @@
 $ErrorActionPreference = 'Stop'
+$script:IsWindowsPlatform = if (Test-Path variable:IsWindows) {
+    $IsWindows
+}
+else {
+    $env:OS -eq 'Windows_NT'
+}
 
 BeforeAll {
     $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -11,6 +17,47 @@ AfterAll {
 }
 
 Describe 'Qodo Scout Windows installer contracts' {
+    It 'uses a non-null runtime architecture before Windows environment fallbacks' {
+        Resolve-QodoScoutArchitecture `
+            -RuntimeArchitecture 'Arm64' `
+            -ProcessorArchitectureW6432 $null `
+            -ProcessorArchitecture 'AMD64' |
+            Should -Be 'Arm64'
+    }
+
+    It 'prefers the native ARM64 environment signal under x64 emulation' {
+        Resolve-QodoScoutArchitecture `
+            -RuntimeArchitecture 'X64' `
+            -ProcessorArchitectureW6432 'ARM64' `
+            -ProcessorArchitecture 'AMD64' |
+            Should -Be 'Arm64'
+    }
+
+    It 'falls back to native Windows ARM64 under emulation' {
+        Resolve-QodoScoutArchitecture `
+            -RuntimeArchitecture $null `
+            -ProcessorArchitectureW6432 'ARM64' `
+            -ProcessorArchitecture 'AMD64' |
+            Should -Be 'Arm64'
+    }
+
+    It 'falls back to native Windows AMD64' {
+        Resolve-QodoScoutArchitecture `
+            -RuntimeArchitecture $null `
+            -ProcessorArchitectureW6432 $null `
+            -ProcessorArchitecture 'AMD64' |
+            Should -Be 'X64'
+    }
+
+    It 'fails clearly for an unsupported detected architecture' {
+        {
+            Resolve-QodoScoutArchitecture `
+                -RuntimeArchitecture $null `
+                -ProcessorArchitectureW6432 $null `
+                -ProcessorArchitecture 'x86'
+        } | Should -Throw '*unsupported Windows architecture: x86*'
+    }
+
     It 'maps native Windows architectures to their published assets' {
         Resolve-QodoScoutAsset -OperatingSystem 'windows' -Architecture 'X64' |
             Should -Be 'qodo-support-bundle-windows-amd64.exe'
@@ -109,7 +156,7 @@ Describe 'Qodo Scout Windows installer contracts' {
     }
 }
 
-Describe 'Qodo Scout local source installation' -Skip:(-not $IsWindows) {
+Describe 'Qodo Scout local source installation' -Skip:(-not $script:IsWindowsPlatform) {
     BeforeEach {
         $script:CaseRoot = Join-Path $TestDrive 'case with spaces'
         $script:SourceDirectory = Join-Path $script:CaseRoot 'source'
@@ -213,7 +260,7 @@ Describe 'Qodo Scout local source installation' -Skip:(-not $IsWindows) {
     }
 }
 
-Describe 'Qodo Scout pinned network installation' -Skip:(-not $IsWindows) {
+Describe 'Qodo Scout pinned network installation' -Skip:(-not $script:IsWindowsPlatform) {
     BeforeEach {
         $script:DownloadedUris = @()
         $script:InstallerTempDirectory = $null
