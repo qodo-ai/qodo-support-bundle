@@ -14,6 +14,53 @@ import (
 	"github.com/qodo-ai/qodo-support-bundle/internal/kubernetes"
 )
 
+func TestResolveSelectedKubeContextUsesDiscoveryKubeconfig(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		kubeconfig string
+		want       []string
+	}{
+		{
+			name:       "explicit kubeconfig",
+			kubeconfig: "/private/custom-kubeconfig",
+			want: []string{
+				"--kubeconfig", "/private/custom-kubeconfig",
+				"config", "current-context",
+			},
+		},
+		{
+			name: "default merged KUBECONFIG",
+			want: []string{"config", "current-context"},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			runner := &wizardRunnerStub{results: []kubernetes.CommandResult{{
+				Stdout: []byte("customer\n"),
+			}}}
+			discovery := kubernetesWizardDiscovery{
+				Runner:     runner,
+				Kubeconfig: test.kubeconfig,
+			}
+
+			selected, err := resolveSelectedKubeContext(
+				context.Background(),
+				discovery,
+				"",
+			)
+			if err != nil || selected != "customer" {
+				t.Fatalf("selected=%q err=%v", selected, err)
+			}
+			if !reflect.DeepEqual(runner.calls, [][]string{test.want}) {
+				t.Fatalf("calls=%q want=%q", runner.calls, [][]string{test.want})
+			}
+		})
+	}
+}
+
 func TestAuthenticationHelperPreflightRejectsMissingBareHelper(t *testing.T) {
 	t.Parallel()
 	const (
@@ -294,6 +341,7 @@ func TestCollectMissingHelperFailsBeforeAPIAndCreatesNoArchive(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	callLog := filepath.Join(root, "calls.log")
+	kubeconfig := filepath.Join(root, "private-canary-kubeconfig")
 	kubectl := fakeAuthenticationKubectl(
 		t,
 		root,
@@ -309,7 +357,7 @@ func TestCollectMissingHelperFailsBeforeAPIAndCreatesNoArchive(t *testing.T) {
 		context.Background(),
 		[]string{
 			"collect",
-			"--context", "customer",
+			"--kubeconfig", kubeconfig,
 			"--namespace", "qodo",
 			"--kubectl", kubectl,
 			"--output", output,
@@ -335,6 +383,19 @@ func TestCollectMissingHelperFailsBeforeAPIAndCreatesNoArchive(t *testing.T) {
 		strings.Contains(string(calls), "get pods") {
 		t.Fatalf("Kubernetes API call ran before auth failure:\n%s", calls)
 	}
+	if !strings.Contains(
+		string(calls),
+		"--kubeconfig "+kubeconfig+" config current-context",
+	) {
+		t.Fatalf("context resolution ignored the explicit kubeconfig:\n%s", calls)
+	}
+	if !strings.Contains(
+		string(calls),
+		"--kubeconfig "+kubeconfig+
+			" --context customer config view --minify --output=json",
+	) {
+		t.Fatalf("preflight ignored the explicit kubeconfig:\n%s", calls)
+	}
 	for _, expected := range []string{
 		"Kubernetes authentication is unavailable",
 		"Context: customer",
@@ -350,6 +411,7 @@ func TestCollectMissingHelperFailsBeforeAPIAndCreatesNoArchive(t *testing.T) {
 		"qodo-scout-definitely-missing-auth-helper",
 		"Required command",
 		"administrator",
+		kubeconfig,
 	} {
 		if strings.Contains(stderr.String(), forbidden) {
 			t.Fatalf("stderr retained %q:\n%s", forbidden, stderr.String())
@@ -366,10 +428,66 @@ func TestCollectMissingHelperFailsBeforeAPIAndCreatesNoArchive(t *testing.T) {
 	}
 }
 
+func TestCollectCustomKubeconfigTokenAuthenticationProceeds(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	kubeconfig := filepath.Join(root, "private-token-kubeconfig")
+	if err := os.WriteFile(
+		kubeconfig,
+		[]byte("apiVersion: v1\nkind: Config\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	backend := fakeKubectl(t, filepath.Join(root, "backend"), "")
+	kubectl := kubeconfigEnforcingKubectl(
+		t,
+		filepath.Join(root, "bin"),
+		kubeconfig,
+		backend,
+	)
+	output := filepath.Join(root, "bundle.tar.gz")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run(
+		context.Background(),
+		[]string{
+			"collect",
+			"--kubeconfig", kubeconfig,
+			"--namespace", "qodo",
+			"--kubectl", kubectl,
+			"--output", output,
+			"--no-progress",
+		},
+		&stdout,
+		&stderr,
+	)
+
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Stat(output); err != nil {
+		t.Fatalf("token-auth collection created no archive: %v", err)
+	}
+	for _, forbidden := range []string{
+		kubeconfig,
+		"Kubernetes authentication is unavailable",
+		"raw-token-secret",
+	} {
+		if strings.Contains(stderr.String(), forbidden) ||
+			strings.Contains(stdout.String(), forbidden) {
+			t.Fatalf("output retained %q: stdout=%q stderr=%q",
+				forbidden, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestCollectInteractiveMissingHelperUsesSameStableGuidance(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	output := filepath.Join(root, "bundle.tar.gz")
+	kubeconfig := filepath.Join(root, "private-interactive-kubeconfig")
 	discovery := &authWizardDiscoveryStub{
 		wizardDiscoveryStub: wizardDiscoveryStub{
 			contexts:       []string{"customer"},
@@ -388,6 +506,7 @@ func TestCollectInteractiveMissingHelperUsesSameStableGuidance(t *testing.T) {
 			"collect",
 			"--interactive",
 			"--no-progress",
+			"--kubeconfig", kubeconfig,
 			"--namespace", "qodo",
 			"--output", output,
 		},
@@ -397,7 +516,14 @@ func TestCollectInteractiveMissingHelperUsesSameStableGuidance(t *testing.T) {
 		interactiveRuntime{
 			InputTTY:  func(io.Reader) bool { return true },
 			OutputTTY: func(io.Writer) bool { return true },
-			NewDiscovery: func(string, string) (interactiveDiscovery, error) {
+			NewDiscovery: func(_ string, gotKubeconfig string) (interactiveDiscovery, error) {
+				if gotKubeconfig != kubeconfig {
+					t.Fatalf(
+						"interactive kubeconfig=%q want=%q",
+						gotKubeconfig,
+						kubeconfig,
+					)
+				}
 				return discovery, nil
 			},
 			Forms: &wizardFormsStub{},
@@ -409,6 +535,9 @@ func TestCollectInteractiveMissingHelperUsesSameStableGuidance(t *testing.T) {
 	}
 	if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("interactive missing helper created archive: %v", err)
+	}
+	if strings.Contains(stderr.String(), kubeconfig) {
+		t.Fatalf("interactive guidance leaked kubeconfig path: %q", stderr.String())
 	}
 	var expected bytes.Buffer
 	writeAuthenticationHelperGuidance(
@@ -537,6 +666,41 @@ case " $* " in
     exit 92
     ;;
 esac
+`
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func kubeconfigEnforcingKubectl(
+	t *testing.T,
+	directory string,
+	kubeconfig string,
+	backend string,
+) string {
+	t.Helper()
+	path := filepath.Join(directory, "kubectl")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	quotedKubeconfig := "'" + strings.ReplaceAll(kubeconfig, "'", `'\''`) + "'"
+	quotedBackend := "'" + strings.ReplaceAll(backend, "'", `'\''`) + "'"
+	script := `#!/bin/sh
+expected=` + quotedKubeconfig + `
+previous=
+found=
+for argument in "$@"; do
+  if [ "$previous" = "--kubeconfig" ] && [ "$argument" = "$expected" ]; then
+    found=1
+  fi
+  previous=$argument
+done
+if [ "$found" != 1 ]; then
+  printf '%s\n' 'explicit kubeconfig was not forwarded' >&2
+  exit 96
+fi
+exec ` + quotedBackend + ` "$@"
 `
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)

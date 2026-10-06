@@ -102,16 +102,24 @@ func authenticationHelperCommand(data []byte) (string, error) {
 
 func resolveSelectedKubeContext(
 	ctx context.Context,
-	runner kubernetes.Runner,
-	kubeconfig string,
+	discovery kubernetesWizardDiscovery,
 	explicitContext string,
 ) (string, error) {
 	if explicitContext != "" {
 		return explicitContext, nil
 	}
-	arguments := kubeconfigArguments(kubeconfig)
+	if discovery.Runner == nil {
+		return "", errors.New(
+			"unable to read current kubeconfig context; check kubectl and kubeconfig settings",
+		)
+	}
+	arguments := discovery.baseArguments()
 	arguments = append(arguments, "config", "current-context")
-	result, err := runner.Run(ctx, kubeconfigInspectionLimit, arguments...)
+	result, err := discovery.Runner.Run(
+		ctx,
+		kubeconfigInspectionLimit,
+		arguments...,
+	)
 	if err != nil || result.Truncated {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return "", context.Canceled

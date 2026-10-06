@@ -491,8 +491,7 @@ func runCollect(
 		}
 		selectedContext, contextErr := resolveSelectedKubeContext(
 			ctx,
-			discovery.Runner,
-			*kubeconfig,
+			discovery,
 			*kubeContext,
 		)
 		if contextErr != nil {
