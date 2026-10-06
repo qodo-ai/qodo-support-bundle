@@ -14,7 +14,7 @@ type AuthenticationHelperUnavailableError struct {
 }
 
 func (err *AuthenticationHelperUnavailableError) Error() string {
-	return "Kubernetes authentication helper is unavailable"
+	return "Kubernetes authentication is unavailable"
 }
 
 func (err *AuthenticationHelperUnavailableError) Unwrap() error {

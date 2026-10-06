@@ -6,6 +6,22 @@ import (
 	"testing"
 )
 
+func TestAuthenticationHelperUnavailableErrorUsesConciseProviderNeutralCopy(
+	t *testing.T,
+) {
+	t.Parallel()
+	err := (&AuthenticationHelperUnavailableError{
+		Command: "arbitrary-provider-auth-command",
+	}).Error()
+	if err != "Kubernetes authentication is unavailable" {
+		t.Fatalf("error=%q", err)
+	}
+	if strings.Contains(err, "arbitrary-provider-auth-command") ||
+		strings.Contains(strings.ToLower(err), "helper") {
+		t.Fatalf("error exposed helper details: %q", err)
+	}
+}
+
 func TestClassifyAuthenticationHelperUnavailableAcceptsOnlyKnownKubectlError(
 	t *testing.T,
 ) {

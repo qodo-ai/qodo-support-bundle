@@ -185,33 +185,39 @@ func TestAuthenticationHelperGuidanceIsStableAndTerminalSafe(t *testing.T) {
 	writeAuthenticationHelperGuidance(
 		&output,
 		&kubernetes.AuthenticationHelperUnavailableError{
-			Command: "company-kube-auth\x1b[2J",
+			Command: "arbitrary-provider-auth-command\x1b[2J",
 		},
 		"customer\r\nforged",
 		"qodo\x1b[31m",
 	)
 
 	got := output.String()
-	want := `Kubernetes authentication helper is unavailable
+	want := `Kubernetes authentication is unavailable
 
 Context: customer  forged
-Required command: company-kube-auth [2J
 
-This kubeconfig requires an external authentication command that Scout could not find or start on this workstation.
-
-Install and authenticate with the required helper using your organization’s approved setup, ensure it is available on PATH, then verify:
+Configure authentication for this context, then verify:
 
 kubectl --context <context> get pods --namespace <namespace>
 
-After kubectl succeeds, rerun Qodo Scout.
-
-If you do not recognize the required command, contact your Kubernetes or platform administrator.
+Rerun Qodo Scout after kubectl succeeds.
 `
 	if got != want {
 		t.Fatalf("guidance:\ngot  %q\nwant %q", got, want)
 	}
 	if strings.Contains(got, "\x1b") || strings.Contains(got, "\r") {
 		t.Fatalf("guidance retained terminal controls: %q", got)
+	}
+	for _, forbidden := range []string{
+		"arbitrary-provider-auth-command",
+		"authentication helper",
+		"Required command",
+		"external authentication command",
+		"administrator",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("guidance retained %q: %q", forbidden, got)
+		}
 	}
 }
 
@@ -330,14 +336,23 @@ func TestCollectMissingHelperFailsBeforeAPIAndCreatesNoArchive(t *testing.T) {
 		t.Fatalf("Kubernetes API call ran before auth failure:\n%s", calls)
 	}
 	for _, expected := range []string{
-		"Kubernetes authentication helper is unavailable",
+		"Kubernetes authentication is unavailable",
 		"Context: customer",
-		"Required command: qodo-scout-definitely-missing-auth-helper",
+		"Configure authentication for this context, then verify:",
 		"kubectl --context customer get pods --namespace qodo",
-		"contact your Kubernetes or platform administrator",
+		"Rerun Qodo Scout after kubectl succeeds.",
 	} {
 		if !strings.Contains(stderr.String(), expected) {
 			t.Fatalf("stderr missing %q:\n%s", expected, stderr.String())
+		}
+	}
+	for _, forbidden := range []string{
+		"qodo-scout-definitely-missing-auth-helper",
+		"Required command",
+		"administrator",
+	} {
+		if strings.Contains(stderr.String(), forbidden) {
+			t.Fatalf("stderr retained %q:\n%s", forbidden, stderr.String())
 		}
 	}
 	for _, secret := range []string{
@@ -438,12 +453,20 @@ func TestCollectFallbackClassifiesRealKubectlMissingHelperError(t *testing.T) {
 	if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("fallback missing helper created archive: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "Required command: company-kube-auth") ||
-		!strings.Contains(
-			stderr.String(),
-			"kubectl --context customer get pods --namespace qodo",
-		) {
+	if !strings.Contains(
+		stderr.String(),
+		"kubectl --context customer get pods --namespace qodo",
+	) {
 		t.Fatalf("fallback guidance missing:\n%s", stderr.String())
+	}
+	for _, forbidden := range []string{
+		"company-kube-auth",
+		"Required command",
+		"administrator",
+	} {
+		if strings.Contains(stderr.String(), forbidden) {
+			t.Fatalf("fallback guidance retained %q:\n%s", forbidden, stderr.String())
+		}
 	}
 	if strings.Contains(stderr.String(), "raw-stderr-secret") {
 		t.Fatalf("fallback leaked complete kubectl stderr:\n%s", stderr.String())
