@@ -432,7 +432,20 @@ func TestCollectCustomKubeconfigTokenAuthenticationProceeds(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	kubeconfig := filepath.Join(root, "private-token-kubeconfig")
-	kubectl := fakeKubectl(t, filepath.Join(root, "bin"), "")
+	if err := os.WriteFile(
+		kubeconfig,
+		[]byte("apiVersion: v1\nkind: Config\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	backend := fakeKubectl(t, filepath.Join(root, "backend"), "")
+	kubectl := kubeconfigEnforcingKubectl(
+		t,
+		filepath.Join(root, "bin"),
+		kubeconfig,
+		backend,
+	)
 	output := filepath.Join(root, "bundle.tar.gz")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -653,6 +666,41 @@ case " $* " in
     exit 92
     ;;
 esac
+`
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func kubeconfigEnforcingKubectl(
+	t *testing.T,
+	directory string,
+	kubeconfig string,
+	backend string,
+) string {
+	t.Helper()
+	path := filepath.Join(directory, "kubectl")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	quotedKubeconfig := "'" + strings.ReplaceAll(kubeconfig, "'", `'\''`) + "'"
+	quotedBackend := "'" + strings.ReplaceAll(backend, "'", `'\''`) + "'"
+	script := `#!/bin/sh
+expected=` + quotedKubeconfig + `
+previous=
+found=
+for argument in "$@"; do
+  if [ "$previous" = "--kubeconfig" ] && [ "$argument" = "$expected" ]; then
+    found=1
+  fi
+  previous=$argument
+done
+if [ "$found" != 1 ]; then
+  printf '%s\n' 'explicit kubeconfig was not forwarded' >&2
+  exit 96
+fi
+exec ` + quotedBackend + ` "$@"
 `
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
