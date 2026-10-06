@@ -94,6 +94,18 @@ jobs:
           Invoke-ScriptAnalyzer -Path ./install.ps1 -EnableExit
           Invoke-Pester -Path ./tests/Install.Tests.ps1 -CI
 
+      - name: Test Windows installer with Windows PowerShell 5.1
+        if: ${{ runner.os == 'Windows' }}
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw "expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
+          }
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force
+          Import-Module Pester -RequiredVersion 5.7.1
+          Invoke-Pester -Path ./tests/Install.Tests.ps1 -CI
+
       - name: Download release assets for native ARM64 validation
         if: ${{ matrix.os == 'windows-11-arm' }}
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
@@ -103,7 +115,7 @@ jobs:
 
       - name: Exercise native Windows ARM64 release and installer
         if: ${{ matrix.os == 'windows-11-arm' }}
-        shell: pwsh
+        shell: powershell
         run: |
           $release = Join-Path $env:RUNNER_TEMP 'qodo-scout-arm64-release'
           $install = Join-Path $env:RUNNER_TEMP 'qodo-scout-arm64-install'
