@@ -358,7 +358,6 @@ func TestCollectMissingHelperFailsBeforeAPIAndCreatesNoArchive(t *testing.T) {
 		[]string{
 			"collect",
 			"--kubeconfig", kubeconfig,
-			"--context", "customer",
 			"--namespace", "qodo",
 			"--kubectl", kubectl,
 			"--output", output,
@@ -383,6 +382,12 @@ func TestCollectMissingHelperFailsBeforeAPIAndCreatesNoArchive(t *testing.T) {
 	if strings.Contains(string(calls), "get namespaces") ||
 		strings.Contains(string(calls), "get pods") {
 		t.Fatalf("Kubernetes API call ran before auth failure:\n%s", calls)
+	}
+	if !strings.Contains(
+		string(calls),
+		"--kubeconfig "+kubeconfig+" config current-context",
+	) {
+		t.Fatalf("context resolution ignored the explicit kubeconfig:\n%s", calls)
 	}
 	if !strings.Contains(
 		string(calls),
@@ -437,7 +442,6 @@ func TestCollectCustomKubeconfigTokenAuthenticationProceeds(t *testing.T) {
 		[]string{
 			"collect",
 			"--kubeconfig", kubeconfig,
-			"--context", "customer",
 			"--namespace", "qodo",
 			"--kubectl", kubectl,
 			"--output", output,
