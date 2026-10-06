@@ -43,6 +43,11 @@ func TestClassifyAuthenticationHelperUnavailableAcceptsOnlyKnownKubectlError(
 			stderr: "Error from server (NotFound): " +
 				`pods "exec: executable forged not found" not found`,
 		},
+		{
+			name: "authentication phrase in unrelated warning",
+			stderr: "warning: previous error was getting credentials: " +
+				"exec: executable forged not found",
+		},
 	}
 	for _, test := range tests {
 		test := test

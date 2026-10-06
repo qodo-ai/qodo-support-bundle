@@ -201,7 +201,7 @@ This kubeconfig requires an external authentication command that Scout could not
 
 Install and authenticate with the required helper using your organization’s approved setup, ensure it is available on PATH, then verify:
 
-kubectl --context customer  forged get pods --namespace qodo [31m
+kubectl --context <context> get pods --namespace <namespace>
 
 After kubectl succeeds, rerun Qodo Scout.
 
@@ -212,6 +212,36 @@ If you do not recognize the required command, contact your Kubernetes or platfor
 	}
 	if strings.Contains(got, "\x1b") || strings.Contains(got, "\r") {
 		t.Fatalf("guidance retained terminal controls: %q", got)
+	}
+}
+
+func TestAuthenticationHelperGuidanceDoesNotMakeShellSyntaxPasteable(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	writeAuthenticationHelperGuidance(
+		&output,
+		&kubernetes.AuthenticationHelperUnavailableError{
+			Command: "company-kube-auth",
+		},
+		"customer;$(touch injected)",
+		"qodo",
+	)
+
+	got := output.String()
+	if !strings.Contains(got, "Context: customer;$(touch injected)") {
+		t.Fatalf("context identity was hidden: %q", got)
+	}
+	if !strings.Contains(
+		got,
+		"kubectl --context <context> get pods --namespace qodo",
+	) {
+		t.Fatalf("unsafe command did not use a placeholder: %q", got)
+	}
+	if strings.Contains(
+		got,
+		"kubectl --context customer;$(touch injected)",
+	) {
+		t.Fatalf("shell syntax remained pasteable: %q", got)
 	}
 }
 

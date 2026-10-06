@@ -102,6 +102,7 @@ type collectedLog struct {
 	data              []byte
 	retainedTruncated bool
 	issue             *Issue
+	err               error
 	reserved          int64
 }
 

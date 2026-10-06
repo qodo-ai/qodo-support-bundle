@@ -291,6 +291,71 @@ func TestCollectStopsAcrossExplicitNamespacesForMissingAuthenticationHelper(
 	}
 }
 
+func TestCollectPropagatesMissingAuthenticationHelperFromLaterCommands(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, stage := range []string{"events", "logs"} {
+		stage := stage
+		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
+			runner := &fakeRunner{
+				run: func(arguments string) (CommandResult, error) {
+					switch {
+					case strings.Contains(arguments, "get pods"):
+						return CommandResult{Stdout: []byte(prettyJSONLogPodJSON)}, nil
+					case strings.Contains(arguments, "get events"):
+						if stage == "events" {
+							return missingAuthenticationHelperResult()
+						}
+						return CommandResult{Stdout: []byte(`{"items":[]}`)}, nil
+					case strings.HasPrefix(arguments, "logs "):
+						if stage == "logs" {
+							return missingAuthenticationHelperResult()
+						}
+						return CommandResult{Stdout: []byte("ready\n")}, nil
+					default:
+						return CommandResult{}, errors.New("unexpected command")
+					}
+				},
+			}
+
+			_, err := Collect(
+				context.Background(),
+				Config{
+					Namespaces:       []string{"qodo"},
+					Since:            time.Minute,
+					Timeout:          time.Second,
+					MaxMetadataBytes: 1 << 20,
+					MaxLogBytes:      1024,
+					MaxTotalLogBytes: 1024,
+					LogWorkers:       1,
+				},
+				runner,
+				&memorySink{},
+				redact.New(),
+			)
+
+			var unavailable *AuthenticationHelperUnavailableError
+			if !errors.As(err, &unavailable) ||
+				unavailable.Command != "company-kube-auth" {
+				t.Fatalf("error=%T %v", err, err)
+			}
+			if strings.Contains(err.Error(), "raw-stderr-secret") {
+				t.Fatalf("typed error leaked stderr: %v", err)
+			}
+		})
+	}
+}
+
+func missingAuthenticationHelperResult() (CommandResult, error) {
+	return CommandResult{Stderr: []byte(
+		"Unable to connect to the server: getting credentials: " +
+			"exec: executable company-kube-auth not found\n" +
+			"raw-stderr-secret",
+	)}, errors.New("exit 1")
+}
+
 func TestCollectCoversMultipleNamespacesAndInitContainers(t *testing.T) {
 	t.Parallel()
 	runner := &fakeRunner{

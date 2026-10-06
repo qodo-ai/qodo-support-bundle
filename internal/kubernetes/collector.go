@@ -415,6 +415,9 @@ func collectEvents(
 		if contextErr := ctx.Err(); contextErr != nil {
 			return contextErr
 		}
+		if unavailable := ClassifyAuthenticationHelperUnavailable(result); unavailable != nil {
+			return unavailable
+		}
 		report.Issues = append(
 			report.Issues,
 			issueFromCommand("list events", namespace, result, err, redactor),
@@ -532,6 +535,9 @@ func collectLogs(
 		if ctx.Err() != nil {
 			continue
 		}
+		if result.err != nil {
+			return result.err
+		}
 		retained := int64(0)
 		if result.issue != nil {
 			report.Issues = append(report.Issues, *result.issue)
@@ -607,6 +613,9 @@ func readLog(
 	)
 	resource := request.namespace + "/" + request.podName + "/" + request.containerName
 	if err != nil {
+		if unavailable := ClassifyAuthenticationHelperUnavailable(result); unavailable != nil {
+			return collectedLog{err: unavailable, reserved: request.maxBytes}
+		}
 		issue := issueFromCommand(operation, resource, result, err, redactor)
 		return collectedLog{issue: &issue, reserved: request.maxBytes}
 	}

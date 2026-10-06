@@ -148,6 +148,8 @@ func writeAuthenticationHelperGuidance(
 	contextDisplay := terminalLine(kubeContext)
 	commandDisplay := terminalLine(unavailable.Command)
 	namespaceDisplay := terminalLine(namespace)
+	contextArgument := verificationCommandArgument(contextDisplay, "<context>")
+	namespaceArgument := verificationCommandArgument(namespaceDisplay, "<namespace>")
 	_, _ = fmt.Fprintf(
 		writer,
 		"Kubernetes authentication helper is unavailable\n\n"+
@@ -160,9 +162,25 @@ func writeAuthenticationHelperGuidance(
 			"If you do not recognize the required command, contact your Kubernetes or platform administrator.\n",
 		contextDisplay,
 		commandDisplay,
-		contextDisplay,
-		namespaceDisplay,
+		contextArgument,
+		namespaceArgument,
 	)
+}
+
+func verificationCommandArgument(value string, placeholder string) string {
+	if value == "" {
+		return placeholder
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			strings.ContainsRune("-._:/@+", character) {
+			continue
+		}
+		return placeholder
+	}
+	return value
 }
 
 func authenticationVerificationNamespace(

@@ -29,27 +29,35 @@ func ClassifyAuthenticationHelperUnavailable(
 	if result.StderrTruncated {
 		return nil
 	}
-	const prefix = "getting credentials: exec: executable "
 	stderr := string(result.Stderr)
-	offset := strings.Index(strings.ToLower(stderr), prefix)
-	if offset < 0 {
-		return nil
+	const credentialPrefix = "getting credentials: exec: executable "
+	prefixes := []string{
+		credentialPrefix,
+		"error: " + credentialPrefix,
+		"unable to connect to the server: " + credentialPrefix,
 	}
-	line := stderr[offset+len(prefix):]
-	if end := strings.IndexAny(line, "\r\n"); end >= 0 {
-		line = line[:end]
+	for _, rawLine := range strings.Split(stderr, "\n") {
+		line := strings.TrimSpace(rawLine)
+		lower := strings.ToLower(line)
+		for _, prefix := range prefixes {
+			if !strings.HasPrefix(lower, prefix) {
+				continue
+			}
+			const suffix = " not found"
+			remainder := line[len(prefix):]
+			if !strings.HasSuffix(strings.ToLower(remainder), suffix) {
+				continue
+			}
+			command := strings.TrimSpace(remainder[:len(remainder)-len(suffix)])
+			if command == "" || len(command) > 4096 ||
+				strings.IndexFunc(command, unicode.IsControl) >= 0 {
+				return nil
+			}
+			return &AuthenticationHelperUnavailableError{
+				Command: command,
+				Cause:   errors.New("kubectl could not start the authentication helper"),
+			}
+		}
 	}
-	const suffix = " not found"
-	if !strings.HasSuffix(strings.ToLower(line), suffix) {
-		return nil
-	}
-	command := strings.TrimSpace(line[:len(line)-len(suffix)])
-	if command == "" || len(command) > 4096 ||
-		strings.IndexFunc(command, unicode.IsControl) >= 0 {
-		return nil
-	}
-	return &AuthenticationHelperUnavailableError{
-		Command: command,
-		Cause:   errors.New("kubectl could not start the authentication helper"),
-	}
+	return nil
 }
