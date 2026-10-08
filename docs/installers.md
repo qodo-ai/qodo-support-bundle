@@ -13,7 +13,7 @@ qodo-scout collect --interactive
 
 ## Publication status
 
-Version 0.3.0 is published at the immutable URLs below. Future versions require
+Version 0.3.1 is published at the immutable URLs below. Future versions require
 the manually dispatched dev and approved production workflows; merging
 publication code alone does not publish release objects. See
 [the publication contract and runbook](publication.md).
@@ -24,9 +24,9 @@ macOS and Linux customers can inspect and run:
 rm -f ./install-qodo-scout.sh
 curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 \
   -o ./install-qodo-scout.sh \
-  https://get.qodo.ai/support-bundle/releases/0.3.0/install.sh &&
+  https://get.qodo.ai/support-bundle/releases/0.3.1/install.sh &&
   less ./install-qodo-scout.sh
-sh ./install-qodo-scout.sh --version 0.3.0 --add-to-path
+sh ./install-qodo-scout.sh --version 0.3.1 --add-to-path
 ```
 
 Windows customers can inspect and run from PowerShell:
@@ -36,10 +36,10 @@ Remove-Item .\install-qodo-scout.ps1 -Force -ErrorAction SilentlyContinue
 curl.exe --fail --location --proto '=https' --tlsv1.2 `
   --proto-redir '=https' `
   --output install-qodo-scout.ps1 `
-  https://get.qodo.ai/support-bundle/releases/0.3.0/install.ps1
+  https://get.qodo.ai/support-bundle/releases/0.3.1/install.ps1
 if ($LASTEXITCODE -ne 0) { throw 'Installer download failed' }
 Get-Content .\install-qodo-scout.ps1
-& .\install-qodo-scout.ps1 -Version 0.3.0 -AddToPath
+& .\install-qodo-scout.ps1 -Version 0.3.1 -AddToPath
 ```
 
 For convenience, the same endpoints can be executed without saving a copy:
@@ -52,8 +52,8 @@ For convenience, the same endpoints can be executed without saving a copy:
   trap 'exit 1' HUP INT TERM
   curl -fL --proto '=https' --proto-redir '=https' --tlsv1.2 \
     -o "$installer" \
-    https://get.qodo.ai/support-bundle/releases/0.3.0/install.sh
-  sh "$installer" --version 0.3.0 --add-to-path
+    https://get.qodo.ai/support-bundle/releases/0.3.1/install.sh
+  sh "$installer" --version 0.3.1 --add-to-path
 )
 ```
 
@@ -65,9 +65,9 @@ For convenience, the same endpoints can be executed without saving a copy:
   try {
     curl.exe --fail --location --proto '=https' --proto-redir '=https' `
       --tlsv1.2 --output $installer `
-      https://get.qodo.ai/support-bundle/releases/0.3.0/install.ps1
+      https://get.qodo.ai/support-bundle/releases/0.3.1/install.ps1
     if ($LASTEXITCODE -ne 0) { throw 'Installer download failed' }
-    & $installer -Version 0.3.0 -AddToPath
+    & $installer -Version 0.3.1 -AddToPath
     if (-not $?) { throw 'Installer execution failed' }
   } finally {
     Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
@@ -88,11 +88,11 @@ administrator privileges or changes machine-wide PATH configuration.
 All installations are pinned for reproducibility:
 
 ```sh
-sh ./install-qodo-scout.sh --version 0.3.0 --add-to-path
+sh ./install-qodo-scout.sh --version 0.3.1 --add-to-path
 ```
 
 ```powershell
-& .\install-qodo-scout.ps1 -Version 0.3.0 -AddToPath
+& .\install-qodo-scout.ps1 -Version 0.3.1 -AddToPath
 ```
 
 The published artifact names remain
@@ -129,14 +129,14 @@ An approved local directory may contain the platform binary and the release's
 
 ```sh
 sh ./install.sh \
-  --version 0.3.0 \
+  --version 0.3.1 \
   --source-dir /approved/qodo-scout-release \
   --add-to-path
 ```
 
 ```powershell
 & .\install.ps1 `
-  -Version 0.3.0 `
+  -Version 0.3.1 `
   -SourceDir C:\Approved\QodoScoutRelease `
   -AddToPath
 ```
@@ -242,7 +242,7 @@ For independent provenance verification, download the versioned release assets
 from the matching GitHub release and verify their attestations:
 
 ```sh
-release_tag=v0.3.0
+release_tag=v0.3.1
 release_sha="$(
   gh api "repos/qodo-ai/qodo-support-bundle/commits/$release_tag" --jq .sha
 )"
