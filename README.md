@@ -6,9 +6,8 @@
 ![Supported platforms: macOS, Linux, and Windows](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-informational?style=flat-square)
 ![Safety: read-only diagnostic collection](https://img.shields.io/badge/safety-read--only%20diagnostic%20collection-success?style=flat-square)
 
-Qodo Scout is a portable CLI that collects bounded, redacted Kubernetes
-diagnostics into a local archive. It reads cluster data through the operator's
-existing `kubectl` access and never uploads the resulting bundle automatically.
+Qodo Scout collects redacted Kubernetes diagnostics into a local support archive using your existing `kubectl` access. Nothing is uploaded automatically—you inspect the archive and decide whether to share it.
+Available as a native binary for macOS, Linux, and Windows.
 
 ## Install
 
